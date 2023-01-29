@@ -1,0 +1,503 @@
+* {
+    box-sizing: border-box;
+    transition: 0.3ms ease-in-out;
+}
+
+.App {
+    text-align: center;
+    height: 100vh;
+    background-color: #020618;
+}
+
+.container {
+    display: flex;
+}
+
+.App-logo {
+    height: 40vmin;
+    pointer-events: none;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .App-logo {
+        animation: App-logo-spin infinite 20s linear;
+    }
+}
+
+.App-header {
+    background-color: #282c34;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+}
+
+.App-link {
+    color: #61dafb;
+}
+
+@keyframes App-logo-spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+.sideBar {
+    background-color: #171929;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    /*make the width static*/
+    width: 450px;
+}
+
+.sideBarHeader {
+    margin: 20px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+}
+
+.sideBarHeaderRight {
+    margin-left: 15px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+}
+
+.userName {
+    font-size: 45px;
+    font-weight: 600;
+}
+
+.changeUserName {
+    font-size: 20px;
+    font-weight: 400;
+    /*make the color slightly darker*/
+    color: #0081F5;
+}
+
+.seperator {
+    width: 100%;
+    height: 1px;
+    background-color: #0081F5;
+    margin: 10px 0;
+}
+
+.sideBarBody {
+    margin: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    /*make the hight so that the footer is at the bottom*/
+    height: calc(100% - 200px);
+}
+
+.sideBarTitle {
+    font-size: 40px;
+    font-weight: 600;
+    margin: 10px 0;
+}
+
+.sideBarBodyContentItem {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    margin: 10px 0;
+    /*make the box have the translucent effect with a slight bit of blue gradient*/
+    background: linear-gradient(90deg, rgba(0, 129, 245, 0.1) 0%, rgba(0, 129, 245, 0.1) 100%), #171929;
+    border-radius: 15px;
+    width: auto;
+    /*add padding to the sides*/
+    padding: 0 20px 0 10px;
+}
+
+.sideBarBodyContentItemLeft {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    margin: 10px 0;
+    border-radius: 15px;
+    width: 100%;
+}
+
+.userIconContainer {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+}
+
+.userIcon {
+    width: 90px;
+    height: 90px;
+    border-radius: 50%;
+    object-fit: cover;
+}
+
+.sideBarBodyContentItemRight {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    /*add margin on the sides*/
+    margin: 0 20px;
+    border-radius: 15px;
+}
+
+.sideBarBodyUserName {
+    font-size: 45px;
+    font-weight: 600;
+    text-align: start;
+}
+
+.sideBarFooter {
+    /*make the footer stick to the bottom*/
+    margin: 20px 10px;
+    display: flex;
+    font-size: 2rem;
+    color: white;
+    background-color: #171929;
+    width: 100%;
+    /*make the height so that nothing is visible under the footer*/
+    height: 100px
+
+}
+
+.sideBarFooterLeft {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    font-size: 2rem;
+    color: white;
+    /*fixed width*/
+    width: 300px;
+}
+
+.chatWindow {
+    /*background color darker than the sidebar*/
+    background-color: #020618;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    /*make the width be the rest of the screen*/
+    width: calc(100% - 450px);
+
+    /*make the height so the footer is at the bottom*/
+}
+
+.chatWindowHeader {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    text-align: center;
+    /*width is the rest of the screen*/
+    width: 100%;
+}
+
+.chatWindowHeaderTitle {
+    font-size: 40px;
+    font-weight: 600;
+    margin: 10px 0;
+}
+
+.chatWindowHeaderSubtitle {
+    font-size: 20px;
+    font-weight: 400;
+    /*make the color slightly darker*/
+    color: #0081F5;
+}
+
+.chatWindowBody {
+    margin: 20px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    font-size: calc(10px + 2vmin);
+    /*make the width so everything fits*/
+    width: calc(100% - 450px);
+    height: calc(100vh - 210px);
+}
+
+.chatWindowBodyMessage {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    margin: 10px 0;
+    border-radius: 15px;
+    width: content-box;
+    background-color: #171929;
+    padding: 1%;
+}
+
+.chatWindowBodyMessageLeft {
+    margin-right: 15px;
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    border-radius: 15px;
+}
+
+.chatWindowBodyMessageRight {
+    margin-left: 15px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    border-radius: 15px;
+}
+
+.chatWindowBodyMessageRightTop {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    font-size: calc(10px + 2vmin);
+    color: #0081F5;
+    border-radius: 15px;
+}
+
+.chatWindowBodyMessageUserName {
+    font-size: 30px;
+    font-weight: 600;
+    text-align: start;
+}
+
+.chatWindowBodyMessageTime {
+    font-size: 20px;
+    font-weight: 400;
+    text-align: start;
+    margin-left: 10px;
+    color: gray;
+}
+
+.chatWindowBodyMessageText {
+    font-size: 30px;
+    font-weight: 400;
+    text-align: start;
+}
+
+.chatWindowFooter {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    text-align: center;
+    /*width is the rest of the screen*/
+    width: 100%;
+}
+
+.chatWindowFooterLeft {
+    margin-left: 10px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+}
+
+.chatWindowFooterLeftItem {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    background-color: #171929;
+    border-radius: 15px;
+    margin-right: 10px;
+    /*make the button height the same as the input field*/
+    height: 50px;
+    width: 50px;
+    transition: 0.3s ease-in-out;
+
+}
+
+.chatWindowFooterLeftItem:hover {
+    /*add glow effect*/
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+    cursor: pointer;
+}
+
+.chatWindowFooterCenter {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    /*fixed width*/
+    width: 800px;
+    margin-left: 10px;
+    margin-right: 10px;
+}
+
+.chatWindowFooterCenterItem {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    margin: 10px 0;
+    background-color: #171929;
+    border-radius: 15px;
+    width: 100%;
+}
+
+.chatWindowFooterCenterItemInput {
+    /*make the input field look modern*/
+    border: none;
+    outline: none;
+    background-color: #171929;
+    color: white;
+    font-size: 20px;
+    font-weight: 400;
+    height: 50px;
+    padding: 10px;
+    border-radius: 10px;
+
+    /*make the width dynamic*/
+    width: 100%;
+
+    transition: 0.3s ease-in-out;
+
+}
+
+/*when in focus, make the border blue*/
+.chatWindowFooterCenterItemInput:hover {
+    /*add glow effect*/
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+    cursor: text;
+}
+
+.chatWindowFooterCenterItemInput:focus {
+    /*add glow effect*/
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+}
+
+.chatWindowFooterRight {
+    margin-left: 10px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+}
+
+.chatWindowFooterRightItem {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    background-color: #171929;
+    border-radius: 15px;
+    margin-right: 10px;
+    /*make the button height the same as the input field*/
+    height: 50px;
+    width: 50px;
+    transition: 0.3s ease-in-out;
+
+}
+
+.chatWindowFooterRightItem:hover {
+    /*add glow effect*/
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+    cursor: pointer;
+}
+
+@media (max-width: 400px) {
+    /*make the sidebar just contain the user name*/
+    .sideBarUser {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        justify-content: center;
+        font-size: calc(10px + 2vmin);
+        color: white;
+        background-color: #454545;
+        border-radius: 15px;
+        margin-right: 10px;
+        /*make the button height the same as the input field*/
+        height: 50px;
+        width: 50px;
+    }
+
+}
+
+/*make the sidebar disappear when the screen is too small*/
+@media (max-width: 1000px) {
+    .sideBar {
+        display: none;
+    }
+
+    /*make the rest of the content take the whole screen*/
+    .chatWindow {
+        width: 90%;
+    }
+
+    .chatWindowBody {
+        width: 90%;
+    }
+
+    .chatWindowFooter {
+        width: 90%;
+    }
+
+    .chatWindowFooterCenterItemInput {
+        width: 100%;
+    }
+
+}
