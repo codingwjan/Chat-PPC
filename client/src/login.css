@@ -2,7 +2,6 @@
     text-align: center;
     height: 100vh;
     background-color: #020618;
-    padding: 3%;
 }
 
 .loginTitle {
@@ -73,6 +72,36 @@
 }
 
 .loginContainerInput:hover {
+    /*add glow effect*/
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+}
+
+.profilePictureSelector {
+    width: 100%;
+    height: 60px;
+    border-radius: 5px;
+    border: none;
+    margin-bottom: 10px;
+    padding: 0 10px;
+    background-color: #171929;
+    background-size: contain;
+    background-repeat: no-repeat;
+    color: #fff;
+    font-size: 2rem;
+    /*no focus outline*/
+    outline: none;
+    transition: 0.3s ease-in-out;
+
+}
+
+.profilePictureSelector:focus {
+    /*add glow effect*/
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+}
+
+.profilePictureSelector:hover {
     /*add glow effect*/
     box-shadow: 0 0 10px #0081F5;
     transition: 0.3s ease-in-out;
