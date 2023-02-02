@@ -1,11 +1,32 @@
 import './App.css';
-import io from 'socket.io-client';
 import socketIOClient from "socket.io-client";
+import SideBarBodyContentItem from "./sideBarBodyContentItem";
+import {useState} from "react";
+
+
+//connect to socket on localhost:3001
+const socket = socketIOClient('http://localhost:3001');
+
+
+//connect to socket on localhost:3001
+window.onload = function () {
+    socket.emit("test", "chat window")
+}
+
+socket.emit("requestUsers", "");
+
+socket.on("users", (data) => {
+    console.log(data);
+    // decode the data
+    let users = JSON.parse(data);
+    // update the state with the new users
+    this.setState({ users });
+});
+
 
 function App() {
-
-    //connect to socket on localhost:3001
-    const socket = socketIOClient('http://localhost:3001');
+    //define users state
+    const [users, setUsers] = useState([]);
 
     socket.on('user connected', (data) => {
         console.log(data);
@@ -15,50 +36,6 @@ function App() {
         console.log("disconnected");
     });
 
-    socket.on("newUser", (data) => {
-        //decode the data
-        let decodedData = JSON.parse(data);
-        //get username and uuid
-        let username = decodedData.username;
-        console.log(username);
-        let profilePicture = decodedData.profilePicture;
-        //check if png or jpg or jpeg
-        let decodedProfilePicture = profilePicture.replace(/^data:image\/(png|jpg|jpeg);base64,/, "");
-        //decode the base64 into image
-        let binaryData = new Uint8Array(atob(decodedProfilePicture).split('').map(char => char.charCodeAt(0)));
-        let imageBlob = new Blob([binaryData.buffer], {type: 'image/png'});
-        let imageURL = URL.createObjectURL(imageBlob);
-
-        //create a new div element
-        let newDiv = document.createElement("div");
-        //add the class name
-        newDiv.className = "sideBarBodyContentItem";
-        //add the inner html
-        newDiv.innerHTML = `
-        <div class="sideBarBodyContentItemLeft">
-            <div class="userIconContainer">
-                <img class="userIcon" src="${imageURL}" alt="user icon"/>
-            </div>
-        </div>
-        <div class="sideBarBodyContentItemRight">
-            <div class="userName">${username}</div>
-        </div>
-
-        `;
-
-
-
-
-        //append the new div to the sideBarBodyContent div
-        document.getElementById("sideBarBodyContent").appendChild(newDiv);
-
-    });
-
-
-    socket.on('disconnect', () => {
-        console.log('disconnected');
-    });
-
     return (
         <div className="App">
             <div className="container">
@@ -66,12 +43,12 @@ function App() {
                     <div className="sideBarHeader">
                         <div className="userIconContainer">
                             <img className="userIcon"
-                                 src="https://media.licdn.com/dms/image/C4E03AQHjMxUP4jH5ZA/profile-displayphoto-shrink_400_400/0/1634832550563?e=1680739200&v=beta&t=Ukgdsk4N0kgLGnkJKUP03TY1i0wvfKbZSg43F5yAv58"
+                                 src="https://www.hdwallpaper.nu/wp-content/uploads/2017/02/monkey-11.jpg"
                                  alt="user icon"/>
 
                         </div>
                         <div className="sideBarHeaderRight">
-                            <div className="userName">ARP</div>
+                            <div className="userName">Monkey Yay</div>
                             <div className="changeUserName">Change Username</div>
                         </div>
                     </div>
@@ -80,19 +57,14 @@ function App() {
                         <div className="sideBarBodyHeader">
                             <div className="sideBarTitle">People Online:</div>
                         </div>
-                        <div id="sideBarBodyContent" className="sideBarBodyContent">
-                            <div className="sideBarBodyContentItem">
-                                <div className="sideBarBodyContentItemLeft">
-                                    <div className="userIconContainer">
-                                        <img className="userIcon"
-                                             src="https://media.licdn.com/dms/image/C4E03AQHjMxUP4jH5ZA/profile-displayphoto-shrink_400_400/0/1634832550563?e=1680739200&v=beta&t=Ukgdsk4N0kgLGnkJKUP03TY1i0wvfKbZSg43F5yAv58"
-                                             alt="user icon"/>
-                                    </div>
-                                    <div className="sideBarBodyContentItemRight">
-                                        <div className="sideBarBodyUserName">ARP</div>
-                                    </div>
-                                </div>
-                            </div>
+                        <div id="sideBarBodyContent">
+
+                            {users.map((user, index ) => {
+                                const userData = {
+                                    name: user.username
+                                };
+                                return <SideBarBodyContentItem key={index} userData={userData} />;
+                            })}
                         </div>
                     </div>
                     <footer className="sideBarFooter">
@@ -114,16 +86,16 @@ function App() {
                             <div className="chatWindowBodyMessageLeft">
                                 <div className="userIconContainer">
                                     <img className="userIcon"
-                                         src="https://media.licdn.com/dms/image/C4E03AQHjMxUP4jH5ZA/profile-displayphoto-shrink_400_400/0/1634832550563?e=1680739200&v=beta&t=Ukgdsk4N0kgLGnkJKUP03TY1i0wvfKbZSg43F5yAv58"
+                                         src="https://www.hdwallpaper.nu/wp-content/uploads/2017/02/monkey-11.jpg"
                                          alt="user icon"/>
                                 </div>
                                 <div className="chatWindowBodyMessageRight">
                                     <div className="chatWindowBodyMessageRightTop">
-                                        <div className="chatWindowBodyMessageUserName">ARP</div>
+                                        <div className="chatWindowBodyMessageUserName">Monkey Yay</div>
                                         <div className="chatWindowBodyMessageTime">12:00</div>
                                     </div>
                                     <div className="chatWindowBodyMessageRightBottom">
-                                        <div className="chatWindowBodyMessageText">Hello World</div>
+                                        <div className="chatWindowBodyMessageText">Im monkey what u want</div>
                                     </div>
                                 </div>
                             </div>
