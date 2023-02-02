@@ -127,7 +127,7 @@
     /*make the box have the translucent effect with a slight bit of blue gradient*/
     background: linear-gradient(90deg, rgba(0, 129, 245, 0.1) 0%, rgba(0, 129, 245, 0.1) 100%), #171929;
     border-radius: 15px;
-    width: auto;
+    width: 100%;
     /*add padding to the sides*/
     padding: 0 20px 0 10px;
 }
@@ -141,7 +141,6 @@
     color: white;
     margin: 10px 0;
     border-radius: 15px;
-    width: 100%;
 }
 
 .userIconContainer {

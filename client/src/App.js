@@ -46,7 +46,7 @@ const App = () => {
 
                         </div>
                         <div className="sideBarHeaderRight">
-                            <div className="userName">Monkey Yay</div>
+                            <div className="userName">{localStorage.getItem("username")}</div>
                             <div className="changeUserName">Change Username</div>
                         </div>
                     </div>

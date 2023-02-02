@@ -25,12 +25,6 @@ socket.on("userNotLoggedIn", (data) => {
 
 function Login() {
 
-    if (localStorage.getItem("username") !== null) {
-        //make the input field have the username
-        //document.getElementsByClassName("loginContainerInput")[0].value = localStorage.getItem("username");
-    }
-
-
     return (
         <div className="App">
             <div className="loginTitle">Welcome to Chat PPC</div>

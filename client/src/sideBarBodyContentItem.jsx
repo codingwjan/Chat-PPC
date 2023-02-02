@@ -4,9 +4,10 @@ const SideBarBodyContentItem = ({userData}) => {
 return (
     <div className="sideBarBodyContentItem">
         <div className="sideBarBodyContentItemLeft">
-            <div className="sideBarBodyContentItemRight">
-                <div className="sideBarBodyUserName">{userData.username}</div>
-            </div>
+            <img src="https://www.hdwallpaper.nu/wp-content/uploads/2017/02/monkey-11.jpg" alt="Avatar" className="userIcon"/>
+        </div>
+        <div className="sideBarBodyContentItemRight">
+            <div className="sideBarBodyUserName">{userData.username}</div>
         </div>
     </div>
 )}
