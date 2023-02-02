@@ -15,18 +15,16 @@ window.onload = function () {
 
 socket.emit("requestUsers", "");
 
-socket.on("users", (data) => {
-    console.log(data);
-    // decode the data
-    let users = JSON.parse(data);
-    // update the state with the new users
-    this.setState({ users });
-});
-
-
-function App() {
-    //define users state
+const App = () => {
     const [users, setUsers] = useState([]);
+
+    socket.on("users", (data) => {
+        console.log(data);
+        // decode the data
+        let usersData = JSON.parse(data);
+        // update the state with the new users
+        setUsers(usersData);
+    });
 
     socket.on('user connected', (data) => {
         console.log(data);
@@ -61,7 +59,7 @@ function App() {
 
                             {users.map((user, index ) => {
                                 const userData = {
-                                    name: user.username
+                                    username: user.username
                                 };
                                 return <SideBarBodyContentItem key={index} userData={userData} />;
                             })}
