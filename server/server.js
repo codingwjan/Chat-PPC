@@ -13,29 +13,59 @@ const io = require("socket.io")(httpServer, {
     cors: {origin: "*"}
 });
 
+
+//repeat every 2 seconds
+setInterval(() => {
+    //get the data from users.json
+    let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
+    //filter the users to only show online users
+    let onlineUsers = users.filter((user) => {
+        return user.isOnline === true;
+    });
+    //if there are online users
+    if (onlineUsers.length > 0) {
+        //stringify the data
+        let onlineUsersStringified = JSON.stringify(onlineUsers);
+        //send the data to the client
+        io.emit("onlineUsers", onlineUsersStringified);
+    }
+
+    //get the data from chat.json
+    let messages = JSON.parse(fs.readFileSync(path.join(__dirname, "chat.json")));
+    //stringify the data
+    let messagesStringified = JSON.stringify(messages);
+    //send the data to the client
+    io.emit("messages", messagesStringified);
+
+}, 2000);
+
 io.on("connection", (socket) => {
     connectionCount++;
     console.log(`Total connections: ${connectionCount}`);
 
-    socket.on("requestUserList", () => {
-        console.log("requestUserList");
-    });
-
-    socket.on("test", (data) => {
-        console.log(data)
+    socket.on("pong" , (data) => {
+        //look for the uuid that was given in the data
+        let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
+        //for each user in the users.json file
+        users.forEach((user) => {
+            //if the uuid matches the uuid in the data
+            if (user.uuid === parseInt(data)) {
+                //set the user to online
+                user.isOnline = true;
+            }
+        });
+        //write the new data to users.json
+        fs.writeFileSync(path.join(__dirname, "users.json"), JSON.stringify(users));
     });
 
     socket.on("newUserDetails", (data) => {
-        console.log("newUserDetails")
-        console.log(data)
         //decode the data
         let decodedData = JSON.parse(data);
         //get username and uuid
         let username = decodedData.username;
         let uuid = decodedData.uuid;
+        let socketId = socket.id;
         //let profilePicture = decodedData.profilePicture;
-
-        console.log(username);
 
         //replace the data:image/png or data:image/jpeg with nothing
         //profilePicture = profilePicture.replace(/^data:image\/(png|jpeg);base64,/, "");
@@ -47,12 +77,13 @@ io.on("connection", (socket) => {
         } else {
             //send userLoggedIn to the client
             socket.emit("userLoggedIn", "Username is allowed");
-            console.log("userLoggedIn")
             //add user to array list
             let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
             users.push({
                 username: username,
-                uuid: uuid
+                uuid: uuid,
+                isOnline: true,
+                socketId: socketId
             });
 
             //write the new array to the users.json file
@@ -71,7 +102,6 @@ io.on("connection", (socket) => {
     });
 
     socket.on("changeUserName", (data) => {
-        console.log(data)
         //decode the data
         let decodedData = JSON.parse(data);
         //get username and uuid
@@ -81,16 +111,10 @@ io.on("connection", (socket) => {
 
         uuid = parseInt(uuid)
 
-        console.log(username);
-        console.log(uuid);
-        console.log(oldUsername);
-
         //replace the new username in the users.json file
         let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
         for (let i = 0; i < users.length; i++) {
             if (users[i].uuid === uuid) {
-                console.log("found user")
-                console.log(users[i].username)
                 //clear the old username
                 users[i].username = username;
             }
@@ -99,22 +123,49 @@ io.on("connection", (socket) => {
         }
     });
 
-    //repeat every 2 seconds
-    setInterval(() => {
-        //get the data from users.json
-        let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
-        //stringify the data
-        let usersStringified = JSON.stringify(users);
-        //send the data to the client
-        socket.emit("users", usersStringified);
-    }, 5000);
+    socket.on("sendMessage", (data) => {
+        //decode the data
+        let decodedData = JSON.parse(data);
+        //get username and uuid
+        let username = decodedData.username;
+        let message = decodedData.message;
+        let uuid = decodedData.uuid;
+        let time = new Date().toLocaleTimeString();
+
+        uuid = parseInt(uuid)
+
+
+        //if message contains !ai
+        if (message.includes("!ai")) {
+
+        }
+        
+        //replace the new username in the users.json file
+        let messages = JSON.parse(fs.readFileSync(path.join(__dirname, "chat.json")));
+        messages.push({
+            username: username,
+            message: message,
+            uuid: uuid,
+            time: time
+        });
+        //write the new array to the users.json file
+        fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));
+    });
 
 
     socket.on("disconnect", () => {
         connectionCount--;
         console.log(`Client disconnected. Total connections: ${connectionCount}`);
+        //set every user to offline
+        let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
+        for (let i = 0; i < users.length; i++) {
+            users[i].isOnline = false;
+        }
+        //write the new array to the users.json file
+        fs.writeFileSync(path.join(__dirname, "users.json"), JSON.stringify(users));
     });
-    });
+});
+
 
     const port = 3001;
 

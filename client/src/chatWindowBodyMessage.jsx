@@ -1,7 +1,7 @@
 import react from 'react';
 import './App.css';
 
-const ChatWindowBodyMessage = (props) => {
+const ChatWindowBodyMessage = ({messageData}) => {
   return (
       <div className="chatWindowBodyMessage">
           <div className="chatWindowBodyMessageLeft">
@@ -12,11 +12,15 @@ const ChatWindowBodyMessage = (props) => {
               </div>
               <div className="chatWindowBodyMessageRight">
                   <div className="chatWindowBodyMessageRightTop">
-                      <div className="chatWindowBodyMessageUserName">Monkey Yay</div>
-                      <div className="chatWindowBodyMessageTime">12:00</div>
+                      <div className="chatWindowBodyMessageUserName">{messageData.username}</div>
+                      <div className="chatWindowBodyMessageTime">{
+                            messageData.time
+                      }</div>
                   </div>
                   <div className="chatWindowBodyMessageRightBottom">
-                      <div className="chatWindowBodyMessageText">Im monkey what u want</div>
+                      <div className="chatWindowBodyMessageText">{
+                            messageData.message
+                      }</div>
                   </div>
               </div>
           </div>

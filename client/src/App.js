@@ -9,22 +9,23 @@ import {useState} from "react";
 const socket = socketIOClient('http://localhost:3001');
 
 
-//connect to socket on localhost:3001
-window.onload = function () {
-    socket.emit("test", "chat window")
-}
-
-socket.emit("requestUsers", "");
-
 const App = () => {
     const [users, setUsers] = useState([]);
+    const [messages, setMessages] = useState([]);
 
-    socket.on("users", (data) => {
-        console.log(data);
+    socket.on("onlineUsers", (data) => {
         // decode the data
         let usersData = JSON.parse(data);
         // update the state with the new users
         setUsers(usersData);
+    });
+
+    socket.on("messages", (data) => {
+        // decode the data
+        let messagesData = JSON.parse(data);
+        // update the state with the new users
+        setMessages(messagesData);
+        scrollToBottom();
     });
 
     socket.on('user connected', (data) => {
@@ -61,7 +62,7 @@ const App = () => {
 
                             {users.map((user, index ) => {
                                 const userData = {
-                                    username: user.username
+                                    username: user.username,
                                 };
                                 return <SideBarBodyContentItem key={index} userData={userData} />;
                             })}
@@ -82,32 +83,14 @@ const App = () => {
                         <div className="chatWindowHeaderSubtitle">by ebayboy & cancelcloud</div>
                     </div>
                     <div className="chatWindowBody">
-                        <div className="chatWindowBodyMessage">
-                            <div className="chatWindowBodyMessageLeft">
-                                <div className="userIconContainer">
-                                    <img className="userIcon"
-                                         src="https://www.hdwallpaper.nu/wp-content/uploads/2017/02/monkey-11.jpg"
-                                         alt="user icon"/>
-                                </div>
-                                <div className="chatWindowBodyMessageRight">
-                                    <div className="chatWindowBodyMessageRightTop">
-                                        <div className="chatWindowBodyMessageUserName">Monkey Yay</div>
-                                        <div className="chatWindowBodyMessageTime">12:00</div>
-                                    </div>
-                                    <div className="chatWindowBodyMessageRightBottom">
-                                        <div className="chatWindowBodyMessageText">Im monkey what u want</div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        <ChatWindowBodyMessage />
-                        <ChatWindowBodyMessage />
-                        <ChatWindowBodyMessage />
-                        <ChatWindowBodyMessage />
-                        <ChatWindowBodyMessage />
-                        <ChatWindowBodyMessage />
-                        <ChatWindowBodyMessage />
-                        <ChatWindowBodyMessage />
+                        {messages.map((message, index) => {
+                            const messageData = {
+                                username: message.username,
+                                message: message.message,
+                                time: message.time
+                            };
+                            return <ChatWindowBodyMessage key={index} messageData={messageData} />;
+                        })}
 
 
 
@@ -145,12 +128,12 @@ const App = () => {
                         </div>
                         <div className="chatWindowFooterCenter">
                             <div className="chatWindowFooterCenterItem">
-                                <input className="chatWindowFooterCenterItemInput" type="text"
+                                <input id="chatWindowFooterCenterItemInput" className="chatWindowFooterCenterItemInput" type="text"
                                        placeholder="Type a message..."/>
                             </div>
                         </div>
                         <div className="chatWindowFooterRight">
-                            <div className="chatWindowFooterRightItem">
+                            <div className="chatWindowFooterRightItem" onClick={sendMessage}>
                                 <svg xmlns="http://www.w3.org/2000/svg"
                                      className="icon icon-tabler icon-tabler-brand-telegram" width="24" height="24"
                                      viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none"
@@ -165,6 +148,12 @@ const App = () => {
             </div>
         </div>
     );
+}
+
+//alsways scroll chatWindowBody to the bottom
+function scrollToBottom() {
+    var chatWindowBody = document.querySelector(".chatWindowBody");
+    chatWindowBody.scrollTop = chatWindowBody.scrollHeight;
 }
 
 function changeUserName() {
@@ -200,6 +189,41 @@ function saveUserName() {
         newusername: localStorage.getItem("username")
     }));
 
+}
+
+//listen for if enter is pressed
+document.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") {
+        sendMessage();
+    }
+});
+
+function sendMessage() {
+    //if the message contains more than spaces or is empty, don't send it
+    if (document.getElementsByClassName("chatWindowFooterCenterItemInput")[0].value.trim() === "") {
+        return;
+    } else {
+        var message = document.getElementsByClassName("chatWindowFooterCenterItemInput")[0].value;
+        document.getElementsByClassName("chatWindowFooterCenterItemInput")[0].value = "";
+
+        console.log("message: " + message);
+
+        //emit the message to the server
+        socket.emit("sendMessage", JSON.stringify({
+            uuid: localStorage.getItem("uuid"),
+            username: localStorage.getItem("username"),
+            message: message,
+            time: new Date().toLocaleTimeString()
+        }));
+    }
+}
+
+//repeat every 5 seconds
+setInterval(ping, 5000);
+
+function ping() {
+    console.log("ping")
+    socket.emit("pong", localStorage.getItem("uuid"));
 }
 
 export default App;
