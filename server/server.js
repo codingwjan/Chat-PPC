@@ -3,6 +3,8 @@ const app = express();
 const path = require("path");
 const fs = require("fs");
 const e = require("express");
+require('dotenv').config();
+const apiKey = process.env.OPENAI_API_KEY;
 
 let connectionCount = 0;
 
@@ -37,7 +39,7 @@ setInterval(() => {
     //send the data to the client
     io.emit("messages", messagesStringified);
 
-}, 2000);
+}, 1000);
 
 io.on("connection", (socket) => {
     connectionCount++;
@@ -123,7 +125,42 @@ io.on("connection", (socket) => {
         }
     });
 
+    async function openAI(message) {
+        console.log(message);
+        const {Configuration, OpenAIApi} = require("openai");
+        const configuration = new Configuration({
+            organization: "org-HlakusVgHRSN7V75rdzSS8qw",
+            apiKey: apiKey
+        });
+        const openai = new OpenAIApi(configuration);
+        const response = await openai.createCompletion({
+            model: "text-curie-001",
+            prompt: message,
+            max_tokens: 500,
+            temperature: 1,
+        });
+        let correctedresponse = response.data.choices[0].text;
+        //remove the first 2 \n from the response
+        correctedresponse = correctedresponse.substring(2);
+
+        //send the new message to all clients
+        io.emit("newMessage", JSON.stringify({
+            username: "GPT-3",
+            message: correctedresponse,
+            uuid: 0,
+        }));
+
+        let messages = JSON.parse(fs.readFileSync(path.join(__dirname, "chat.json")));
+        messages.push({
+            username: "GPT-3",
+            message: correctedresponse,
+            uuid: 0,
+        });
+        fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));
+    }
+
     socket.on("sendMessage", (data) => {
+        console.log(data)
         //decode the data
         let decodedData = JSON.parse(data);
         //get username and uuid
@@ -137,9 +174,17 @@ io.on("connection", (socket) => {
 
         //if message contains !ai
         if (message.includes("!ai")) {
-
+            openAI(message);
         }
-        
+
+        //send the new message to all clients
+        io.emit("newMessage", JSON.stringify({
+            username: username,
+            message: message,
+            uuid: uuid,
+            time: time
+        }));
+
         //replace the new username in the users.json file
         let messages = JSON.parse(fs.readFileSync(path.join(__dirname, "chat.json")));
         messages.push({

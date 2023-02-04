@@ -19,7 +19,14 @@ const ChatWindowBodyMessage = ({messageData}) => {
                   </div>
                   <div className="chatWindowBodyMessageRightBottom">
                       <div className="chatWindowBodyMessageText">{
-                            messageData.message
+                            //messageData.message but \n is not working
+                            messageData.message.split('').map((word, index) => {
+                                if (word === '\n') {
+                                    return <br key={index}/>
+                                }
+                                return word + ''
+                            }
+                            )
                       }</div>
                   </div>
               </div>

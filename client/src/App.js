@@ -24,8 +24,16 @@ const App = () => {
         // decode the data
         let messagesData = JSON.parse(data);
         // update the state with the new users
-        setMessages(messagesData);
-        scrollToBottom();
+
+        let chatWindowBody = document.getElementById("chatWindowBody");
+        let scrollPosition = chatWindowBody.scrollTop;
+
+        if (scrollPosition === chatWindowBody.scrollHeight - chatWindowBody.clientHeight) {
+            setMessages(messagesData);
+            chatWindowBody.scrollTop = chatWindowBody.scrollHeight;
+        } else {
+            setMessages(messagesData);
+        }
     });
 
     socket.on('user connected', (data) => {
@@ -84,6 +92,7 @@ const App = () => {
                     </div>
                     <div className="chatWindowBody">
                         {messages.map((message, index) => {
+                            //replace \n with <br>  inside the message
                             const messageData = {
                                 username: message.username,
                                 message: message.message,
@@ -150,11 +159,6 @@ const App = () => {
     );
 }
 
-//alsways scroll chatWindowBody to the bottom
-function scrollToBottom() {
-    var chatWindowBody = document.querySelector(".chatWindowBody");
-    chatWindowBody.scrollTop = chatWindowBody.scrollHeight;
-}
 
 function changeUserName() {
     localStorage.setItem("oldusername", localStorage.getItem("username"));
