@@ -1,6 +1,7 @@
 import './App.css';
 import socketIOClient from "socket.io-client";
 import SideBarBodyContentItem from "./sideBarBodyContentItem";
+import ChatWindowBodyMessage from "./chatWindowBodyMessage";
 import {useState} from "react";
 
 
@@ -46,8 +47,9 @@ const App = () => {
 
                         </div>
                         <div className="sideBarHeaderRight">
-                            <div className="userName">{localStorage.getItem("username")}</div>
-                            <div className="changeUserName">Change Username</div>
+                            <div id="userName" className="userName">{localStorage.getItem("username")}</div>
+                            <div id="changeUserName" className="changeUserName" onClick={changeUserName}>Change Username</div>
+                            <div id="saveUserName" className="saveUserName" onClick={saveUserName}>Save Username</div>
                         </div>
                     </div>
                     <div className="seperator"/>
@@ -55,7 +57,7 @@ const App = () => {
                         <div className="sideBarBodyHeader">
                             <div className="sideBarTitle">People Online:</div>
                         </div>
-                        <div id="sideBarBodyContent">
+                        <div className="sideBarBodyContent" id="sideBarBodyContent">
 
                             {users.map((user, index ) => {
                                 const userData = {
@@ -98,6 +100,16 @@ const App = () => {
                                 </div>
                             </div>
                         </div>
+                        <ChatWindowBodyMessage />
+                        <ChatWindowBodyMessage />
+                        <ChatWindowBodyMessage />
+                        <ChatWindowBodyMessage />
+                        <ChatWindowBodyMessage />
+                        <ChatWindowBodyMessage />
+                        <ChatWindowBodyMessage />
+                        <ChatWindowBodyMessage />
+
+
 
                     </div>
                     <div className="chatWindowFooter">
@@ -153,6 +165,41 @@ const App = () => {
             </div>
         </div>
     );
+}
+
+function changeUserName() {
+    localStorage.setItem("oldusername", localStorage.getItem("username"));
+    //replace the change button with save button
+    document.getElementById("changeUserName").style.display = "none";
+    document.getElementById("saveUserName").style.display = "block";
+
+    //make div editable
+    document.getElementById("userName").contentEditable = true;
+    document.getElementById("userName").focus();
+}
+
+function saveUserName() {
+    //replace the save button with change button
+    document.getElementById("saveUserName").style.display = "none";
+    document.getElementById("changeUserName").style.display = "block";
+
+    //make div editable
+    document.getElementById("userName").contentEditable = false;
+
+    //save the new username
+    var newUserName = document.getElementById("userName").innerHTML;
+    localStorage.setItem("username", newUserName);
+    console.log("new username: " + localStorage.getItem("username"));
+
+    console.log("update request sent")
+
+    //emit the new username with the uuid from local storage and the old username to the server
+    socket.emit("changeUserName", JSON.stringify({
+        uuid: localStorage.getItem("uuid"),
+        oldusername: localStorage.getItem("oldusername"),
+        newusername: localStorage.getItem("username")
+    }));
+
 }
 
 export default App;

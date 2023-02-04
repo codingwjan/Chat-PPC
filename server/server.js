@@ -70,15 +70,44 @@ io.on("connection", (socket) => {
         }, 1000);
     });
 
-    socket.on("requestUsers", () => {
+    socket.on("changeUserName", (data) => {
+        console.log(data)
+        //decode the data
+        let decodedData = JSON.parse(data);
+        //get username and uuid
+        let username = decodedData.newusername;
+        let uuid = decodedData.uuid;
+        let oldUsername = decodedData.oldusername;
+
+        uuid = parseInt(uuid)
+
+        console.log(username);
+        console.log(uuid);
+        console.log(oldUsername);
+
+        //replace the new username in the users.json file
+        let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
+        for (let i = 0; i < users.length; i++) {
+            if (users[i].uuid === uuid) {
+                console.log("found user")
+                console.log(users[i].username)
+                //clear the old username
+                users[i].username = username;
+            }
+            //write the new array to the users.json file
+            fs.writeFileSync(path.join(__dirname, "users.json"), JSON.stringify(users));
+        }
+    });
+
+    //repeat every 2 seconds
+    setInterval(() => {
         //get the data from users.json
         let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
         //stringify the data
         let usersStringified = JSON.stringify(users);
-        console.log(usersStringified)
         //send the data to the client
         socket.emit("users", usersStringified);
-    });
+    }, 5000);
 
 
     socket.on("disconnect", () => {

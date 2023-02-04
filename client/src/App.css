@@ -1,6 +1,7 @@
 * {
     box-sizing: border-box;
     transition: 0.3ms ease-in-out;
+
 }
 
 .App {
@@ -56,7 +57,8 @@
     font-size: calc(10px + 2vmin);
     color: white;
     /*make the width static*/
-    width: 450px;
+    width: 350px;
+    height: 100vh;
 }
 
 .sideBarHeader {
@@ -67,6 +69,7 @@
     justify-content: center;
     font-size: calc(10px + 2vmin);
     color: white;
+    max-height: 200px;
 }
 
 .sideBarHeaderRight {
@@ -80,8 +83,11 @@
 }
 
 .userName {
-    font-size: 45px;
+    font-size: 40px;
     font-weight: 600;
+    /*make it un editable*/
+    user-select: none;
+    text-align: start;
 }
 
 .changeUserName {
@@ -89,6 +95,25 @@
     font-weight: 400;
     /*make the color slightly darker*/
     color: #0081F5;
+    cursor: pointer;
+    transition: 0.3ms ease-in-out;
+}
+
+.saveUserName {
+    display: none;
+    font-size: 20px;
+    font-weight: 400;
+    /*make the color slightly darker*/
+    color: #0081F5;
+    cursor: pointer;
+    transition: 0.3ms ease-in-out;
+}
+
+.changeUserName:hover {
+    /*make the color slightly lighter*/
+    color: #0081F5;
+    opacity: 0.8;
+    transition: 0.3ms ease-in-out;
 }
 
 .seperator {
@@ -99,7 +124,7 @@
 }
 
 .sideBarBody {
-    margin: 20px;
+    padding: 20px;
     display: flex;
     flex-direction: column;
     align-items: flex-start;
@@ -107,13 +132,36 @@
     font-size: calc(10px + 2vmin);
     color: white;
     /*make the hight so that the footer is at the bottom*/
-    height: calc(100% - 200px);
+    width: 350px;
+    height: calc(100vh - 300px);
 }
 
 .sideBarTitle {
-    font-size: 40px;
+    font-size: 30px;
     font-weight: 600;
     margin: 10px 0;
+}
+
+.sideBarBodyContent {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    /*make the width so that the text is not cut off*/
+    width: 100%;
+
+    overflow-y: scroll;
+    overflow-x: hidden;
+    height: calc(100vh - 400px);
+}
+
+.sideBarBodyContent::-webkit-scrollbar {
+    display: none;
+}
+.sideBarBodyContent {
+    -ms-overflow-style: none; /* Internet Explorer 10+ */
 }
 
 .sideBarBodyContentItem {
@@ -123,11 +171,13 @@
     justify-content: flex-start;
     font-size: calc(10px + 2vmin);
     color: white;
-    margin: 10px 0;
+    margin-top: 10px;
     /*make the box have the translucent effect with a slight bit of blue gradient*/
     background: linear-gradient(90deg, rgba(0, 129, 245, 0.1) 0%, rgba(0, 129, 245, 0.1) 100%), #171929;
     border-radius: 15px;
-    width: 100R%;
+    /*make the width so that the text is not cut off*/
+    width: 100%;
+
     /*add padding to the sides*/
     padding: 0 20px 0 10px;
 }
@@ -153,8 +203,8 @@
 }
 
 .userIcon {
-    width: 90px;
-    height: 90px;
+    width: 70px;
+    height: 70px;
     border-radius: 50%;
     object-fit: cover;
 }
@@ -172,7 +222,7 @@
 }
 
 .sideBarBodyUserName {
-    font-size: 45px;
+    font-size: 30px;
     font-weight: 600;
     text-align: start;
 }
@@ -211,7 +261,7 @@
     font-size: calc(10px + 2vmin);
     color: white;
     /*make the width be the rest of the screen*/
-    width: calc(100% - 450px);
+    width: calc(100% - 350px);
 
     /*make the height so the footer is at the bottom*/
 }
@@ -249,8 +299,16 @@
     justify-content: flex-start;
     font-size: calc(10px + 2vmin);
     /*make the width so everything fits*/
-    width: calc(100% - 450px);
+    width: calc(100% - 350px);
     height: calc(100vh - 210px);
+
+    /*make it scrollable*/
+    overflow-y: scroll;
+    overflow-x: hidden;
+}
+
+.chatWindowBody::-webkit-scrollbar {
+    display: none;
 }
 
 .chatWindowBodyMessage {
@@ -261,7 +319,6 @@
     color: white;
     margin: 10px 0;
     border-radius: 15px;
-    width: content-box;
     background-color: #171929;
     padding: 1%;
 }
@@ -299,7 +356,7 @@
 }
 
 .chatWindowBodyMessageUserName {
-    font-size: 30px;
+    font-size: 25px;
     font-weight: 600;
     text-align: start;
 }
@@ -328,6 +385,7 @@
     text-align: center;
     /*width is the rest of the screen*/
     width: 100%;
+    background-color: #020618;
 }
 
 .chatWindowFooterLeft {
