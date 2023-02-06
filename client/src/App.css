@@ -481,6 +481,40 @@
     transition: 0.3s ease-in-out;
 }
 
+.chatWindowFooterCenterItemInputHidden {
+    /*make the input field look modern*/
+    border: none;
+    outline: none;
+    background-color: #171929;
+    color: white;
+    font-size: 20px;
+    font-weight: 400;
+    height: 50px;
+    padding: 10px;
+    border-radius: 10px;
+
+    /*make the width dynamic*/
+    width: 100%;
+
+    transition: 0.3s ease-in-out;
+
+    display: none;
+
+}
+
+.chatWindowFooterCenterItemInputHidden:focus {
+    /*add glow effect*/
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+}
+
+.chatWindowFooterCenterItemInputHidden:hover {
+    /*add glow effect*/
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+    cursor: text;
+}
+
 .chatWindowFooterRight {
     margin-left: 10px;
     display: flex;
@@ -509,6 +543,29 @@
 }
 
 .chatWindowFooterRightItem:hover {
+    /*add glow effect*/
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+    cursor: pointer;
+}
+
+.chatWindowFooterRightItemHidden {
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    background-color: #171929;
+    border-radius: 15px;
+    margin-right: 10px;
+    /*make the button height the same as the input field*/
+    height: 50px;
+    width: 50px;
+    transition: 0.3s ease-in-out;
+    display: none;
+}
+
+.chatWindowFooterRightItemHidden:hover {
     /*add glow effect*/
     box-shadow: 0 0 10px #0081F5;
     transition: 0.3s ease-in-out;

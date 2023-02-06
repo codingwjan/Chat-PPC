@@ -125,7 +125,7 @@ io.on("connection", (socket) => {
         }
     });
 
-    async function openAI(message) {
+    async function openAI(message, time) {
         console.log(message);
         const {Configuration, OpenAIApi} = require("openai");
         const configuration = new Configuration({
@@ -155,6 +155,8 @@ io.on("connection", (socket) => {
             username: "GPT-3",
             message: correctedresponse,
             uuid: 0,
+            time: time,
+            type: "message"
         });
         fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));
     }
@@ -168,13 +170,18 @@ io.on("connection", (socket) => {
         let message = decodedData.message;
         let uuid = decodedData.uuid;
         let time = new Date().toLocaleTimeString();
+        let type = decodedData.type;
+        let optionone = decodedData.optionone;
+        let optiontwo = decodedData.optiontwo;
+        let uuid1 = decodedData.uuid1;
+        let uuid2 = decodedData.uuid2;
 
         uuid = parseInt(uuid)
 
 
         //if message contains !ai
         if (message.includes("!ai")) {
-            openAI(message);
+            openAI(message, time);
         }
 
         //send the new message to all clients
@@ -182,7 +189,12 @@ io.on("connection", (socket) => {
             username: username,
             message: message,
             uuid: uuid,
-            time: time
+            time: time,
+            type: type,
+            optionone: optionone,
+            optiontwo: optiontwo,
+            uuid1: uuid1,
+            uuid2: uuid2
         }));
 
         //replace the new username in the users.json file
@@ -191,7 +203,12 @@ io.on("connection", (socket) => {
             username: username,
             message: message,
             uuid: uuid,
-            time: time
+            time: time,
+            type: type,
+            optionone: optionone,
+            optiontwo: optiontwo,
+            uuid1: uuid1,
+            uuid2: uuid2
         });
         //write the new array to the users.json file
         fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));

@@ -3,6 +3,8 @@ import socketIOClient from "socket.io-client";
 import SideBarBodyContentItem from "./sideBarBodyContentItem";
 import ChatWindowBodyMessage from "./chatWindowBodyMessage";
 import {useState} from "react";
+import VotingWidget from "./votingWidget";
+import {v4 as uuidv4} from 'uuid';
 
 
 //connect to socket on localhost:3001
@@ -25,15 +27,7 @@ const App = () => {
         let messagesData = JSON.parse(data);
         // update the state with the new users
 
-        let chatWindowBody = document.getElementById("chatWindowBody");
-        let scrollPosition = chatWindowBody.scrollTop;
-
-        if (scrollPosition === chatWindowBody.scrollHeight - chatWindowBody.clientHeight) {
-            setMessages(messagesData);
-            chatWindowBody.scrollTop = chatWindowBody.scrollHeight;
-        } else {
-            setMessages(messagesData);
-        }
+        setMessages(messagesData);
     });
 
     socket.on('user connected', (data) => {
@@ -91,14 +85,31 @@ const App = () => {
                         <div className="chatWindowHeaderSubtitle">by ebayboy & cancelcloud</div>
                     </div>
                     <div className="chatWindowBody">
+
                         {messages.map((message, index) => {
-                            //replace \n with <br>  inside the message
-                            const messageData = {
-                                username: message.username,
-                                message: message.message,
-                                time: message.time
-                            };
-                            return <ChatWindowBodyMessage key={index} messageData={messageData} />;
+                            //if the type is votingPoll, create a votingPoll
+                            if (message.type === "votingPoll") {
+                                const votingPollData = {
+                                    username: message.username,
+                                    message: message.message,
+                                    time: message.time,
+                                    optionone: message.optionone,
+                                    optiontwo: message.optiontwo,
+                                    uuid: message.uuid,
+                                    uuid1: message.uuid1,
+                                    uuid2: message.uuid2,
+                                };
+                                return <VotingWidget key={index} votingPollData={votingPollData}/>;
+                            }
+                            //else create a normal message
+                            else if (message.type === "message") {
+                                const messageData = {
+                                    username: message.username,
+                                    message: message.message,
+                                    time: message.time
+                                };
+                                return <ChatWindowBodyMessage key={index} messageData={messageData}/>;
+                            }
                         })}
 
 
@@ -106,7 +117,7 @@ const App = () => {
                     </div>
                     <div className="chatWindowFooter">
                         <div className="chatWindowFooterLeft">
-                            <div className="chatWindowFooterLeftItem">
+                            <div className="chatWindowFooterLeftItem" onClick={createVotingPoll}>
                                 <svg xmlns="http://www.w3.org/2000/svg"
                                      className="icon icon-tabler icon-tabler-chart-bar" width="24" height="24"
                                      viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none"
@@ -139,10 +150,21 @@ const App = () => {
                             <div className="chatWindowFooterCenterItem">
                                 <input id="chatWindowFooterCenterItemInput" className="chatWindowFooterCenterItemInput" type="text"
                                        placeholder="Type a message..."/>
+                                <input id="createVotingPollInput" className="chatWindowFooterCenterItemInputHidden" type="text" placeholder="Enter a question..."/>
+                                <input id="votingPollOption1" className="chatWindowFooterCenterItemInputHidden" type="text" placeholder="Enter option 1..."/>
+                                <input id="votingPollOption2" className="chatWindowFooterCenterItemInputHidden" type="text" placeholder="Enter option 2..."/>
                             </div>
                         </div>
                         <div className="chatWindowFooterRight">
-                            <div className="chatWindowFooterRightItem" onClick={sendMessage}>
+                            <div id="chatWindowFooterRightItemHidden" className="chatWindowFooterRightItemHidden" onClick={sendVotingPoll}>
+                                <svg xmlns="http://www.w3.org/2000/svg" className="icon icon-tabler icon-tabler-check"
+                                     width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"
+                                     fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                    <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+                                    <path d="M5 12l5 5l10 -10"></path>
+                                </svg>
+                            </div>
+                            <div id="chatWindowFooterRightItem" className="chatWindowFooterRightItem" onClick={sendMessage}>
                                 <svg xmlns="http://www.w3.org/2000/svg"
                                      className="icon icon-tabler icon-tabler-brand-telegram" width="24" height="24"
                                      viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none"
@@ -195,6 +217,62 @@ function saveUserName() {
 
 }
 
+function createVotingPoll() {
+    //remove the middle input field and replace with 3 input fields
+    document.getElementById("chatWindowFooterCenterItemInput").style.display = "none";
+    document.getElementById("createVotingPollInput").style.display = "block";
+    document.getElementById("votingPollOption1").style.display = "block";
+    document.getElementById("votingPollOption2").style.display = "block";
+    document.getElementById("chatWindowFooterRightItem").style.display = "none";
+    document.getElementById("chatWindowFooterRightItemHidden").style.display = "flex";
+    document.getElementById("createVotingPollInput1").focus();
+}
+
+function sendVotingPoll() {
+    //if the message contains more than spaces or is empty, don't send it
+    if (document.getElementById("createVotingPollInput").value.trim() === "") {
+        return;
+    } else {
+        var message = document.getElementById("createVotingPollInput").value;
+        document.getElementById("createVotingPollInput").value = "";
+
+        var optionone = document.getElementById("votingPollOption1").value;
+        document.getElementById("votingPollOption1").value = "";
+
+        var optiontwo = document.getElementById("votingPollOption2").value;
+        document.getElementById("votingPollOption2").value = "";
+
+        document.getElementById("chatWindowFooterRightItem").style.display = "flex";
+        document.getElementById("chatWindowFooterRightItemHidden").style.display = "none";
+
+
+        console.log("message: " + message);
+
+        //generate 2 random uuids for the voting poll
+        let uuid1 = uuidv4();
+        let uuid2 = uuidv4();
+
+        //emit the message to the server
+        socket.emit("sendMessage", JSON.stringify({
+            uuid: localStorage.getItem("uuid"),
+            username: localStorage.getItem("username"),
+            message: message,
+            optionone: optionone,
+            optiontwo: optiontwo,
+            time: new Date().toLocaleTimeString(),
+            type: "votingPoll",
+            uuid1: uuid1,
+            uuid2: uuid2
+        }));
+
+        //remove the middle input field and replace with 3 input fields
+        document.getElementById("chatWindowFooterCenterItemInput").style.display = "block";
+        document.getElementById("createVotingPollInput").style.display = "none";
+        document.getElementById("votingPollOption1").style.display = "none";
+        document.getElementById("votingPollOption2").style.display = "none";
+    }
+}
+
 //listen for if enter is pressed
 document.addEventListener("keydown", function (e) {
     if (e.key === "Enter") {
@@ -217,7 +295,8 @@ function sendMessage() {
             uuid: localStorage.getItem("uuid"),
             username: localStorage.getItem("username"),
             message: message,
-            time: new Date().toLocaleTimeString()
+            time: new Date().toLocaleTimeString(),
+            type: "message"
         }));
     }
 }
