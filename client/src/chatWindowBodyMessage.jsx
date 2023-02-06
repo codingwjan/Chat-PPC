@@ -7,7 +7,7 @@ const ChatWindowBodyMessage = ({messageData}) => {
           <div className="chatWindowBodyMessageLeft">
               <div className="userIconContainer">
                   <img className="userIcon"
-                       src="https://www.hdwallpaper.nu/wp-content/uploads/2017/02/monkey-11.jpg"
+                       src={messageData.profilePicture}
                        alt="user icon"/>
               </div>
               <div className="chatWindowBodyMessageRight">

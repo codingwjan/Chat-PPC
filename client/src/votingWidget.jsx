@@ -1,9 +1,22 @@
-import react from "react";
 import "./widget.css";
-
 const VotingWidget = ({votingPollData}) => {
+
     let votingOptionLeft = document.getElementById(votingPollData.uuid1);
     let votingOptionRight = document.getElementById(votingPollData.uuid2);
+
+        if(localStorage.getItem(votingPollData.uuid1) === "voted"){
+            //wait for the page to load
+            setTimeout(() => {
+                clickOptionLeft();
+            }, 1000);
+        } else if(localStorage.getItem(votingPollData.uuid2) === "voted"){
+            //wait for the page to load
+            setTimeout(() => {
+                clickOptionRight();
+            }, 1000);
+        }
+
+
     return (
         <div className="votingWidget">
             <div className="votingWidgetTop">
@@ -28,6 +41,7 @@ const VotingWidget = ({votingPollData}) => {
                                 <path d="M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"></path>
                                 <path d="M9 12l2 2l4 -4"></path>
                             </svg>
+                            <div id={votingPollData.uuid1+"count"} className="votingOptionVoteButtonDescription">Votes show after click   </div>
                         </div>
                     </div>
                     <div id={votingPollData.uuid2} className="votingOptionRight" onClick={clickOptionRight}>
@@ -41,6 +55,7 @@ const VotingWidget = ({votingPollData}) => {
                                 <path d="M12 12m-9 0a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"></path>
                                 <path d="M9 12l2 2l4 -4"></path>
                             </svg>
+                            <div id={votingPollData.uuid2+"count"} className="votingOptionVoteButtonDescription">Votes show after click</div>
                         </div>
                     </div>
                 </div>
@@ -48,14 +63,24 @@ const VotingWidget = ({votingPollData}) => {
         </div>
     );
 
+
     function clickOptionLeft() {
+
         //make the text and the check mark green
         votingOptionLeft.style.color = "green";
+
+
+        document.getElementById(votingPollData.uuid1+"count").innerHTML = "Votes: " + votingPollData.resultone;
+        document.getElementById(votingPollData.uuid2+"count").innerHTML = "Votes: " + votingPollData.resulttwo;
 
         //make the other text unclickable
         votingOptionRight.style.pointerEvents = "none";
         //cursor: not-allowed;
         votingOptionRight.style.cursor = "not-allowed";
+
+        //save the vote in local storage
+        localStorage.setItem(votingPollData.uuid1, "voted");
+        localStorage.setItem(votingPollData.uuid2, "notvoted");
         
     }
 
@@ -66,6 +91,15 @@ const VotingWidget = ({votingPollData}) => {
         votingOptionLeft.style.pointerEvents = "none";
         //cursor: not-allowed;
         votingOptionLeft.style.cursor = "not-allowed";
+
+
+        document.getElementById(votingPollData.uuid1+"count").innerHTML = "Votes: " + votingPollData.resultone;
+        document.getElementById(votingPollData.uuid2+"count").innerHTML = "Votes: " + votingPollData.resulttwo;
+
+        //save the vote in local storage
+        localStorage.setItem(votingPollData.uuid1, "notvoted");
+        localStorage.setItem(votingPollData.uuid2, "voted");
+
     }
 }
 

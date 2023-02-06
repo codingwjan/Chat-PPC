@@ -42,8 +42,14 @@ setInterval(() => {
 }, 1000);
 
 io.on("connection", (socket) => {
+
     connectionCount++;
     console.log(`Total connections: ${connectionCount}`);
+
+
+    socket.on("test", (data) => {
+        console.log(data);
+    });
 
     socket.on("pong" , (data) => {
         //look for the uuid that was given in the data
@@ -67,7 +73,7 @@ io.on("connection", (socket) => {
         let username = decodedData.username;
         let uuid = decodedData.uuid;
         let socketId = socket.id;
-        //let profilePicture = decodedData.profilePicture;
+        let profilePicture = decodedData.profilePicture;
 
         //replace the data:image/png or data:image/jpeg with nothing
         //profilePicture = profilePicture.replace(/^data:image\/(png|jpeg);base64,/, "");
@@ -85,7 +91,8 @@ io.on("connection", (socket) => {
                 username: username,
                 uuid: uuid,
                 isOnline: true,
-                socketId: socketId
+                socketId: socketId,
+                profilePicture: profilePicture
             });
 
             //write the new array to the users.json file
@@ -97,8 +104,8 @@ io.on("connection", (socket) => {
         setTimeout(() => {
         //send new username and profile picture to all clients
             io.emit("newUser", JSON.stringify({
-                username: username
-                //profilePicture: profilePicture
+                username: username,
+                profilePicture: profilePicture
             }));
         }, 1000);
     });
@@ -109,7 +116,6 @@ io.on("connection", (socket) => {
         //get username and uuid
         let username = decodedData.newusername;
         let uuid = decodedData.uuid;
-        let oldUsername = decodedData.oldusername;
 
         uuid = parseInt(uuid)
 
@@ -119,6 +125,52 @@ io.on("connection", (socket) => {
             if (users[i].uuid === uuid) {
                 //clear the old username
                 users[i].username = username;
+            }
+            //write the new array to the users.json file
+            fs.writeFileSync(path.join(__dirname, "users.json"), JSON.stringify(users));
+        }
+    });
+
+    socket.on("startTyping", (data) => {
+        console.log(data);
+        //decode the data
+        let decodedData = JSON.parse(data);
+        //get username and uuid
+        let uuid = decodedData.uuid;
+        let status = decodedData.status;
+
+        uuid = parseInt(uuid)
+
+        //search for the user in the users.json file
+        let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
+        for (let i = 0; i < users.length; i++) {
+            if (users[i].uuid === uuid) {
+                console.log("found user")
+                //set the user to typing
+                users[i].status = status;
+            }
+            //write the new array to the users.json file
+            fs.writeFileSync(path.join(__dirname, "users.json"), JSON.stringify(users));
+        }
+    });
+
+    socket.on("stopTyping", (data) => {
+        console.log(data);
+        //decode the data
+        let decodedData = JSON.parse(data);
+        //get username and uuid
+        let uuid = decodedData.uuid;
+        let status = decodedData.status;
+
+        uuid = parseInt(uuid)
+
+        //search for the user in the users.json file
+        let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
+        for (let i = 0; i < users.length; i++) {
+            if (users[i].uuid === uuid) {
+                console.log("found user")
+                //set the user to typing
+                users[i].status = status;
             }
             //write the new array to the users.json file
             fs.writeFileSync(path.join(__dirname, "users.json"), JSON.stringify(users));
@@ -148,6 +200,7 @@ io.on("connection", (socket) => {
             username: "GPT-3",
             message: correctedresponse,
             uuid: 0,
+            profilePicture: "https://seeklogo.com/images/C/chatgpt-logo-02AFA704B5-seeklogo.com.png",
         }));
 
         let messages = JSON.parse(fs.readFileSync(path.join(__dirname, "chat.json")));
@@ -156,7 +209,8 @@ io.on("connection", (socket) => {
             message: correctedresponse,
             uuid: 0,
             time: time,
-            type: "message"
+            type: "message",
+            profilePicture: "https://seeklogo.com/images/C/chatgpt-logo-02AFA704B5-seeklogo.com.png",
         });
         fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));
     }
@@ -175,6 +229,7 @@ io.on("connection", (socket) => {
         let optiontwo = decodedData.optiontwo;
         let uuid1 = decodedData.uuid1;
         let uuid2 = decodedData.uuid2;
+        let profilePicture = "https://www.nailseatowncouncil.gov.uk/wp-content/uploads/blank-profile-picture-973460_1280.jpg"
 
         uuid = parseInt(uuid)
 
@@ -194,7 +249,8 @@ io.on("connection", (socket) => {
             optionone: optionone,
             optiontwo: optiontwo,
             uuid1: uuid1,
-            uuid2: uuid2
+            uuid2: uuid2,
+            profilePicture: profilePicture
         }));
 
         //replace the new username in the users.json file
@@ -208,7 +264,8 @@ io.on("connection", (socket) => {
             optionone: optionone,
             optiontwo: optiontwo,
             uuid1: uuid1,
-            uuid2: uuid2
+            uuid2: uuid2,
+            profilePicture: profilePicture
         });
         //write the new array to the users.json file
         fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));

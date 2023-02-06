@@ -8,8 +8,6 @@ socket.on("user connected", (data) => {
     console.log(data);
 });
 
-socket.emit("test", "login window");
-
 socket.on("disconnect", () => {
     console.log("disconnected");
 });
@@ -24,6 +22,18 @@ socket.on("userNotLoggedIn", (data) => {
 });
 
 function Login() {
+
+    //clear the cookies on reload
+    document
+        .cookie
+        .split(";")
+        .forEach(function (c) {
+                document.cookie = c
+                    .replace(/^ +/, "")
+                    .replace(/=.*/, "=;expires=" + new Date().toUTCString() + ";path=/");
+            }
+        );
+
 
     return (
         <div className="App">
@@ -48,33 +58,27 @@ function submitUsername() {
     //console log the content of the input field if the input field is obove 2 characters
     let username = document.getElementsByClassName("loginContainerInput")[0].value;
     if (username.length > 2) {
-        //reduce the size of the profile picture to 90x90
-        //let profilePicture = document.getElementById("profilePictureSelector").files[0];
-        //check if the profile picture is too big
-        //if (profilePicture.size > 1000000) {
-            //make the input field have a red glow if the profile picture is too big
-            //document.getElementById("profilePictureSelector").style.boxShadow = "0 0 10px red";
-            //make the glow back to normal after 1 second
-            //setTimeout(function () {
-                //document.getElementById("profilePictureSelector").style.boxShadow = "0 0 10px #0081F5";
-            //}, 1000);
-            //return;
-        //}
-        //resize the profile picture
-        //resizeImage(profilePicture, 90, 90, function (resizedImage) {
-            //save the resized image as profile picture
-        //    profilePicture = resizedImage;
-        //});
-        //convert the profile picture to binary
-        //let reader = new FileReader();
-        //reader.readAsDataURL(profilePicture);
-        ////reader.onload = function () {
-            //save the base64 string in local storage
-            ////localStorage.setItem("profilePictureBase64", reader.result);
-        ////}
-        //reader.onerror = function (error) {
-            //console.log('Error: ', error);
-        //}
+        //check the size of the profile picture
+        let profilePicture = document.getElementById("profilePictureSelector").files[0];
+        if (profilePicture) {
+            //check if the profile picture is bigger than 1mb
+            if (profilePicture.size > 1000000) {
+                //resize the image
+                resizeImage(profilePicture, 1000, 1000, function (dataUrl) {
+                    //save the base64 in local storage
+                    localStorage.setItem("profilePictureBase64", dataUrl);
+                });
+            } else {
+                //save the base64 in local storage
+                localStorage.setItem("profilePictureBase64", profilePicture);
+            }
+        } else {
+            profilePicture = "https://www.nailseatowncouncil.gov.uk/wp-content/uploads/blank-profile-picture-973460_1280.jpg"
+            //save the profile picture in local storage
+            localStorage.setItem("profilePicture", profilePicture);
+        }
+
+        document.cookie = "isLoggedIn=true";
 
         //create a uuid for the user
         let uuid = Math.floor(Math.random() * 1000000000);
@@ -84,6 +88,8 @@ function submitUsername() {
         localStorage.setItem("username", document.getElementsByClassName("loginContainerInput")[0].value);
 
 
+
+
         //make the profile picture have the base64
         //profilePicture = localStorage.getItem("profilePictureBase64");
         //console.log(profilePicture);
@@ -91,11 +97,12 @@ function submitUsername() {
         //sent the username and uuid to the server
         socket.emit("newUserDetails", JSON.stringify({
             username: document.getElementsByClassName("loginContainerInput")[0].value,
-            uuid: uuid
-            //profilePicture: profilePicture
+            uuid: uuid,
+            profilePicture: profilePicture
         }));//
         //redirect to chat page
         window.location.href = "/chat";
+
     } else {
         //make the input field have a red glow if the input field is below 2 characters
         document.getElementsByClassName("loginContainerInput")[0].style.boxShadow = "0 0 10px red";

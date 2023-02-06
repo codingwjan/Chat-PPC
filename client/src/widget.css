@@ -138,3 +138,11 @@
     background-color: #171929;
     padding: 1%;
 }
+
+.votingOptionVoteButtonDescription {
+    font-size: 15px;
+    font-weight: 400;
+    text-align: center;
+    margin-left: 10px;
+    color: gray;
+}

@@ -179,7 +179,7 @@
     width: 100%;
 
     /*add padding to the sides*/
-    padding: 0 20px 0 10px;
+    padding: 0px 20px 5px 10px;
 }
 
 .sideBarBodyContentItemLeft {
@@ -207,6 +207,7 @@
     height: 70px;
     border-radius: 50%;
     object-fit: cover;
+    background-color: white;
 }
 
 .sideBarBodyContentItemRight {
@@ -225,6 +226,13 @@
     font-size: 30px;
     font-weight: 600;
     text-align: start;
+}
+
+.sideBarBodyUserStatus {
+    font-size: 18px;
+    font-weight: 400;
+    text-align: start;
+    color: gray;
 }
 
 .sideBarFooter {
@@ -416,6 +424,29 @@
 }
 
 .chatWindowFooterLeftItem:hover {
+    /*add glow effect*/
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+    cursor: pointer;
+}
+
+.chatWindowFooterLeftItemHidden {
+    display: none;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    background-color: #171929;
+    border-radius: 15px;
+    margin-right: 10px;
+    /*make the button height the same as the input field*/
+    height: 50px;
+    width: 50px;
+    transition: 0.3s ease-in-out;
+}
+
+.chatWindowFooterLeftItemHidden:hover {
     /*add glow effect*/
     box-shadow: 0 0 10px #0081F5;
     transition: 0.3s ease-in-out;

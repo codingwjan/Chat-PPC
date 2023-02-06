@@ -12,6 +12,9 @@ const socket = socketIOClient('http://localhost:3001');
 
 
 const App = () => {
+    if(document.cookie !== "isLoggedIn=true"){
+        window.location.href = "/login";
+    }
     const [users, setUsers] = useState([]);
     const [messages, setMessages] = useState([]);
 
@@ -45,7 +48,7 @@ const App = () => {
                     <div className="sideBarHeader">
                         <div className="userIconContainer">
                             <img className="userIcon"
-                                 src="https://www.hdwallpaper.nu/wp-content/uploads/2017/02/monkey-11.jpg"
+                                 src="https://www.nailseatowncouncil.gov.uk/wp-content/uploads/blank-profile-picture-973460_1280.jpg"
                                  alt="user icon"/>
 
                         </div>
@@ -65,6 +68,8 @@ const App = () => {
                             {users.map((user, index ) => {
                                 const userData = {
                                     username: user.username,
+                                    status: user.status,
+                                    profilePicture: user.profilePicture
                                 };
                                 return <SideBarBodyContentItem key={index} userData={userData} />;
                             })}
@@ -98,15 +103,19 @@ const App = () => {
                                     uuid: message.uuid,
                                     uuid1: message.uuid1,
                                     uuid2: message.uuid2,
+                                    resultone: message.resultone,
+                                    resulttwo: message.resulttwo
                                 };
                                 return <VotingWidget key={index} votingPollData={votingPollData}/>;
                             }
                             //else create a normal message
                             else if (message.type === "message") {
+                                console.log(message)
                                 const messageData = {
                                     username: message.username,
                                     message: message.message,
-                                    time: message.time
+                                    time: message.time,
+                                    profilePicture: message.profilePicture
                                 };
                                 return <ChatWindowBodyMessage key={index} messageData={messageData}/>;
                             }
@@ -117,7 +126,7 @@ const App = () => {
                     </div>
                     <div className="chatWindowFooter">
                         <div className="chatWindowFooterLeft">
-                            <div className="chatWindowFooterLeftItem" onClick={createVotingPoll}>
+                            <div className="chatWindowFooterLeftItem" onClick={createVotingPoll} id="chatWindowFooterLeftItem">
                                 <svg xmlns="http://www.w3.org/2000/svg"
                                      className="icon icon-tabler icon-tabler-chart-bar" width="24" height="24"
                                      viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none"
@@ -130,6 +139,15 @@ const App = () => {
                                     <path
                                         d="M15 4m0 1a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1h-4a1 1 0 0 1 -1 -1z"></path>
                                     <path d="M4 20l14 0"></path>
+                                </svg>
+                            </div>
+                            <div className="chatWindowFooterLeftItemHidden" id="chatWindowFooterLeftItemHidden" onClick={createVotingPoll}>
+                                <svg xmlns="http://www.w3.org/2000/svg" className="icon icon-tabler icon-tabler-x"
+                                     width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"
+                                     fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                    <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+                                    <path d="M18 6l-12 12"></path>
+                                    <path d="M6 6l12 12"></path>
                                 </svg>
                             </div>
                             <div className="chatWindowFooterLeftItem">
@@ -149,7 +167,7 @@ const App = () => {
                         <div className="chatWindowFooterCenter">
                             <div className="chatWindowFooterCenterItem">
                                 <input id="chatWindowFooterCenterItemInput" className="chatWindowFooterCenterItemInput" type="text"
-                                       placeholder="Type a message..."/>
+                                       placeholder="Type a message..." onFocus={startTypingMessage} onBlur={stopTyping}/>
                                 <input id="createVotingPollInput" className="chatWindowFooterCenterItemInputHidden" type="text" placeholder="Enter a question..."/>
                                 <input id="votingPollOption1" className="chatWindowFooterCenterItemInputHidden" type="text" placeholder="Enter option 1..."/>
                                 <input id="votingPollOption2" className="chatWindowFooterCenterItemInputHidden" type="text" placeholder="Enter option 2..."/>
@@ -217,15 +235,51 @@ function saveUserName() {
 
 }
 
+function startTypingMessage() {
+    startTyping("typing...");
+}
+
+function startTyping(data) {
+    //emit the uuid from local storage and the username to the server
+    socket.emit("startTyping", JSON.stringify({
+        uuid: localStorage.getItem("uuid"),
+        status: data
+    }));
+}
+
+function stopTyping() {
+    //emit the uuid from local storage and the username to the server
+    socket.emit("stopTyping", JSON.stringify({
+        uuid: localStorage.getItem("uuid"),
+        status: ""
+    }));
+}
+
 function createVotingPoll() {
-    //remove the middle input field and replace with 3 input fields
-    document.getElementById("chatWindowFooterCenterItemInput").style.display = "none";
-    document.getElementById("createVotingPollInput").style.display = "block";
-    document.getElementById("votingPollOption1").style.display = "block";
-    document.getElementById("votingPollOption2").style.display = "block";
-    document.getElementById("chatWindowFooterRightItem").style.display = "none";
-    document.getElementById("chatWindowFooterRightItemHidden").style.display = "flex";
-    document.getElementById("createVotingPollInput1").focus();
+    //check if currently creating a voting poll and if so, go back to normal
+    if (document.getElementById("createVotingPollInput").style.display === "block") {
+        startTyping("");
+        document.getElementById("chatWindowFooterCenterItemInput").style.display = "block";
+        document.getElementById("createVotingPollInput").style.display = "none";
+        document.getElementById("votingPollOption1").style.display = "none";
+        document.getElementById("votingPollOption2").style.display = "none";
+        document.getElementById("chatWindowFooterRightItem").style.display = "flex";
+        document.getElementById("chatWindowFooterRightItemHidden").style.display = "none";
+        document.getElementById("chatWindowFooterLeftItem").style.display = "flex";
+        document.getElementById("chatWindowFooterLeftItemHidden").style.display = "none";
+        return;
+    } else {
+        startTyping("creating voting poll...");
+        //remove the middle input field and replace with 3 input fields
+        document.getElementById("chatWindowFooterCenterItemInput").style.display = "none";
+        document.getElementById("createVotingPollInput").style.display = "block";
+        document.getElementById("votingPollOption1").style.display = "block";
+        document.getElementById("votingPollOption2").style.display = "block";
+        document.getElementById("chatWindowFooterRightItem").style.display = "none";
+        document.getElementById("chatWindowFooterRightItemHidden").style.display = "flex";
+        document.getElementById("chatWindowFooterLeftItem").style.display = "none";
+        document.getElementById("chatWindowFooterLeftItemHidden").style.display = "flex";
+    }
 }
 
 function sendVotingPoll() {
@@ -244,6 +298,8 @@ function sendVotingPoll() {
 
         document.getElementById("chatWindowFooterRightItem").style.display = "flex";
         document.getElementById("chatWindowFooterRightItemHidden").style.display = "none";
+        document.getElementById("chatWindowFooterLeftItem").style.display = "flex";
+        document.getElementById("chatWindowFooterLeftItemHidden").style.display = "none";
 
 
         console.log("message: " + message);
