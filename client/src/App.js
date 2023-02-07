@@ -104,13 +104,13 @@ const App = () => {
                                     uuid1: message.uuid1,
                                     uuid2: message.uuid2,
                                     resultone: message.resultone,
-                                    resulttwo: message.resulttwo
+                                    resulttwo: message.resulttwo,
+                                    socket: socket
                                 };
                                 return <VotingWidget key={index} votingPollData={votingPollData}/>;
                             }
                             //else create a normal message
                             else if (message.type === "message") {
-                                console.log(message)
                                 const messageData = {
                                     username: message.username,
                                     message: message.message,
@@ -222,9 +222,6 @@ function saveUserName() {
     //save the new username
     var newUserName = document.getElementById("userName").innerHTML;
     localStorage.setItem("username", newUserName);
-    console.log("new username: " + localStorage.getItem("username"));
-
-    console.log("update request sent")
 
     //emit the new username with the uuid from local storage and the old username to the server
     socket.emit("changeUserName", JSON.stringify({
@@ -283,6 +280,7 @@ function createVotingPoll() {
 }
 
 function sendVotingPoll() {
+    startTyping("");
     //if the message contains more than spaces or is empty, don't send it
     if (document.getElementById("createVotingPollInput").value.trim() === "") {
         return;
@@ -300,9 +298,6 @@ function sendVotingPoll() {
         document.getElementById("chatWindowFooterRightItemHidden").style.display = "none";
         document.getElementById("chatWindowFooterLeftItem").style.display = "flex";
         document.getElementById("chatWindowFooterLeftItemHidden").style.display = "none";
-
-
-        console.log("message: " + message);
 
         //generate 2 random uuids for the voting poll
         let uuid1 = uuidv4();
@@ -344,8 +339,6 @@ function sendMessage() {
         var message = document.getElementsByClassName("chatWindowFooterCenterItemInput")[0].value;
         document.getElementsByClassName("chatWindowFooterCenterItemInput")[0].value = "";
 
-        console.log("message: " + message);
-
         //emit the message to the server
         socket.emit("sendMessage", JSON.stringify({
             uuid: localStorage.getItem("uuid"),
@@ -361,7 +354,6 @@ function sendMessage() {
 setInterval(ping, 5000);
 
 function ping() {
-    console.log("ping")
     socket.emit("pong", localStorage.getItem("uuid"));
 }
 

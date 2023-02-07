@@ -6,6 +6,7 @@ const e = require("express");
 require('dotenv').config();
 const apiKey = process.env.OPENAI_API_KEY;
 const multer = require("multer");
+const {stringify} = require("nodemon/lib/utils");
 const storage = multer.diskStorage({
     destination: 'uploads/',
     filename: (req, file, callback) => {
@@ -62,11 +63,6 @@ io.on("connection", (socket) => {
 
     connectionCount++;
     console.log(`Total connections: ${connectionCount}`);
-
-
-    socket.on("test", (data) => {
-        console.log(data);
-    });
 
     socket.on("pong" , (data) => {
         //look for the uuid that was given in the data
@@ -282,10 +278,34 @@ io.on("connection", (socket) => {
             optiontwo: optiontwo,
             uuid1: uuid1,
             uuid2: uuid2,
-            profilePicture: profilePicture
+            profilePicture: profilePicture,
+            resultone: "0",
+            resulttwo: "0"
         });
         //write the new array to the users.json file
         fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));
+    });
+
+    socket.on("voteLeft", (data) => {
+        let messages = JSON.parse(fs.readFileSync(path.join(__dirname, "chat.json")));
+        for (let i = 0; i < messages.length; i++) {
+            let votesLeft = parseInt(messages[i].resultone)
+            votesLeft++;
+            messages[i].resultone=stringify(votesLeft);
+        }
+        fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));
+
+    });
+
+    socket.on("voteRight", (data) => {
+        let messages = JSON.parse(fs.readFileSync(path.join(__dirname, "chat.json")));
+        for (let i = 0; i < messages.length; i++) {
+            let votesLeft = parseInt(messages[i].resulttwo)
+            votesLeft++;
+            messages[i].resulttwo=stringify(votesLeft);
+        }
+        fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));
+
     });
 
 

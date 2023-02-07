@@ -1,4 +1,6 @@
 import "./widget.css";
+import "./App.js"
+
 const VotingWidget = ({votingPollData}) => {
 
     let votingOptionLeft = document.getElementById(votingPollData.uuid1);
@@ -7,12 +9,12 @@ const VotingWidget = ({votingPollData}) => {
         if(localStorage.getItem(votingPollData.uuid1) === "voted"){
             //wait for the page to load
             setTimeout(() => {
-                clickOptionLeft();
+                OptionLeft();
             }, 1000);
         } else if(localStorage.getItem(votingPollData.uuid2) === "voted"){
             //wait for the page to load
             setTimeout(() => {
-                clickOptionRight();
+                OptionRight();
             }, 1000);
         }
 
@@ -63,8 +65,18 @@ const VotingWidget = ({votingPollData}) => {
         </div>
     );
 
-
     function clickOptionLeft() {
+        votingPollData.socket.emit("voteLeft", votingPollData.uuid1);
+        OptionLeft();
+    }
+
+    function clickOptionRight() {
+        votingPollData.socket.emit("voteRight", votingPollData.uuid2);
+        OptionRight();
+    }
+
+
+    function OptionLeft() {
 
         //make the text and the check mark green
         votingOptionLeft.style.color = "green";
@@ -84,7 +96,7 @@ const VotingWidget = ({votingPollData}) => {
         
     }
 
-    function clickOptionRight() {
+    function OptionRight() {
         //make the text and the check mark green
         votingOptionRight.style.color = "green";
         //display the other text unclickable

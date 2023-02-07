@@ -44,7 +44,7 @@ function Login() {
                     <div className="loginContainerInputBox">
                         <input className="loginContainerInput" type="text" placeholder="Username"/>
                         <input id="profilePictureSelector" className="profilePictureSelector" type="file"/>
-                        <button className="loginContainerSubmitButton" onClick={submitUsername}>Login</button>
+                        <button id='loginContainerSubmitButton' className="loginContainerSubmitButton" onClick={submitUsername}>Login</button>
                     </div>
                 </div>
             </div>
@@ -59,6 +59,8 @@ function submitUsername() {
     //console log the content of the input field if the input field is obove 2 characters
     let username = document.getElementsByClassName("loginContainerInput")[0].value;
     if (username.length > 2) {
+        document.getElementById('loginContainerSubmitButton').style.pointerEvents = "none";
+        document.getElementById('loginContainerSubmitButton').style.cursor = "not-allowed";
         //check the size of the profile picture
         let profilePicture = document.getElementById("profilePictureSelector").files[0];
         if (profilePicture) {
@@ -111,7 +113,7 @@ function submitUsername() {
             profilePicture: profilePicture
         }));//
         //redirect to chat page
-        //window.location.href = "/chat";
+        window.location.href = "/chat";
 
     } else {
         //make the input field have a red glow if the input field is below 2 characters
