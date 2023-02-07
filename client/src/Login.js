@@ -1,6 +1,7 @@
 import React from 'react';
 import socketIOClient from "socket.io-client";
 import './login.css';
+import axios from "axios";
 
 const socket = socketIOClient('http://localhost:3001');
 
@@ -63,14 +64,30 @@ function submitUsername() {
         if (profilePicture) {
             //check if the profile picture is bigger than 1mb
             if (profilePicture.size > 1000000) {
-                //resize the image
-                resizeImage(profilePicture, 1000, 1000, function (dataUrl) {
-                    //save the base64 in local storage
-                    localStorage.setItem("profilePictureBase64", dataUrl);
-                });
+                //make the input field have a red glow if the profile picture is bigger than 1mb
+                document.getElementsByClassName("loginContainerInput")[0].style.boxShadow = "0 0 10px red";
+                //make the glow back to normal after 1 second
+                setTimeout(function () {
+                    document.getElementsByClassName("loginContainerInput")[0].style.boxShadow = "0 0 10px #0081F5";
+                }, 1000);
+                return;
             } else {
-                //save the base64 in local storage
-                localStorage.setItem("profilePictureBase64", profilePicture);
+                //create a new form data
+                let formData = new FormData();
+                //append the profile picture to the form data
+                formData.append("file", profilePicture);
+                //send the form data to the server
+                axios.post("http://localhost:3001/pictures", formData, {
+                    headers: {
+                        'Content-Type': 'multipart/form-data'
+                    }
+                }).then((response) => {
+                    //save the profile picture in local storage
+                    localStorage.setItem("profilePicture", response.data);
+                }).catch((error) => {
+                    console.log(error);
+                });
+
             }
         } else {
             profilePicture = "https://www.nailseatowncouncil.gov.uk/wp-content/uploads/blank-profile-picture-973460_1280.jpg"
@@ -87,13 +104,6 @@ function submitUsername() {
         //save the username in local storage
         localStorage.setItem("username", document.getElementsByClassName("loginContainerInput")[0].value);
 
-
-
-
-        //make the profile picture have the base64
-        //profilePicture = localStorage.getItem("profilePictureBase64");
-        //console.log(profilePicture);
-
         //sent the username and uuid to the server
         socket.emit("newUserDetails", JSON.stringify({
             username: document.getElementsByClassName("loginContainerInput")[0].value,
@@ -101,7 +111,7 @@ function submitUsername() {
             profilePicture: profilePicture
         }));//
         //redirect to chat page
-        window.location.href = "/chat";
+        //window.location.href = "/chat";
 
     } else {
         //make the input field have a red glow if the input field is below 2 characters
@@ -110,43 +120,6 @@ function submitUsername() {
         setTimeout(function () {
             document.getElementsByClassName("loginContainerInput")[0].style.boxShadow = "0 0 10px #0081F5";
         }, 1000);
-    }
-}
-
-function resizeImage(profilePicture, maxWidth, maxHeight, callback) {
-    let image = new Image();
-    image.src = URL.createObjectURL(profilePicture);
-    image.onload = function () {
-        let canvas = document.createElement('canvas');
-        let width = image.width;
-        let height = image.height;
-
-        if (width > height) {
-            if (width > maxWidth) {
-                height *= maxWidth / width;
-                width = maxWidth;
-            }
-        } else {
-            if (height > maxHeight) {
-                width *= maxHeight / height;
-                height = maxHeight;
-            }
-        }
-
-        // Resize the canvas to the resized dimensions
-        canvas.width = width;
-        canvas.height = height;
-        let ctx = canvas.getContext("2d");
-        ctx.drawImage(image, 0, 0, width, height);
-        //check if the image is a png
-        if (profilePicture.type === "image/png") {
-            //convert the image to a png
-            var dataUrl = canvas.toDataURL("image/png");
-        } else {
-            //convert the image to a jpeg
-            var dataUrl = canvas.toDataURL("image/jpeg");
-        }
-        callback(dataUrl);
     }
 }
 

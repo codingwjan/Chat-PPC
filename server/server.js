@@ -5,6 +5,14 @@ const fs = require("fs");
 const e = require("express");
 require('dotenv').config();
 const apiKey = process.env.OPENAI_API_KEY;
+const multer = require("multer");
+const storage = multer.diskStorage({
+    destination: 'uploads/',
+    filename: (req, file, callback) => {
+        callback(null, `${file.fieldname}-${Date.now()}${path.extname(file.originalname)}`);
+    },
+});
+const upload = multer({ storage });
 
 let connectionCount = 0;
 
@@ -13,6 +21,15 @@ const httpServer = require("http").createServer();
 const io = require("socket.io")(httpServer, {
     //set socket.io to listen on the same port as the express server
     cors: {origin: "*"}
+});
+
+app.use('/profile-pictures', express.static(path.join(__dirname, 'uploads')));
+
+app.post("/pictures", upload.single("file"), (req, res) => {
+    console.log(req.file);
+    res.send("File uploaded");
+    //save the file to the uploads folder
+    fs.writeFileSync(path.join(__dirname, "uploads", req.file.originalname), req.file.buffer);
 });
 
 
