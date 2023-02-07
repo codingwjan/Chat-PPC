@@ -8,7 +8,7 @@ import {v4 as uuidv4} from 'uuid';
 
 
 //connect to socket on localhost:3001
-const socket = socketIOClient('http://localhost:3001');
+const socket = socketIOClient('http://192.168.2.151:3001');
 
 
 const App = () => {
@@ -148,19 +148,6 @@ const App = () => {
                                     <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
                                     <path d="M18 6l-12 12"></path>
                                     <path d="M6 6l12 12"></path>
-                                </svg>
-                            </div>
-                            <div className="chatWindowFooterLeftItem">
-                                <svg xmlns="http://www.w3.org/2000/svg"
-                                     className="icon icon-tabler icon-tabler-photo" width="24" height="24"
-                                     viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none"
-                                     stroke-linecap="round" stroke-linejoin="round">
-                                    <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
-                                    <path d="M15 8l.01 0"></path>
-                                    <path
-                                        d="M4 4m0 3a3 3 0 0 1 3 -3h10a3 3 0 0 1 3 3v10a3 3 0 0 1 -3 3h-10a3 3 0 0 1 -3 -3z"></path>
-                                    <path d="M4 15l4 -4a3 5 0 0 1 3 0l5 5"></path>
-                                    <path d="M14 14l1 -1a3 5 0 0 1 3 0l2 2"></path>
                                 </svg>
                             </div>
                         </div>

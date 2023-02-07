@@ -2,35 +2,19 @@ const express = require("express");
 const app = express();
 const path = require("path");
 const fs = require("fs");
-const e = require("express");
 require('dotenv').config();
 const apiKey = process.env.OPENAI_API_KEY;
-const multer = require("multer");
 const {stringify} = require("nodemon/lib/utils");
-const storage = multer.diskStorage({
-    destination: 'uploads/',
-    filename: (req, file, callback) => {
-        callback(null, `${file.fieldname}-${Date.now()}${path.extname(file.originalname)}`);
-    },
-});
-const upload = multer({ storage });
 
 let connectionCount = 0;
 
 
 const httpServer = require("http").createServer();
-const io = require("socket.io")(httpServer, {
-    //set socket.io to listen on the same port as the express server
-    cors: {origin: "*"}
-});
-
-app.use('/profile-pictures', express.static(path.join(__dirname, 'uploads')));
-
-app.post("/pictures", upload.single("file"), (req, res) => {
-    console.log(req.file);
-    res.send("File uploaded");
-    //save the file to the uploads folder
-    fs.writeFileSync(path.join(__dirname, "uploads", req.file.originalname), req.file.buffer);
+const io = require('socket.io')(3001, {
+    cors: {
+        origin: "http://192.168.2.151:3000",
+        methods: ["GET", "POST"]
+    }
 });
 
 
@@ -80,6 +64,7 @@ io.on("connection", (socket) => {
     });
 
     socket.on("newUserDetails", (data) => {
+        console.log(data)
         //decode the data
         let decodedData = JSON.parse(data);
         //get username and uuid
@@ -213,7 +198,7 @@ io.on("connection", (socket) => {
             username: "GPT-3",
             message: correctedresponse,
             uuid: 0,
-            profilePicture: "https://seeklogo.com/images/C/chatgpt-logo-02AFA704B5-seeklogo.com.png",
+            profilePicture: "https://nowmag.gr/wp-content/uploads/2020/07/gpt3-1024x500.jpg",
         }));
 
         let messages = JSON.parse(fs.readFileSync(path.join(__dirname, "chat.json")));
@@ -223,7 +208,7 @@ io.on("connection", (socket) => {
             uuid: 0,
             time: time,
             type: "message",
-            profilePicture: "https://seeklogo.com/images/C/chatgpt-logo-02AFA704B5-seeklogo.com.png",
+            profilePicture: "https://nowmag.gr/wp-content/uploads/2020/07/gpt3-1024x500.jpg",
         });
         fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));
     }
@@ -321,10 +306,3 @@ io.on("connection", (socket) => {
         fs.writeFileSync(path.join(__dirname, "users.json"), JSON.stringify(users));
     });
 });
-
-
-    const port = 3001;
-
-    httpServer.listen(port, () => {
-        console.log("Server started on port:" + port);
-    });
