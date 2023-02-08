@@ -1,5 +1,6 @@
 import Login from './Login';
 import App from './App';
+import Impressum from "./impressum";
 import React from 'react';
 import {BrowserRouter as Router, Navigate, Route, Routes} from "react-router-dom";
 
@@ -13,6 +14,7 @@ function Routing() {
                     < /Route>
                     <Route path="/login" element={<Login/>}/>
                     <Route path="/chat" element={<App/>}/>
+                    <Route path="/impressum" element={<Impressum/>}/>
                     <Route path="*" element={<Navigate to="/"/>}/>
                 </Routes>
             </Router>

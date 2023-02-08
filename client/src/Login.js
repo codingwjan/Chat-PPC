@@ -2,7 +2,7 @@ import React from 'react';
 import socketIOClient from "socket.io-client";
 import './login.css';
 
-const socket = socketIOClient('http://192.168.2.151:3001');
+const socket = socketIOClient('http://192.168.178.75:3001');
 
 function Login() {
 
@@ -25,7 +25,6 @@ export default Login;
 
 
 function submitUsername() {
-    console.log("submit username")
     //console log the content of the input field if the input field is obove 2 characters
     let username = document.getElementsByClassName("loginContainerInput")[0].value;
     if (username.length > 2) {

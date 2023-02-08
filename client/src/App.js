@@ -8,7 +8,9 @@ import {v4 as uuidv4} from 'uuid';
 
 
 //connect to socket on localhost:3001
-const socket = socketIOClient('http://192.168.2.151:3001');
+const socket = socketIOClient('http://192.168.178.75:3001');
+
+let autoScroll = true;
 
 
 const App = () => {
@@ -29,8 +31,13 @@ const App = () => {
         // decode the data
         let messagesData = JSON.parse(data);
         // update the state with the new users
-
         setMessages(messagesData);
+
+        //scroll to bottom if autoScroll is true
+        if(autoScroll){
+            const chatWindowBody = document.getElementById("chatWindowBody");
+            chatWindowBody.scrollTop = chatWindowBody.scrollHeight;
+        }
     });
 
     socket.on('user connected', (data) => {
@@ -40,6 +47,22 @@ const App = () => {
     socket.on("disconnect", () => {
         console.log("disconnected");
     });
+
+
+    //if user scrolls up, disable autoScroll
+    const chatWindowBody = document.getElementById("chatWindowBody");
+    if(chatWindowBody){
+        chatWindowBody.addEventListener("scroll", () => {
+            if(chatWindowBody.scrollTop < chatWindowBody.scrollHeight - chatWindowBody.clientHeight){
+                autoScroll = false;
+            }
+            else{
+                autoScroll = true;
+            }
+        });
+    }
+
+
 
     return (
         <div className="App">
@@ -77,9 +100,7 @@ const App = () => {
                     </div>
                     <footer className="sideBarFooter">
                         <div className="sideBarFooterLeft">
-                            <div className="sideBarFooterLeftItem">About</div>
-                            <div className="sideBarFooterLeftItem">Contact</div>
-                            <div className="sideBarFooterLeftItem">Impressum</div>
+                            <div onClick={callImpressum} className="sideBarFooterLeftItem">Impressum</div>
 
                         </div>
                     </footer>
@@ -89,7 +110,7 @@ const App = () => {
                         <div className="chatWindowHeaderTitle">Chat PPC</div>
                         <div className="chatWindowHeaderSubtitle">by ebayboy & cancelcloud</div>
                     </div>
-                    <div className="chatWindowBody">
+                    <div id="chatWindowBody" className="chatWindowBody">
 
                         {messages.map((message, index) => {
                             //if the type is votingPoll, create a votingPoll
@@ -311,6 +332,12 @@ function sendVotingPoll() {
     }
 }
 
+function callImpressum() {
+    //if the impressum is already open, close it
+    //redirect to the site with the impressum
+    window.location.href = "/impressum";
+}
+
 //listen for if enter is pressed
 document.addEventListener("keydown", function (e) {
     if (e.key === "Enter") {
@@ -319,6 +346,8 @@ document.addEventListener("keydown", function (e) {
 });
 
 function sendMessage() {
+    //defocus the input field
+    document.getElementsByClassName("chatWindowFooterCenterItemInput")[0].blur();
     //if the message contains more than spaces or is empty, don't send it
     if (document.getElementsByClassName("chatWindowFooterCenterItemInput")[0].value.trim() === "") {
         return;

@@ -12,7 +12,7 @@ let connectionCount = 0;
 const httpServer = require("http").createServer();
 const io = require('socket.io')(3001, {
     cors: {
-        origin: "http://192.168.2.151:3000",
+        origin: "http://192.168.178.75:3000",
         methods: ["GET", "POST"]
     }
 });

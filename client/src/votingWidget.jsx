@@ -19,6 +19,8 @@ const VotingWidget = ({votingPollData}) => {
         }
 
 
+
+
     return (
         <div className="votingWidget">
             <div className="votingWidgetTop">
