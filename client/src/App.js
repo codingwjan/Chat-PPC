@@ -284,6 +284,8 @@ function createVotingPoll() {
         document.getElementById("chatWindowFooterRightItemHidden").style.display = "flex";
         document.getElementById("chatWindowFooterLeftItem").style.display = "none";
         document.getElementById("chatWindowFooterLeftItemHidden").style.display = "flex";
+        //focus on the first input field
+        document.getElementById("createVotingPollInput").focus();
     }
 }
 
@@ -341,7 +343,29 @@ function callImpressum() {
 //listen for if enter is pressed
 document.addEventListener("keydown", function (e) {
     if (e.key === "Enter") {
-        sendMessage();
+        //if voting poll is currently being created, send the voting poll
+        if (document.getElementById("createVotingPollInput").style.display === "block") {
+            sendVotingPoll();
+        } else {
+            //send the message
+            sendMessage();
+        }
+    }
+});
+
+//listen for if command + K is pressed
+document.addEventListener("keydown", function (e) {
+    if (e.key === "k" && e.metaKey) {
+        //focus the input field
+        document.getElementsByClassName("chatWindowFooterCenterItemInput")[0].focus();
+    }
+});
+
+//list for if command + g is pressed
+document.addEventListener("keydown", function (e) {
+    if (e.key === "j" && e.metaKey) {
+        //create a voting poll
+        createVotingPoll();
     }
 });
 

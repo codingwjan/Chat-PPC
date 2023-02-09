@@ -91,6 +91,7 @@ const VotingWidget = ({votingPollData}) => {
         votingOptionRight.style.pointerEvents = "none";
         //cursor: not-allowed;
         votingOptionRight.style.cursor = "not-allowed";
+        votingOptionLeft.style.boxShadow = "0 0 10px #0081F5";
 
         //save the vote in local storage
         localStorage.setItem(votingPollData.uuid1, "voted");
@@ -105,6 +106,8 @@ const VotingWidget = ({votingPollData}) => {
         votingOptionLeft.style.pointerEvents = "none";
         //cursor: not-allowed;
         votingOptionLeft.style.cursor = "not-allowed";
+        //give the box a blue glow
+        votingOptionRight.style.boxShadow = "0 0 10px #0081F5";
 
 
         document.getElementById(votingPollData.uuid1+"count").innerHTML = "Votes: " + votingPollData.resultone;
