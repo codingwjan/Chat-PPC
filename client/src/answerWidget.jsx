@@ -2,7 +2,6 @@ import react from "react";
 import './App.css';
 
 const AnswerWidget = ({answerData}) => {
-    console.log(answerData)
   return (
       <div className="chatWindowBodyMessage">
           <div className="chatWindowBodyMessageLeft">

@@ -41,19 +41,11 @@ const App = () => {
         }
     });
 
-    socket.on('user connected', (data) => {
-        console.log(data);
-    });
-
     socket.on("userNotLoggedIn", () => {
         //clear the cookie
         document.cookie = "isLoggedIn=false";
         //redirect to login page
         window.location.href = "/login";
-    });
-
-    socket.on("disconnect", () => {
-        console.log("disconnected");
     });
 
 
@@ -343,16 +335,12 @@ function createVotingPoll() {
 }
 
 function submitContent() {
-    console.log("submit content")
     //check if currently creating a voting poll or question or message
     if (document.getElementById("createVotingPollInput").style.display === "block") {
-        console.log("send voting poll")
         sendVotingPoll();
     } else if (document.getElementById("createQuestionInput").style.display === "block") {
-        console.log("send question")
         sendQuestion();
     } else {
-        console.log("send message")
         sendMessage();
     }
 }
