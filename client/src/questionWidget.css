@@ -1,0 +1,133 @@
+* {
+    margin: 0;
+    padding: 0;
+}
+
+.questionWidget {
+    font-size: calc(10px + 2vmin);
+    color: white;
+    margin: 10px 0;
+    border-radius: 15px;
+    background-color: #171929;
+    padding: 1%;
+    width: 80%;
+}
+
+.questionWidgetTop {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 1%;
+}
+
+.questionWidgetTopLeft {
+    margin-right: 15px;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    border-radius: 15px;
+}
+
+.questionWidgetTopLeftTitle {
+    font-size: 25px;
+    font-weight: 600;
+    text-align: start;
+}
+
+.questionWidgetTopLeftDescription {
+    font-size: 25px;
+    font-weight: 400;
+    text-align: start;
+    color: gray;
+}
+
+.questionWidgetTopRight {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    border-radius: 15px;
+}
+
+.votingWidgetTopRight {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: center;
+    font-size: calc(10px + 2vmin);
+    color: white;
+    border-radius: 15px;
+}
+
+.votingWidgetTopRightTime {
+    font-size: 20px;
+    font-weight: 400;
+    text-align: start;
+    margin-left: 10px;
+    color: gray;
+}
+
+.votingWidgetBottom {
+    margin-top: 15px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 1%;
+}
+
+.votingWidgetBottomInput {
+    border: none;
+    outline: none;
+    background-color: #18233E;
+    color: white;
+    font-size: 20px;
+    font-weight: 400;
+    height: 50px;
+    padding: 10px;
+    border-radius: 10px;
+
+    /*make the width dynamic*/
+    width: 100%;
+
+    transition: 0.3s ease-in-out;
+}
+
+.votingWidgetBottomInput:hover {
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+    cursor: text;
+}
+
+.votingWidgetBottomInput:focus {
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+    cursor: text;
+}
+
+.votingWidgetBottomButton {
+    margin-top: 15px;
+    padding: 15px;
+    border: none;
+    outline: none;
+    background-color: #171929;
+    color: white;
+    font-size: 20px;
+    font-weight: 400;
+    height: 50px;
+    padding: 10px;
+    border-radius: 10px;
+    width: 100%;
+    transition: 0.3s ease-in-out;
+}
+
+.votingWidgetBottomButton:hover {
+    box-shadow: 0 0 10px #0081F5;
+    transition: 0.3s ease-in-out;
+    cursor: pointer;
+}

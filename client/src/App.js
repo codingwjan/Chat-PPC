@@ -5,10 +5,11 @@ import ChatWindowBodyMessage from "./chatWindowBodyMessage";
 import {useState} from "react";
 import VotingWidget from "./votingWidget";
 import {v4 as uuidv4} from 'uuid';
-
+import QuestionWidget from "./questionWidget";
+import AnswerWidget from "./answerWidget";
 
 //connect to socket on localhost:3001
-const socket = socketIOClient('http://192.168.178.75:3001');
+const socket = socketIOClient('http://37.114.42.93:3001');
 
 let autoScroll = true;
 
@@ -42,6 +43,13 @@ const App = () => {
 
     socket.on('user connected', (data) => {
         console.log(data);
+    });
+
+    socket.on("userNotLoggedIn", () => {
+        //clear the cookie
+        document.cookie = "isLoggedIn=false";
+        //redirect to login page
+        window.location.href = "/login";
     });
 
     socket.on("disconnect", () => {
@@ -130,6 +138,16 @@ const App = () => {
                                 };
                                 return <VotingWidget key={index} votingPollData={votingPollData}/>;
                             }
+                            else if (message.type === "question") {
+                                const questionWidgetData = {
+                                    username: message.username,
+                                    message: message.message,
+                                    time: message.time,
+                                    socket: socket,
+                                    uuid: message.uuid
+                                };
+                                return <QuestionWidget key={index} questionWidgetData={questionWidgetData}/>;
+                            }
                             //else create a normal message
                             else if (message.type === "message") {
                                 const messageData = {
@@ -139,6 +157,17 @@ const App = () => {
                                     profilePicture: message.profilePicture
                                 };
                                 return <ChatWindowBodyMessage key={index} messageData={messageData}/>;
+                            } else if (message.type === "answer") {
+                                const answerData = {
+                                    username: message.username,
+                                    oldusername: message.oldusername,
+                                    oldmessage: message.oldmessage,
+                                    message: message.message,
+                                    time: message.time,
+                                    profilePicture: message.profilePicture,
+                                    uuid: message.uuid
+                                };
+                                return <AnswerWidget key={index} answerData={answerData}/>;
                             }
                         })}
 
@@ -162,7 +191,28 @@ const App = () => {
                                     <path d="M4 20l14 0"></path>
                                 </svg>
                             </div>
+                            <div className="chatWindowFooterLeftItem" onClick={createQuestion} id="chatWindowFooterLeftItem2">
+                                <svg xmlns="http://www.w3.org/2000/svg"
+                                     className="icon icon-tabler icon-tabler-layout-list" width="24" height="24"
+                                     viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none"
+                                     stroke-linecap="round" stroke-linejoin="round">
+                                    <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+                                    <path
+                                        d="M4 4m0 2a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v2a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z"></path>
+                                    <path
+                                        d="M4 14m0 2a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v2a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z"></path>
+                                </svg>
+                            </div>
                             <div className="chatWindowFooterLeftItemHidden" id="chatWindowFooterLeftItemHidden" onClick={createVotingPoll}>
+                                <svg xmlns="http://www.w3.org/2000/svg" className="icon icon-tabler icon-tabler-x"
+                                     width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"
+                                     fill="none" stroke-linecap="round" stroke-linejoin="round">
+                                    <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
+                                    <path d="M18 6l-12 12"></path>
+                                    <path d="M6 6l12 12"></path>
+                                </svg>
+                            </div>
+                            <div className="chatWindowFooterLeftItemHidden" id="chatWindowFooterLeftItemHidden2" onClick={createQuestion}>
                                 <svg xmlns="http://www.w3.org/2000/svg" className="icon icon-tabler icon-tabler-x"
                                      width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"
                                      fill="none" stroke-linecap="round" stroke-linejoin="round">
@@ -176,13 +226,14 @@ const App = () => {
                             <div className="chatWindowFooterCenterItem">
                                 <input id="chatWindowFooterCenterItemInput" className="chatWindowFooterCenterItemInput" type="text"
                                        placeholder="Type a message..." onFocus={startTypingMessage} onBlur={stopTyping}/>
+                                <input id="createQuestionInput" className="chatWindowFooterCenterItemInputHidden" type="text" placeholder="Enter a question..."/>
                                 <input id="createVotingPollInput" className="chatWindowFooterCenterItemInputHidden" type="text" placeholder="Enter a question..."/>
                                 <input id="votingPollOption1" className="chatWindowFooterCenterItemInputHidden" type="text" placeholder="Enter option 1..."/>
                                 <input id="votingPollOption2" className="chatWindowFooterCenterItemInputHidden" type="text" placeholder="Enter option 2..."/>
                             </div>
                         </div>
                         <div className="chatWindowFooterRight">
-                            <div id="chatWindowFooterRightItemHidden" className="chatWindowFooterRightItemHidden" onClick={sendVotingPoll}>
+                            <div id="chatWindowFooterRightItemHidden" className="chatWindowFooterRightItemHidden" onClick={submitContent}>
                                 <svg xmlns="http://www.w3.org/2000/svg" className="icon icon-tabler icon-tabler-check"
                                      width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"
                                      fill="none" stroke-linecap="round" stroke-linejoin="round">
@@ -190,7 +241,7 @@ const App = () => {
                                     <path d="M5 12l5 5l10 -10"></path>
                                 </svg>
                             </div>
-                            <div id="chatWindowFooterRightItem" className="chatWindowFooterRightItem" onClick={sendMessage}>
+                            <div id="chatWindowFooterRightItem" className="chatWindowFooterRightItem" onClick={submitContent}>
                                 <svg xmlns="http://www.w3.org/2000/svg"
                                      className="icon icon-tabler icon-tabler-brand-telegram" width="24" height="24"
                                      viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none"
@@ -272,6 +323,7 @@ function createVotingPoll() {
         document.getElementById("chatWindowFooterRightItemHidden").style.display = "none";
         document.getElementById("chatWindowFooterLeftItem").style.display = "flex";
         document.getElementById("chatWindowFooterLeftItemHidden").style.display = "none";
+        document.getElementById("chatWindowFooterLeftItem2").style.display = "flex";
         return;
     } else {
         startTyping("creating voting poll...");
@@ -284,16 +336,32 @@ function createVotingPoll() {
         document.getElementById("chatWindowFooterRightItemHidden").style.display = "flex";
         document.getElementById("chatWindowFooterLeftItem").style.display = "none";
         document.getElementById("chatWindowFooterLeftItemHidden").style.display = "flex";
+        document.getElementById("chatWindowFooterLeftItem2").style.display = "none";
         //focus on the first input field
         document.getElementById("createVotingPollInput").focus();
+    }
+}
+
+function submitContent() {
+    console.log("submit content")
+    //check if currently creating a voting poll or question or message
+    if (document.getElementById("createVotingPollInput").style.display === "block") {
+        console.log("send voting poll")
+        sendVotingPoll();
+    } else if (document.getElementById("createQuestionInput").style.display === "block") {
+        console.log("send question")
+        sendQuestion();
+    } else {
+        console.log("send message")
+        sendMessage();
     }
 }
 
 function sendVotingPoll() {
     startTyping("");
     //if the message contains more than spaces or is empty, don't send it
-    if (document.getElementById("createVotingPollInput").value.trim() === "") {
-        return;
+    if (document.getElementById("createVotingPollInput").value.trim() === "" || document.getElementById("votingPollOption1").value.trim() === "" || document.getElementById("votingPollOption2").value.trim() === "") {
+        alert("Please enter a message");
     } else {
         var message = document.getElementById("createVotingPollInput").value;
         document.getElementById("createVotingPollInput").value = "";
@@ -308,6 +376,7 @@ function sendVotingPoll() {
         document.getElementById("chatWindowFooterRightItemHidden").style.display = "none";
         document.getElementById("chatWindowFooterLeftItem").style.display = "flex";
         document.getElementById("chatWindowFooterLeftItemHidden").style.display = "none";
+        document.getElementById("chatWindowFooterLeftItem2").style.display = "flex";
 
         //generate 2 random uuids for the voting poll
         let uuid1 = uuidv4();
@@ -334,6 +403,66 @@ function sendVotingPoll() {
     }
 }
 
+function createQuestion() {
+    //check if currently creating a question and if so, go back to normal
+    if (document.getElementById("createQuestionInput").style.display === "block") {
+        startTyping("");
+        document.getElementById("chatWindowFooterCenterItemInput").style.display = "block";
+        document.getElementById("createQuestionInput").style.display = "none";
+        document.getElementById("chatWindowFooterRightItemHidden").style.display = "none";
+        document.getElementById("chatWindowFooterRightItem").style.display = "flex";
+        document.getElementById("chatWindowFooterLeftItem").style.display = "flex";
+        document.getElementById("chatWindowFooterLeftItemHidden2").style.display = "none";
+        document.getElementById("chatWindowFooterLeftItem2").style.display = "flex";
+        return;
+    } else {
+        startTyping("creating question...");
+        //remove the middle input field and replace with 3 input fields
+        document.getElementById("chatWindowFooterCenterItemInput").style.display = "none";
+        document.getElementById("createQuestionInput").style.display = "block";
+        document.getElementById("chatWindowFooterRightItem").style.display = "none";
+        document.getElementById("chatWindowFooterRightItemHidden").style.display = "flex";
+        document.getElementById("chatWindowFooterLeftItem").style.display = "none";
+        document.getElementById("chatWindowFooterLeftItemHidden2").style.display = "flex";
+        document.getElementById("chatWindowFooterLeftItem2").style.display = "none";
+        //focus on the first input field
+        document.getElementById("createQuestionInput").focus();
+    }
+}
+
+function sendQuestion() {
+    startTyping("");
+    //if the message contains more than spaces or is empty, don't send it
+    if (document.getElementById("createQuestionInput").value.trim() === "") {
+        return;
+    } else {
+        var message = document.getElementById("createQuestionInput").value;
+        document.getElementById("createQuestionInput").value = "";
+        document.getElementById("chatWindowFooterRightItem").style.display = "flex";
+        document.getElementById("chatWindowFooterRightItemHidden").style.display = "none";
+        document.getElementById("chatWindowFooterLeftItem").style.display = "flex";
+        document.getElementById("chatWindowFooterLeftItemHidden2").style.display = "none";
+        document.getElementById("chatWindowFooterLeftItem2").style.display = "flex";
+
+        //generate a random number
+        let uuid = Math.floor(Math.random() * 100000);
+
+        //emit the message to the server
+        socket.emit("sendMessage", JSON.stringify({
+            username: localStorage.getItem("username"),
+            message: message,
+            time: new Date().toLocaleTimeString(),
+            type: "question",
+            uuid: uuid
+        }));
+
+        //remove the middle input field and replace with 3 input fields
+        document.getElementById("chatWindowFooterCenterItemInput").style.display = "block";
+        document.getElementById("createQuestionInput").style.display = "none";
+        document.getElementById("chatWindowFooterLeftItem2").style.display = "flex";
+    }
+}
+
 function callImpressum() {
     //if the impressum is already open, close it
     //redirect to the site with the impressum
@@ -343,29 +472,43 @@ function callImpressum() {
 //listen for if enter is pressed
 document.addEventListener("keydown", function (e) {
     if (e.key === "Enter") {
-        //if voting poll is currently being created, send the voting poll
-        if (document.getElementById("createVotingPollInput").style.display === "block") {
-            sendVotingPoll();
-        } else {
-            //send the message
-            sendMessage();
-        }
+        submitContent();
     }
 });
 
 //listen for if command + K is pressed
 document.addEventListener("keydown", function (e) {
     if (e.key === "k" && e.metaKey) {
-        //focus the input field
-        document.getElementsByClassName("chatWindowFooterCenterItemInput")[0].focus();
+        //make the input field visible and focus on it
+        document.getElementById("chatWindowFooterCenterItemInput").style.display = "block";
+        document.getElementById("chatWindowFooterCenterItemInput").focus();
+
     }
 });
 
 //list for if command + g is pressed
 document.addEventListener("keydown", function (e) {
-    if (e.key === "j" && e.metaKey) {
-        //create a voting poll
-        createVotingPoll();
+    if (e.key === "u" && e.metaKey) {
+        //look if the user is already doing something
+        if (document.getElementById("chatWindowFooterCenterItemInput").style.display === "none") {
+            return;
+        } else {
+            //create a voting poll
+            createVotingPoll();
+        };
+    }
+});
+
+//list for if command + g is pressed
+document.addEventListener("keydown", function (e) {
+    if (e.key === "g" && e.metaKey) {
+        //look if the user is already doing something
+        if (document.getElementById("chatWindowFooterCenterItemInput").style.display === "none") {
+            return;
+        } else {
+            //create a question
+            createQuestion();
+        };
     }
 });
 

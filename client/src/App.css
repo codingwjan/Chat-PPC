@@ -133,7 +133,7 @@
     color: white;
     /*make the hight so that the footer is at the bottom*/
     width: 350px;
-    height: calc(100vh - 300px);
+    height: calc(100vh);
 }
 
 .sideBarTitle {
@@ -372,7 +372,7 @@
 .chatWindowBodyMessageTime {
     font-size: 20px;
     font-weight: 400;
-    text-align: start;
+    text-align: end;
     margin-left: 10px;
     color: gray;
 }
@@ -381,6 +381,14 @@
     font-size: 30px;
     font-weight: 400;
     text-align: start;
+}
+
+.chatWindowBodyOriginalMessageText {
+    color: gray;
+    font-size: 20px;
+    font-weight: 400;
+    text-align: start;
+
 }
 
 .chatWindowFooter {

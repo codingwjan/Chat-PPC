@@ -2,7 +2,7 @@ import React from 'react';
 import socketIOClient from "socket.io-client";
 import './login.css';
 
-const socket = socketIOClient('http://192.168.178.75:3001');
+const socket = socketIOClient('http://37.114.42.93:3001');
 
 function Login() {
 
@@ -47,9 +47,17 @@ function submitUsername() {
             username: document.getElementsByClassName("loginContainerInput")[0].value,
             uuid: uuid,
             profilePicture: profilePicture
-        }));//
-        //redirect to chat page
-        window.location.href = "/chat";
+        }));
+
+        socket.on("userLoggedIn", (data) => {
+            window.location.href = "/chat";
+        });
+
+        socket.on("userNotLoggedIn", (data) => {
+            document.getElementById('loginContainerSubmitButton').style.pointerEvents = "auto";
+            document.getElementById('loginContainerSubmitButton').style.cursor = "pointer";
+            alert("Username not allowed")
+        });
 
     } else {
         //make the input field have a red glow if the input field is below 2 characters

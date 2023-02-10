@@ -12,7 +12,7 @@ let connectionCount = 0;
 const httpServer = require("http").createServer();
 const io = require('socket.io')(3001, {
     cors: {
-        origin: "http://192.168.178.75:3000",
+        origin: "http://37.114.42.93:3000",
         methods: ["GET", "POST"]
     }
 });
@@ -109,6 +109,7 @@ io.on("connection", (socket) => {
     });
 
     socket.on("changeUserName", (data) => {
+
         //decode the data
         let decodedData = JSON.parse(data);
         //get username and uuid
@@ -117,15 +118,24 @@ io.on("connection", (socket) => {
 
         uuid = parseInt(uuid)
 
-        //replace the new username in the users.json file
-        let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
-        for (let i = 0; i < users.length; i++) {
-            if (users[i].uuid === uuid) {
-                //clear the old username
-                users[i].username = username;
+        console.log(username)
+
+        if (fs.readFileSync(path.join(__dirname, "blacklist.json")).includes(username)) {
+            //send userNotLoggedIn to the client
+            socket.emit("userNotLoggedIn", "Username is not allowed");
+        } else {
+
+
+            //replace the new username in the users.json file
+            let users = JSON.parse(fs.readFileSync(path.join(__dirname, "users.json")));
+            for (let i = 0; i < users.length; i++) {
+                if (users[i].uuid === uuid) {
+                    //clear the old username
+                    users[i].username = username;
+                }
+                //write the new array to the users.json file
+                fs.writeFileSync(path.join(__dirname, "users.json"), JSON.stringify(users));
             }
-            //write the new array to the users.json file
-            fs.writeFileSync(path.join(__dirname, "users.json"), JSON.stringify(users));
         }
     });
 
@@ -269,6 +279,60 @@ io.on("connection", (socket) => {
         });
         //write the new array to the users.json file
         fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));
+    });
+
+    socket.on("answer" , (data) => {
+        console.log(data)
+        console.log("answer")
+        //decode the data
+        let decodedData = JSON.parse(data);
+        //get username and uuid
+        let username = decodedData.username;
+        let message = decodedData.message;
+        let uuid = decodedData.uuid;
+        let questionId = decodedData.questionId;
+        let time = new Date().toLocaleTimeString();
+        let type = "answer";
+        let profilePicture = "https://www.nailseatowncouncil.gov.uk/wp-content/uploads/blank-profile-picture-973460_1280.jpg"
+        let oldusername
+        let oldmessage
+
+        //look for old uuid in chat.json and get username and message
+        let messages = JSON.parse(fs.readFileSync(path.join(__dirname, "chat.json")));
+        for (let i = 0; i < messages.length; i++) {
+            if (messages[i].uuid === questionId) {
+                oldusername = messages[i].username;
+                oldmessage = messages[i].message;
+            }
+        }
+        console.log(oldusername)
+        console.log(oldmessage)
+        console.log(message)
+        //send the new message to all clients
+        io.emit("newMessage", JSON.stringify({
+            username: username,
+            message: message,
+            oldusername: oldusername,
+            oldmessage: oldmessage,
+            uuid: uuid,
+            time: time,
+            type: type,
+            profilePicture: profilePicture
+        }));
+
+        messages.push({
+            username: username,
+            message: message,
+            oldusername: oldusername,
+            oldmessage: oldmessage,
+            uuid: uuid,
+            time: time,
+            type: type,
+            profilePicture: profilePicture
+        });
+
+        fs.writeFileSync(path.join(__dirname, "chat.json"), JSON.stringify(messages));
+
     });
 
     socket.on("voteLeft", (data) => {
