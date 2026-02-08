@@ -1,83 +1,93 @@
-# Getting Started with Create React App
+# Chat-PPC Client (Active Runtime)
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+This folder now contains the active Chat-PPC application:
 
-## Available Scripts
+- Next.js (App Router) + TypeScript
+- Tailwind CSS
+- Prisma + PostgreSQL
+- REST + SSE realtime transport
 
-In the project directory, you can run:
+Legacy CRA files were moved to `legacy-cra/` for reference only.
 
-### `npm start`
+## Prerequisites
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+- Node.js 20+
+- pnpm 10+
+- PostgreSQL database (local or cloud)
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## Environment
 
-### `npm test`
+Create `client/.env` from `client/.env.example`:
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more
-information.
+```bash
+cp .env.example .env
+```
 
-### `npm run build`
+Required values:
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+- `DATABASE_URL` PostgreSQL connection string
+- `OPENAI_API_KEY` optional, needed for real `!ai` model responses
+- `OPENAI_MODEL` optional, defaults to `gpt-4o-mini`
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+## Install
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+From the repository root:
 
-### `npm run eject`
+```bash
+pnpm install
+```
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+## Database Setup
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will
-remove the single build dependency from your project.
+Generate Prisma client and apply migrations:
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right
-into your project so you have full control over them. All of the commands except `eject` will still work, but they will
-point to the copied scripts so you can tweak them. At this point you're on your own.
+```bash
+pnpm -C client prisma:generate
+pnpm -C client prisma:migrate
+```
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you
-shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't
-customize it when you are ready for it.
+Import legacy JSON data from `../server` into PostgreSQL:
 
-## Learn More
+```bash
+pnpm -C client import:legacy
+```
 
-You can learn more in
-the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+The import is idempotent and safe to rerun.
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+## Run
 
-### Code Splitting
+```bash
+pnpm -C client dev
+```
 
-This section has moved
-here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+Open [http://localhost:3000](http://localhost:3000).
 
-### Analyzing the Bundle Size
+## Commands
 
-This section has moved
-here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+```bash
+pnpm -C client dev
+pnpm -C client build
+pnpm -C client start
+pnpm -C client lint
+pnpm -C client typecheck
+pnpm -C client test
+```
 
-### Making a Progressive Web App
+## API Surface
 
-This section has moved
-here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
+Implemented route handlers:
 
-### Advanced Configuration
+- `POST /api/auth/login`
+- `PATCH /api/users/me`
+- `POST /api/presence/ping`
+- `POST /api/presence/typing`
+- `GET /api/messages`
+- `POST /api/messages`
+- `POST /api/polls/vote`
+- `GET /api/stream` (SSE)
 
-This section has moved
-here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
+## Notes
 
-### Deployment
-
-This section has moved
-here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved
-here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+- Typing state, online presence, poll voting, question/answer threading, and `!ai` message trigger are preserved from the legacy app behavior.
+- Poll voting is now enforced server-side (one vote per user per poll).
+- If `OPENAI_API_KEY` is not set, the app still responds with a deterministic fallback AI message.
