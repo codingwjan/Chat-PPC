@@ -5,8 +5,8 @@ import { handleApiError } from "@/server/http";
 
 export const runtime = "nodejs";
 
-const MAX_FILE_SIZE_BYTES = 4 * 1024 * 1024;
-const MAX_INLINE_DATA_URL_BYTES = 700 * 1024;
+const MAX_FILE_SIZE_BYTES = 6 * 1024 * 1024;
+const MAX_INLINE_DATA_URL_BYTES = 6 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 
 function extensionFor(type: string): string {
@@ -31,14 +31,14 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     if (file.size > MAX_FILE_SIZE_BYTES) {
-      throw new AppError("Image must be 4MB or smaller", 400);
+      throw new AppError("Image must be 6MB or smaller", 400);
     }
 
     // Local/dev fallback when Blob is not configured: keep avatar in DB as data URL.
     if (!process.env.BLOB_READ_WRITE_TOKEN) {
       if (file.size > MAX_INLINE_DATA_URL_BYTES) {
         throw new AppError(
-          "Blob storage is not configured. Upload an image up to 700KB or set BLOB_READ_WRITE_TOKEN.",
+          "Blob storage is not configured. Upload an image up to 6MB or set BLOB_READ_WRITE_TOKEN.",
           400,
         );
       }

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  parseAdminActionRequest,
+  parseAdminOverviewRequest,
   parseCreateMessageRequest,
   parseLoginRequest,
   parseRenameUserRequest,
@@ -71,5 +73,24 @@ describe("contracts", () => {
     });
 
     expect(parsed.side).toBe("left");
+  });
+
+  it("parses admin overview request", () => {
+    const parsed = parseAdminOverviewRequest({
+      clientId: "client-1",
+      devAuthToken: "dev-token",
+    });
+
+    expect(parsed.clientId).toBe("client-1");
+  });
+
+  it("requires targetUsername for delete_user admin action", () => {
+    expect(() =>
+      parseAdminActionRequest({
+        clientId: "client-1",
+        devAuthToken: "dev-token",
+        action: "delete_user",
+      }),
+    ).toThrow("targetUsername is required for delete_user");
   });
 });

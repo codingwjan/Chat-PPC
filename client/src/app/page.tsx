@@ -14,7 +14,7 @@ export default function HomePage() {
           Learn, Vote, Challenge, and Chat Together
         </h1>
         <p className="mt-4 max-w-2xl text-sm text-slate-600 sm:text-base">
-          A fun classroom chat with smart `/ai` help, rich polls (up to 15 options), questions, and
+          A fun classroom chat with smart `@chatgpt` help, rich polls (up to 15 options), questions, and
           challenge posts in one fast realtime app.
         </p>
         <div className="mt-8 flex flex-wrap items-center gap-3">

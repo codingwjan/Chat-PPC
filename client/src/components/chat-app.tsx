@@ -4,6 +4,7 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatMessage } from "@/components/chat-message";
+import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { apiJson } from "@/lib/http";
 import {
   clearSession,
@@ -13,11 +14,17 @@ import {
   type SessionState,
 } from "@/lib/session";
 import type {
+  AdminActionRequest,
+  AdminActionResponse,
+  AdminOverviewDTO,
+  AiStatusDTO,
+  ChatBackgroundDTO,
   CreateMessageRequest,
+  MediaItemDTO,
+  MediaPageDTO,
   MessageDTO,
+  MessagePageDTO,
   RenameUserRequest,
-  SnapshotDTO,
-  SseEventPayloadMap,
   UserPresenceDTO,
   VotePollRequest,
 } from "@/lib/types";
@@ -28,6 +35,60 @@ type ComposerMode = "message" | "question" | "poll" | "challenge";
 interface UploadResponse {
   url: string;
 }
+
+interface UploadedDraftImage {
+  id: string;
+  url: string;
+  label: string;
+}
+
+function DraftImagePreview({
+  image,
+  onRemove,
+}: {
+  image: UploadedDraftImage;
+  onRemove: () => void;
+}) {
+  const [loaded, setLoaded] = useState(false);
+
+  return (
+    <div className="group relative h-14 w-14 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
+      {!loaded ? <div className="absolute inset-0 animate-pulse bg-slate-200" aria-hidden /> : null}
+      <img
+        src={image.url}
+        alt={image.label}
+        className={`h-full w-full object-cover transition-opacity duration-200 ${loaded ? "opacity-100" : "opacity-0"}`}
+        loading="lazy"
+        decoding="async"
+        onLoad={() => setLoaded(true)}
+        onError={() => setLoaded(true)}
+      />
+      <button
+        type="button"
+        onClick={onRemove}
+        className="absolute right-1 top-1 hidden h-5 w-5 items-center justify-center rounded-full bg-slate-900/80 text-xs text-white group-hover:flex"
+        aria-label="Remove uploaded image"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+const MESSAGE_PAGE_SIZE = 12;
+const MESSAGE_DELTA_LIMIT = 24;
+const MESSAGE_POLL_INTERVAL_MS = 2_000;
+const PRESENCE_POLL_INTERVAL_MS = 2_000;
+const PRESENCE_PING_INTERVAL_MS = 4_000;
+const NEAR_BOTTOM_PX = 80;
+const ONBOARDING_KEY = "chatppc.onboarding.v1";
+const MAX_MESSAGE_INPUT_LINES = 10;
+const SUPPORTED_CHAT_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const MEDIA_PAGE_SIZE = 3;
+const MEDIA_CACHE_KEY = "chatppc.media.cache.v1";
+const MEDIA_CACHE_TTL_MS = 5 * 60 * 1_000;
+
+type NotificationState = NotificationPermission | "unsupported";
 
 function mergeUser(users: UserPresenceDTO[], next: UserPresenceDTO): UserPresenceDTO[] {
   const index = users.findIndex((user) => user.clientId === next.clientId);
@@ -49,6 +110,91 @@ function mergeMessage(messages: MessageDTO[], next: MessageDTO): MessageDTO[] {
   return copy;
 }
 
+function mergeMessages(messages: MessageDTO[], incoming: MessageDTO[]): MessageDTO[] {
+  return incoming.reduce((current, message) => mergeMessage(current, message), messages);
+}
+
+function mergeMediaItems(current: MediaItemDTO[], incoming: MediaItemDTO[]): MediaItemDTO[] {
+  const seen = new Set(current.map((item) => item.url));
+  const merged = [...current];
+  for (const item of incoming) {
+    if (seen.has(item.url)) continue;
+    seen.add(item.url);
+    merged.push(item);
+  }
+  return merged;
+}
+
+function applyOptimisticPollVote(
+  messages: MessageDTO[],
+  input: {
+    pollMessageId: string;
+    optionIds: string[];
+    voter: {
+      id: string;
+      username: string;
+      profilePicture: string;
+    };
+  },
+): MessageDTO[] {
+  let changed = false;
+  const normalizedVoter = input.voter.username.trim().toLowerCase();
+  const selected = new Set(input.optionIds);
+
+  const nextMessages = messages.map((message) => {
+    if (message.id !== input.pollMessageId || !message.poll) {
+      return message;
+    }
+
+    let optionChanged = false;
+    const nextOptions = message.poll.options.map((option) => {
+      const votersWithoutCurrent = option.voters.filter(
+        (voter) => voter.username.trim().toLowerCase() !== normalizedVoter,
+      );
+
+      const shouldSelect = selected.has(option.id);
+      const nextVoters = shouldSelect
+        ? [
+          ...votersWithoutCurrent,
+          {
+            id: input.voter.id,
+            username: input.voter.username,
+            profilePicture: input.voter.profilePicture,
+          },
+        ]
+        : votersWithoutCurrent;
+
+      const nextVotes = nextVoters.length;
+      if (nextVotes !== option.votes || nextVoters.length !== option.voters.length) {
+        optionChanged = true;
+      }
+
+      return {
+        ...option,
+        votes: nextVotes,
+        voters: nextVoters,
+      };
+    });
+
+    if (!optionChanged) {
+      return message;
+    }
+
+    changed = true;
+    return {
+      ...message,
+      poll: {
+        ...message.poll,
+        options: nextOptions,
+      },
+      resultone: String(nextOptions[0]?.votes ?? 0),
+      resulttwo: String(nextOptions[1]?.votes ?? 0),
+    };
+  });
+
+  return changed ? nextMessages : messages;
+}
+
 function syncProfilePictureForUser(messages: MessageDTO[], user: UserPresenceDTO): MessageDTO[] {
   let changed = false;
   const nextMessages = messages.map((message) => {
@@ -65,6 +211,16 @@ function syncProfilePictureForUser(messages: MessageDTO[], user: UserPresenceDTO
   return changed ? nextMessages : messages;
 }
 
+function toNewestTimestamp(current: string | null, candidate: string): string {
+  if (!current) return candidate;
+  return new Date(candidate).getTime() > new Date(current).getTime() ? candidate : current;
+}
+
+interface LightboxState {
+  url: string;
+  alt: string;
+}
+
 async function uploadProfileImage(file: File): Promise<string> {
   const formData = new FormData();
   formData.set("file", file);
@@ -77,12 +233,49 @@ async function uploadProfileImage(file: File): Promise<string> {
   return payload.url;
 }
 
+async function readApiError(response: Response, fallback: string): Promise<string> {
+  const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+  return payload?.error || fallback;
+}
+
+function statusForComposer(input: {
+  mode: ComposerMode;
+  messageDraft: string;
+  hasUploadedImages: boolean;
+  questionDraft: string;
+  challengeDraft: string;
+  pollQuestion: string;
+  pollOptions: string[];
+}): string {
+  if (input.mode === "message" && (input.messageDraft.trim() || input.hasUploadedImages)) return "typing…";
+  if (input.mode === "question" && input.questionDraft.trim()) return "asking a question…";
+  if (input.mode === "challenge" && input.challengeDraft.trim()) return "creating a challenge…";
+  if (input.mode === "poll") {
+    const hasPollContent = input.pollQuestion.trim() || input.pollOptions.some((option) => option.trim());
+    if (hasPollContent) return "creating a poll…";
+  }
+  return "";
+}
+
 export function ChatApp() {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
   const profileUploadRef = useRef<HTMLInputElement>(null);
   const chatUploadRef = useRef<HTMLInputElement>(null);
+  const backgroundUploadRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
+  const mediaScrollRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef(true);
+  const latestMessageAtRef = useRef<string | null>(null);
+  const knownMessageIdsRef = useRef<Set<string>>(new Set());
+  const mediaItemsRef = useRef<MediaItemDTO[]>([]);
+  const isLeavingRef = useRef(false);
+  const lastSentStatusRef = useRef<string>("");
+  const prependAnchorRef = useRef<{ height: number; top: number } | null>(null);
+  const optimisticVoteRollbackRef = useRef<MessageDTO[] | null>(null);
+  const draftBeforeHistoryRef = useRef("");
+  const dragDepthRef = useRef(0);
+  const deliveryTimersRef = useRef<Record<string, number>>({});
 
   const [session, setSession] = useState<SessionState | null>(() => loadSession());
   const [users, setUsers] = useState<UserPresenceDTO[]>([]);
@@ -90,26 +283,61 @@ export function ChatApp() {
   const [error, setError] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState("online");
   const [uploadingChat, setUploadingChat] = useState(false);
+  const [uploadingBackground, setUploadingBackground] = useState(false);
+  const [chatBackgroundUrl, setChatBackgroundUrl] = useState<string | null>(null);
+  const [mediaItems, setMediaItems] = useState<MediaItemDTO[]>([]);
+  const [mediaNextCursor, setMediaNextCursor] = useState<string | null>(null);
+  const [mediaHasMore, setMediaHasMore] = useState(false);
+  const [mediaTotalCount, setMediaTotalCount] = useState(0);
+  const [loadingMedia, setLoadingMedia] = useState(false);
+  const [loadingMediaMore, setLoadingMediaMore] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showMedia, setShowMedia] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
   const [composerMode, setComposerMode] = useState<ComposerMode>("message");
+  const [hasMoreOlder, setHasMoreOlder] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const [isLeaving, setIsLeaving] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [notificationState, setNotificationState] = useState<NotificationState>(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      return "unsupported";
+    }
+    return Notification.permission;
+  });
+  const [adminOverview, setAdminOverview] = useState<AdminOverviewDTO | null>(null);
+  const [adminBusy, setAdminBusy] = useState(false);
+  const [adminNotice, setAdminNotice] = useState<string | null>(null);
+  const [showAdminPanel, setShowAdminPanel] = useState(false);
+  const [adminTargetUsername, setAdminTargetUsername] = useState("");
+  const [adminTargetMessageId, setAdminTargetMessageId] = useState("");
+  const [pendingDeliveries, setPendingDeliveries] = useState<Record<string, number>>({});
+  const [lightbox, setLightbox] = useState<LightboxState | null>(null);
 
   const [messageDraft, setMessageDraft] = useState("");
+  const [uploadedDraftImages, setUploadedDraftImages] = useState<UploadedDraftImage[]>([]);
   const [questionDraft, setQuestionDraft] = useState("");
   const [challengeDraft, setChallengeDraft] = useState("");
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   const [pollQuestion, setPollQuestion] = useState("");
   const [pollOptions, setPollOptions] = useState<string[]>(["", ""]);
   const [pollMultiSelect, setPollMultiSelect] = useState(false);
-  const [pollAllowVoteChange, setPollAllowVoteChange] = useState(false);
 
   const [editingProfile, setEditingProfile] = useState(false);
   const [uploadingProfile, setUploadingProfile] = useState(false);
+  const [profileCropFile, setProfileCropFile] = useState<File | null>(null);
   const [usernameDraft, setUsernameDraft] = useState(() => loadSession()?.username || "");
   const [profilePictureDraft, setProfilePictureDraft] = useState(
     () => loadSession()?.profilePicture || getDefaultProfilePicture(),
   );
+
+  const [showMentionSuggestions, setShowMentionSuggestions] = useState(false);
+  const [mentionFilter, setMentionFilter] = useState("");
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [composerHistoryIndex, setComposerHistoryIndex] = useState(-1);
+  const [isDraggingUpload, setIsDraggingUpload] = useState(false);
+  const isDeveloperMode = Boolean(session?.devMode && session.devAuthToken);
 
   const onlineUsers = useMemo(
     () => [
@@ -127,96 +355,676 @@ export function ChatApp() {
     [users, aiStatus],
   );
 
-  const [showMentionSuggestions, setShowMentionSuggestions] = useState(false);
-  const [mentionFilter, setMentionFilter] = useState("");
-  const [mentionIndex, setMentionIndex] = useState(0);
-
   const filteredMentionUsers = useMemo(() => {
     if (!mentionFilter) return onlineUsers;
-    return onlineUsers.filter((u) => u.username.toLowerCase().includes(mentionFilter.toLowerCase()));
+    return onlineUsers.filter((user) => user.username.toLowerCase().includes(mentionFilter.toLowerCase()));
   }, [onlineUsers, mentionFilter]);
+
+  const ownMessageHistory = useMemo(() => {
+    if (!session) return [];
+    const self = session.username.trim().toLowerCase();
+    return messages
+      .filter((message) => message.type === "message" && message.username.trim().toLowerCase() === self)
+      .map((message) => message.message)
+      .filter((value) => value.trim().length > 0);
+  }, [messages, session]);
+
+  const derivedStatus = useMemo(
+    () =>
+      statusForComposer({
+        mode: composerMode,
+        messageDraft,
+        hasUploadedImages: uploadedDraftImages.length > 0,
+        questionDraft,
+        challengeDraft,
+        pollQuestion,
+        pollOptions,
+      }),
+    [challengeDraft, composerMode, messageDraft, pollOptions, pollQuestion, questionDraft, uploadedDraftImages.length],
+  );
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    if (!scrollRef.current) return;
+    scrollRef.current.scrollTo({
+      top: scrollRef.current.scrollHeight,
+      behavior,
+    });
+  }, []);
+
+  const clearPendingDelivery = useCallback((messageId: string) => {
+    const timer = deliveryTimersRef.current[messageId];
+    if (timer) {
+      window.clearInterval(timer);
+      delete deliveryTimersRef.current[messageId];
+    }
+
+    setPendingDeliveries((current) => {
+      if (!(messageId in current)) return current;
+      const next = { ...current };
+      delete next[messageId];
+      return next;
+    });
+  }, []);
+
+  const startPendingDelivery = useCallback(
+    (messageId: string) => {
+      clearPendingDelivery(messageId);
+      setPendingDeliveries((current) => ({ ...current, [messageId]: 8 }));
+
+      const interval = window.setInterval(() => {
+        setPendingDeliveries((current) => {
+          const value = current[messageId];
+          if (value === undefined) return current;
+          const nextValue = Math.min(94, value + Math.max(2, Math.floor(Math.random() * 10)));
+          if (nextValue === value) return current;
+          return { ...current, [messageId]: nextValue };
+        });
+      }, 170);
+
+      deliveryTimersRef.current[messageId] = interval;
+    },
+    [clearPendingDelivery],
+  );
+
+  const createTempMessageId = useCallback((): string => {
+    return `temp-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }, []);
+
+  const appendOptimisticMessage = useCallback(
+    (message: MessageDTO) => {
+      setMessages((current) => mergeMessage(current, message));
+      if (isAtBottomRef.current) {
+        requestAnimationFrame(() => scrollToBottom("smooth"));
+      }
+    },
+    [scrollToBottom],
+  );
+
+  const removeOptimisticMessage = useCallback((messageId: string) => {
+    knownMessageIdsRef.current.delete(messageId);
+    setMessages((current) => current.filter((message) => message.id !== messageId));
+  }, []);
+
+  const resizeMessageInput = useCallback(() => {
+    const textarea = messageInputRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = "auto";
+    const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight || "20") || 20;
+    const maxHeight = lineHeight * MAX_MESSAGE_INPUT_LINES;
+    const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
+    textarea.style.height = `${Math.max(lineHeight, nextHeight)}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+  }, []);
+
+  const activateAskChatGpt = useCallback(() => {
+    setComposerMode("message");
+    setComposerOpen(true);
+    setMessageDraft((current) => {
+      if (/(^|\s)@chatgpt\b/i.test(current)) return current;
+      const trimmed = current.trim();
+      if (!trimmed) return "@chatgpt ";
+      return `@chatgpt ${current}`;
+    });
+
+    requestAnimationFrame(() => {
+      const textarea = messageInputRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      const cursor = textarea.value.length;
+      textarea.setSelectionRange(cursor, cursor);
+    });
+  }, []);
+
+  const updateLatestMessageCursor = useCallback((incoming: MessageDTO[]) => {
+    for (const message of incoming) {
+      latestMessageAtRef.current = toNewestTimestamp(latestMessageAtRef.current, message.createdAt);
+    }
+  }, []);
+
+  const notifyMessages = useCallback(
+    (incoming: MessageDTO[]) => {
+      if (Notification.permission !== "granted" || isLeavingRef.current) return;
+
+      const currentUsername = session?.username?.trim().toLowerCase() ?? "";
+
+      for (const payload of incoming) {
+        const isOwnByClientId = Boolean(session?.clientId) && payload.authorId === session?.clientId;
+        const isOwnByUsername = currentUsername.length > 0 && payload.username.trim().toLowerCase() === currentUsername;
+        if (isOwnByClientId || isOwnByUsername) continue;
+
+        const compactMessage = payload.message.replace(/\s+/g, " ").trim();
+        new Notification(`${payload.username}: ${compactMessage}`, {
+          icon: payload.profilePicture,
+        });
+      }
+    },
+    [session?.clientId, session?.username],
+  );
+
+  const fetchMessagePage = useCallback(async (params: {
+    limit?: number;
+    before?: string;
+    after?: string;
+  }): Promise<MessagePageDTO> => {
+    const searchParams = new URLSearchParams();
+    searchParams.set("limit", String(params.limit ?? MESSAGE_PAGE_SIZE));
+    if (params.before) searchParams.set("before", params.before);
+    if (params.after) searchParams.set("after", params.after);
+    return apiJson<MessagePageDTO>(`/api/messages?${searchParams.toString()}`);
+  }, []);
+
+  const fetchPresence = useCallback(async (): Promise<UserPresenceDTO[]> => {
+    return apiJson<UserPresenceDTO[]>("/api/presence");
+  }, []);
+
+  const fetchAiStatus = useCallback(async (): Promise<AiStatusDTO> => {
+    return apiJson<AiStatusDTO>("/api/ai/status");
+  }, []);
+
+  const fetchChatBackground = useCallback(async (): Promise<ChatBackgroundDTO> => {
+    return apiJson<ChatBackgroundDTO>("/api/chat/background");
+  }, []);
+
+  const hydrateMediaCache = useCallback(() => {
+    if (typeof window === "undefined") return false;
+
+    try {
+      const raw = window.localStorage.getItem(MEDIA_CACHE_KEY);
+      if (!raw) return false;
+      const parsed = JSON.parse(raw) as {
+        cachedAt: number;
+        items: MediaItemDTO[];
+        nextCursor: string | null;
+        hasMore: boolean;
+        total: number;
+      };
+
+      if (!parsed || !Array.isArray(parsed.items) || typeof parsed.cachedAt !== "number") {
+        return false;
+      }
+      if (Date.now() - parsed.cachedAt > MEDIA_CACHE_TTL_MS) {
+        return false;
+      }
+
+      setMediaItems(parsed.items);
+      setMediaNextCursor(parsed.nextCursor ?? null);
+      setMediaHasMore(Boolean(parsed.hasMore));
+      setMediaTotalCount(Number.isFinite(parsed.total) ? parsed.total : parsed.items.length);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const persistMediaCache = useCallback((payload: {
+    items: MediaItemDTO[];
+    nextCursor: string | null;
+    hasMore: boolean;
+    total: number;
+  }) => {
+    if (typeof window === "undefined") return;
+
+    try {
+      window.localStorage.setItem(
+        MEDIA_CACHE_KEY,
+        JSON.stringify({
+          cachedAt: Date.now(),
+          items: payload.items.slice(0, 180),
+          nextCursor: payload.nextCursor,
+          hasMore: payload.hasMore,
+          total: payload.total,
+        }),
+      );
+    } catch {
+      // Ignore storage errors.
+    }
+  }, []);
+
+  const fetchMediaItems = useCallback(
+    async (options?: {
+      silent?: boolean;
+      append?: boolean;
+      cursor?: string | null;
+    }): Promise<void> => {
+      const append = Boolean(options?.append);
+      const cursor = append ? options?.cursor ?? mediaNextCursor : options?.cursor ?? null;
+
+      if (append) {
+        setLoadingMediaMore(true);
+      } else if (!options?.silent && mediaItemsRef.current.length === 0) {
+        setLoadingMedia(true);
+      }
+
+      try {
+        const searchParams = new URLSearchParams({
+          limit: String(MEDIA_PAGE_SIZE),
+        });
+        if (cursor) {
+          searchParams.set("cursor", cursor);
+        }
+
+        const page = await apiJson<MediaPageDTO>(`/api/media?${searchParams.toString()}`);
+        const nextItems = append ? mergeMediaItems(mediaItemsRef.current, page.items) : page.items;
+        setMediaItems(nextItems);
+        setMediaNextCursor(page.nextCursor);
+        setMediaHasMore(page.hasMore);
+        setMediaTotalCount(page.total);
+        persistMediaCache({
+          items: nextItems,
+          nextCursor: page.nextCursor,
+          hasMore: page.hasMore,
+          total: page.total,
+        });
+      } catch (mediaError) {
+        if (!options?.silent || append) {
+          setError(mediaError instanceof Error ? mediaError.message : "Could not load media.");
+        }
+      } finally {
+        if (append) {
+          setLoadingMediaMore(false);
+        } else {
+          setLoadingMedia(false);
+        }
+      }
+    },
+    [mediaNextCursor, persistMediaCache],
+  );
+
+  const applyIncomingMessages = useCallback(
+    (incoming: MessageDTO[], options: { notify: boolean }) => {
+      if (incoming.length === 0) return;
+
+      const fresh = incoming.filter((message) => !knownMessageIdsRef.current.has(message.id));
+      setMessages((current) => mergeMessages(current, incoming));
+      updateLatestMessageCursor(incoming);
+
+      for (const message of fresh) {
+        knownMessageIdsRef.current.add(message.id);
+      }
+
+      if (options.notify && fresh.length > 0) {
+        notifyMessages(fresh);
+      }
+
+      if (isAtBottomRef.current) {
+        requestAnimationFrame(() => scrollToBottom(options.notify ? "smooth" : "auto"));
+      }
+    },
+    [notifyMessages, scrollToBottom, updateLatestMessageCursor],
+  );
+
+  const syncChatState = useCallback(async () => {
+    const [presence, page, ai, background] = await Promise.all([
+      fetchPresence(),
+      fetchMessagePage({ limit: MESSAGE_PAGE_SIZE }),
+      fetchAiStatus().catch(() => ({ status: "online", updatedAt: new Date().toISOString() })),
+      fetchChatBackground().catch(() => ({ url: null, updatedAt: null, updatedBy: null })),
+    ]);
+
+    setUsers(presence);
+    setAiStatus(ai.status || "online");
+    setChatBackgroundUrl(background.url);
+    setMessages(page.messages);
+    setHasMoreOlder(page.hasMore);
+
+    knownMessageIdsRef.current = new Set(page.messages.map((message) => message.id));
+    latestMessageAtRef.current = null;
+    updateLatestMessageCursor(page.messages);
+  }, [fetchAiStatus, fetchChatBackground, fetchMessagePage, fetchPresence, updateLatestMessageCursor]);
+
+  const fetchAdminOverview = useCallback(async () => {
+    if (!session?.clientId || !session.devAuthToken) {
+      setAdminOverview(null);
+      return;
+    }
+
+    const searchParams = new URLSearchParams({
+      clientId: session.clientId,
+      devAuthToken: session.devAuthToken,
+    });
+    const overview = await apiJson<AdminOverviewDTO>(`/api/admin?${searchParams.toString()}`);
+    setAdminOverview(overview);
+  }, [session?.clientId, session?.devAuthToken]);
+
+  const runAdminAction = useCallback(
+    async (
+      action: AdminActionRequest["action"],
+      options?: {
+        targetUsername?: string;
+        targetMessageId?: string;
+      },
+    ) => {
+      if (!session?.clientId || !session.devAuthToken) {
+        setError("Developer mode is not active.");
+        return;
+      }
+
+      setAdminBusy(true);
+      setAdminNotice(null);
+      try {
+        const payload: AdminActionRequest = {
+          clientId: session.clientId,
+          devAuthToken: session.devAuthToken,
+          action,
+          targetUsername: options?.targetUsername,
+          targetMessageId: options?.targetMessageId,
+        };
+
+        const result = await apiJson<AdminActionResponse>("/api/admin", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+
+        setAdminOverview(result.overview);
+        setAdminNotice(result.message);
+        setError(null);
+        await syncChatState();
+        requestAnimationFrame(() => scrollToBottom("auto"));
+      } catch (actionError) {
+        setError(actionError instanceof Error ? actionError.message : "Admin action failed.");
+      } finally {
+        setAdminBusy(false);
+      }
+    },
+    [scrollToBottom, session?.clientId, session?.devAuthToken, syncChatState],
+  );
+
+  const chatBackgroundStyle = useMemo(() => {
+    if (!chatBackgroundUrl) return undefined;
+    const escapedUrl = chatBackgroundUrl.replace(/"/g, '\\"');
+    return {
+      backgroundImage:
+        `linear-gradient(rgba(248,250,252,0.15), rgba(248,250,252,0.15)), url("${escapedUrl}")`,
+      backgroundSize: "cover",
+      backgroundPosition: "center",
+      backgroundAttachment: "fixed",
+    } as const;
+  }, [chatBackgroundUrl]);
+
+  const loadOlderMessages = useCallback(async () => {
+    if (!session || loadingOlder || !hasMoreOlder || messages.length === 0) return;
+    if (!scrollRef.current) return;
+
+    setLoadingOlder(true);
+    prependAnchorRef.current = {
+      height: scrollRef.current.scrollHeight,
+      top: scrollRef.current.scrollTop,
+    };
+
+    try {
+      const oldest = messages[0]?.createdAt;
+      if (!oldest) return;
+
+      const page = await fetchMessagePage({ before: oldest, limit: MESSAGE_PAGE_SIZE });
+      applyIncomingMessages(page.messages, { notify: false });
+      setHasMoreOlder(page.hasMore);
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : "Could not load older messages.");
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [applyIncomingMessages, fetchMessagePage, hasMoreOlder, loadingOlder, messages, session]);
+
+  useEffect(() => {
+    isLeavingRef.current = isLeaving;
+  }, [isLeaving]);
+
+  useEffect(() => {
+    mediaItemsRef.current = mediaItems;
+  }, [mediaItems]);
+
+  useEffect(() => {
+    if (composerMode !== "message") return;
+    resizeMessageInput();
+  }, [composerMode, messageDraft, resizeMessageInput, uploadedDraftImages.length]);
 
   useEffect(() => {
     if (!session) router.replace("/login");
   }, [router, session]);
 
   useEffect(() => {
+    return () => {
+      for (const timer of Object.values(deliveryTimersRef.current)) {
+        window.clearInterval(timer);
+      }
+      deliveryTimersRef.current = {};
+    };
+  }, []);
+
+  useEffect(() => {
     if (!session) return;
 
-    const source = new EventSource("/api/stream");
+    let cancelled = false;
 
-    const onSnapshot = (event: MessageEvent<string>) => {
-      const snapshot = JSON.parse(event.data) as SnapshotDTO;
-      setUsers(snapshot.users);
-      setMessages(snapshot.messages);
-    };
+    async function loadInitial(): Promise<void> {
+      try {
+        await syncChatState();
+        hydrateMediaCache();
+        if (cancelled) return;
+        setError(null);
 
-    const onPresence = (event: MessageEvent<string>) => {
-      const payload = JSON.parse(event.data) as SseEventPayloadMap["presence.updated"];
-      setUsers((current) => mergeUser(current, payload));
-    };
-
-    const onUser = (event: MessageEvent<string>) => {
-      const payload = JSON.parse(event.data) as SseEventPayloadMap["user.updated"];
-      setUsers((current) => mergeUser(current, payload));
-      setMessages((current) => syncProfilePictureForUser(current, payload));
-
-      if (payload.clientId === session.clientId) {
-        const nextSession = {
-          ...session,
-          username: payload.username,
-          profilePicture: payload.profilePicture,
-        };
-        setSession(nextSession);
-        setUsernameDraft(payload.username);
-        setProfilePictureDraft(payload.profilePicture);
-        saveSession(nextSession);
+        requestAnimationFrame(() => scrollToBottom("auto"));
+        const onboardingDone = window.localStorage.getItem(ONBOARDING_KEY) === "done";
+        setShowOnboarding(!onboardingDone);
+      } catch (loadError) {
+        if (cancelled) return;
+        setError(loadError instanceof Error ? loadError.message : "Could not load chat.");
       }
-    };
-
-    const onMessage = (event: MessageEvent<string>) => {
-      const payload = JSON.parse(event.data) as SseEventPayloadMap["message.created"];
-      setMessages((current) => mergeMessage(current, payload));
-
-      // Desktop Notification
-      if (
-        payload.authorId !== session?.clientId &&
-        payload.username !== "System" &&
-        Notification.permission === "granted" &&
-        document.visibilityState !== "visible"
-      ) {
-        new Notification(`New message from ${payload.username}`, {
-          body: payload.message,
-          icon: payload.profilePicture,
-        });
-      }
-    };
-
-    const onPoll = (event: MessageEvent<string>) => {
-      const payload = JSON.parse(event.data) as SseEventPayloadMap["poll.updated"];
-      setMessages((current) => mergeMessage(current, payload));
-    };
-
-    const onAiStatus = (event: MessageEvent<string>) => {
-      const payload = JSON.parse(event.data) as SseEventPayloadMap["ai.status"];
-      setAiStatus(payload.status);
-    };
-
-    source.addEventListener("snapshot", onSnapshot as EventListener);
-    source.addEventListener("presence.updated", onPresence as EventListener);
-    source.addEventListener("user.updated", onUser as EventListener);
-    source.addEventListener("message.created", onMessage as EventListener);
-    source.addEventListener("poll.updated", onPoll as EventListener);
-    source.addEventListener("ai.status", onAiStatus as EventListener);
-    source.onerror = () => setError("Realtime connection lost. Retrying…");
-
-    // Request Notification permission
-    if (Notification.permission === "default") {
-      void Notification.requestPermission();
     }
 
-    return () => source.close();
+    void loadInitial();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    hydrateMediaCache,
+    scrollToBottom,
+    session,
+    syncChatState,
+  ]);
+
+  useEffect(() => {
+    if (!showMedia) return;
+
+    const hasCache = hydrateMediaCache();
+    void fetchMediaItems({ silent: hasCache });
+  }, [fetchMediaItems, hydrateMediaCache, showMedia]);
+
+  useEffect(() => {
+    if (!showMedia || !mediaHasMore || loadingMedia || loadingMediaMore) return;
+    const container = mediaScrollRef.current;
+    if (!container) return;
+    let requesting = false;
+
+    const onScroll = () => {
+      if (requesting) return;
+      const nearBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 80;
+      if (!nearBottom) return;
+      requesting = true;
+      void fetchMediaItems({ append: true, silent: true }).finally(() => {
+        requesting = false;
+      });
+    };
+
+    container.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      container.removeEventListener("scroll", onScroll);
+    };
+  }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasMore, showMedia]);
+
+  useEffect(() => {
+    if (!isDeveloperMode) {
+      setAdminOverview(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadOverview = async () => {
+      try {
+        await fetchAdminOverview();
+      } catch (overviewError) {
+        if (!cancelled) {
+          setError(overviewError instanceof Error ? overviewError.message : "Could not load developer tools.");
+        }
+      }
+    };
+
+    void loadOverview();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchAdminOverview, isDeveloperMode]);
+
+  useEffect(() => {
+    if (!session) return;
+
+    let cancelled = false;
+
+    const pollPresence = async () => {
+      try {
+        const [nextUsers, nextAi, nextBackground] = await Promise.all([
+          fetchPresence(),
+          fetchAiStatus().catch(() => ({ status: "online", updatedAt: new Date().toISOString() })),
+          fetchChatBackground().catch(() => ({ url: null, updatedAt: null, updatedBy: null })),
+        ]);
+        if (cancelled || isLeavingRef.current) return;
+        setUsers(nextUsers);
+        setAiStatus(nextAi.status || "online");
+        setChatBackgroundUrl(nextBackground.url);
+      } catch {
+        if (!cancelled) {
+          setError("Presence refresh failed. Retrying…");
+        }
+      }
+    };
+
+    void pollPresence();
+    const interval = window.setInterval(() => {
+      void pollPresence();
+    }, PRESENCE_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [fetchAiStatus, fetchChatBackground, fetchPresence, session]);
+
+  useEffect(() => {
+    if (!session) return;
+
+    let cancelled = false;
+
+    const pollMessages = async () => {
+      try {
+        const cursor = latestMessageAtRef.current;
+        if (!cursor) return;
+
+        const page = await fetchMessagePage({ after: cursor, limit: MESSAGE_DELTA_LIMIT });
+        if (cancelled || isLeavingRef.current) return;
+
+        applyIncomingMessages(page.messages, { notify: true });
+      } catch {
+        if (!cancelled) {
+          setError("Message sync failed. Retrying…");
+        }
+      }
+    };
+
+    const interval = window.setInterval(() => {
+      void pollMessages();
+    }, MESSAGE_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [applyIncomingMessages, fetchMessagePage, session]);
+
+  useEffect(() => {
+    if (!session) return;
+
+    const pingPresence = async () => {
+      if (isLeavingRef.current) return;
+      await fetch("/api/presence/ping", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ clientId: session.clientId }),
+      }).catch(() => {
+        setError("Presence heartbeat failed. Retrying…");
+      });
+    };
+
+    void pingPresence();
+    const interval = window.setInterval(() => {
+      void pingPresence();
+    }, PRESENCE_PING_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(interval);
+    };
   }, [session]);
+
+  useEffect(() => {
+    if (!session || isLeaving) return;
+
+    const timeout = window.setTimeout(() => {
+      if (lastSentStatusRef.current === derivedStatus) return;
+
+      void fetch("/api/presence/typing", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          clientId: session.clientId,
+          status: derivedStatus,
+        }),
+      }).catch(() => {
+        // Ignore status failures.
+      });
+
+      lastSentStatusRef.current = derivedStatus;
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [derivedStatus, isLeaving, session]);
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+
+    const onScroll = () => {
+      const distanceFromBottom = element.scrollHeight - (element.scrollTop + element.clientHeight);
+      const atBottom = distanceFromBottom <= NEAR_BOTTOM_PX;
+      isAtBottomRef.current = atBottom;
+      setIsAtBottom(atBottom);
+
+      if (element.scrollTop < 120 && hasMoreOlder && !loadingOlder) {
+        void loadOlderMessages();
+      }
+    };
+
+    element.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+
+    return () => {
+      element.removeEventListener("scroll", onScroll);
+    };
+  }, [hasMoreOlder, loadOlderMessages, loadingOlder, messages.length]);
+
+  useEffect(() => {
+    const anchor = prependAnchorRef.current;
+    const element = scrollRef.current;
+    if (!anchor || !element) return;
+
+    const delta = element.scrollHeight - anchor.height;
+    element.scrollTop = anchor.top + delta;
+    prependAnchorRef.current = null;
+  }, [messages]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -227,14 +1035,19 @@ export function ChatApp() {
         messageInputRef.current?.focus();
       }
       if (event.key === "Escape") {
-        setShowShortcuts(false);
+        setShowMedia(false);
+        setLightbox(null);
         setMobileSidebarOpen(false);
       }
-      if (event.key === "?" && !["input", "textarea"].includes((event.target as HTMLElement)?.tagName?.toLowerCase())) {
+      if (
+        event.key === "?" &&
+        !["input", "textarea"].includes((event.target as HTMLElement)?.tagName?.toLowerCase())
+      ) {
         event.preventDefault();
-        setShowShortcuts((value) => !value);
+        setShowMedia((value) => !value);
       }
     };
+
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
@@ -246,6 +1059,10 @@ export function ChatApp() {
         method: "PATCH",
         body: JSON.stringify({ clientId: session.clientId, ...payload } satisfies RenameUserRequest),
       });
+
+      setUsers((current) => mergeUser(current, user));
+      setMessages((current) => syncProfilePictureForUser(current, user));
+
       const nextSession = {
         ...session,
         username: user.username,
@@ -258,41 +1075,111 @@ export function ChatApp() {
   );
 
   const sendMessage = useCallback(async (payload: CreateMessageRequest) => {
-    await apiJson<MessageDTO>("/api/messages", {
+    return apiJson<MessageDTO>("/api/messages", {
       method: "POST",
       body: JSON.stringify(payload),
     });
   }, []);
 
+  const updatePollOptionValue = useCallback((index: number, value: string) => {
+    setPollOptions((current) => {
+      const next = current.map((option, optionIndex) => (optionIndex === index ? value : option));
+      const allFieldsFilled = next.length > 0 && next.every((option) => option.trim().length > 0);
+
+      if (allFieldsFilled && next.length < 15) {
+        return [...next, ""];
+      }
+
+      return next;
+    });
+  }, []);
+
   const submitComposer = useCallback(async () => {
     if (!session) return;
+
+    let tempMessageId: string | null = null;
     try {
       if (composerMode === "message") {
         const content = messageDraft.trim();
-        if (!content) return;
+        const uploadedImageMarkdown = uploadedDraftImages
+          .map((image) => `![${image.label}](${image.url})`)
+          .join("\n");
+        const combinedMessage = [content, uploadedImageMarkdown].filter(Boolean).join("\n\n");
+        if (!combinedMessage) return;
+
+        tempMessageId = createTempMessageId();
+        appendOptimisticMessage({
+          id: tempMessageId,
+          authorId: session.clientId,
+          type: "message",
+          message: combinedMessage,
+          username: session.username,
+          profilePicture: session.profilePicture,
+          createdAt: new Date().toISOString(),
+        });
+        startPendingDelivery(tempMessageId);
+
         setMessageDraft("");
-        await sendMessage({ clientId: session.clientId, type: "message", message: content });
-      }
+        setComposerHistoryIndex(-1);
+        draftBeforeHistoryRef.current = "";
+        setUploadedDraftImages([]);
 
-      if (composerMode === "question") {
-        const content = questionDraft.trim();
-        if (!content) return;
-        await sendMessage({ clientId: session.clientId, type: "question", message: content });
-        setQuestionDraft("");
-      }
-
-      if (composerMode === "challenge") {
-        const content = challengeDraft.trim();
-        if (!content) return;
-        await sendMessage({
+        const created = await sendMessage({
           clientId: session.clientId,
           type: "message",
-          message: `Class Challenge: ${content}`,
+          message: combinedMessage,
         });
-        setChallengeDraft("");
-      }
+        clearPendingDelivery(tempMessageId);
+        removeOptimisticMessage(tempMessageId);
+        applyIncomingMessages([created], { notify: false });
+      } else if (composerMode === "question") {
+        const content = questionDraft.trim();
+        if (!content) return;
 
-      if (composerMode === "poll") {
+        tempMessageId = createTempMessageId();
+        appendOptimisticMessage({
+          id: tempMessageId,
+          authorId: session.clientId,
+          type: "question",
+          message: content,
+          username: session.username,
+          profilePicture: session.profilePicture,
+          createdAt: new Date().toISOString(),
+        });
+        startPendingDelivery(tempMessageId);
+        setQuestionDraft("");
+
+        const created = await sendMessage({ clientId: session.clientId, type: "question", message: content });
+        clearPendingDelivery(tempMessageId);
+        removeOptimisticMessage(tempMessageId);
+        applyIncomingMessages([created], { notify: false });
+      } else if (composerMode === "challenge") {
+        const content = challengeDraft.trim();
+        if (!content) return;
+        const challengeMessage = `Class Challenge: ${content}`;
+
+        tempMessageId = createTempMessageId();
+        appendOptimisticMessage({
+          id: tempMessageId,
+          authorId: session.clientId,
+          type: "message",
+          message: challengeMessage,
+          username: session.username,
+          profilePicture: session.profilePicture,
+          createdAt: new Date().toISOString(),
+        });
+        startPendingDelivery(tempMessageId);
+        setChallengeDraft("");
+
+        const created = await sendMessage({
+          clientId: session.clientId,
+          type: "message",
+          message: challengeMessage,
+        });
+        clearPendingDelivery(tempMessageId);
+        removeOptimisticMessage(tempMessageId);
+        applyIncomingMessages([created], { notify: false });
+      } else if (composerMode === "poll") {
         const question = pollQuestion.trim();
         const options = pollOptions.map((option) => option.trim()).filter(Boolean);
         if (!question) {
@@ -308,36 +1195,73 @@ export function ChatApp() {
           return;
         }
 
-        await sendMessage({
+        tempMessageId = createTempMessageId();
+        appendOptimisticMessage({
+          id: tempMessageId,
+          authorId: session.clientId,
+          type: "votingPoll",
+          message: question,
+          username: session.username,
+          profilePicture: session.profilePicture,
+          createdAt: new Date().toISOString(),
+          poll: {
+            options: options.map((option, index) => ({
+              id: `${tempMessageId}-opt-${index}`,
+              label: option,
+              votes: 0,
+              voters: [],
+            })),
+            settings: {
+              multiSelect: pollMultiSelect,
+              allowVoteChange: true,
+            },
+          },
+          resultone: "0",
+          resulttwo: "0",
+        });
+        startPendingDelivery(tempMessageId);
+
+        const created = await sendMessage({
           clientId: session.clientId,
           type: "votingPoll",
           message: question,
           pollOptions: options,
           pollMultiSelect,
-          pollAllowVoteChange,
         });
+        clearPendingDelivery(tempMessageId);
+        removeOptimisticMessage(tempMessageId);
+        applyIncomingMessages([created], { notify: false });
 
         setPollQuestion("");
         setPollOptions(["", ""]);
         setPollMultiSelect(false);
-        setPollAllowVoteChange(false);
       }
 
       setError(null);
     } catch (submitError) {
+      if (tempMessageId) {
+        clearPendingDelivery(tempMessageId);
+        removeOptimisticMessage(tempMessageId);
+      }
       setError(submitError instanceof Error ? submitError.message : "Could not send message.");
     }
   }, [
+    appendOptimisticMessage,
+    applyIncomingMessages,
     challengeDraft,
+    clearPendingDelivery,
     composerMode,
+    createTempMessageId,
     messageDraft,
-    pollAllowVoteChange,
     pollMultiSelect,
     pollOptions,
     pollQuestion,
     questionDraft,
+    removeOptimisticMessage,
     sendMessage,
     session,
+    startPendingDelivery,
+    uploadedDraftImages,
   ]);
 
   const submitAnswer = useCallback(
@@ -345,35 +1269,106 @@ export function ChatApp() {
       if (!session) return;
       const draft = answerDrafts[questionMessageId]?.trim() || "";
       if (!draft) return;
-      await sendMessage({
-        clientId: session.clientId,
+
+      const tempMessageId = createTempMessageId();
+      const questionContext = messages.find((message) => message.id === questionMessageId);
+      appendOptimisticMessage({
+        id: tempMessageId,
+        authorId: session.clientId,
         type: "answer",
         message: draft,
+        username: session.username,
+        profilePicture: session.profilePicture,
+        createdAt: new Date().toISOString(),
         questionId: questionMessageId,
+        oldusername: questionContext?.username,
+        oldmessage: questionContext?.message,
       });
+      startPendingDelivery(tempMessageId);
       setAnswerDrafts((current) => ({ ...current, [questionMessageId]: "" }));
+
+      try {
+        const created = await sendMessage({
+          clientId: session.clientId,
+          type: "answer",
+          message: draft,
+          questionId: questionMessageId,
+        });
+        clearPendingDelivery(tempMessageId);
+        removeOptimisticMessage(tempMessageId);
+        applyIncomingMessages([created], { notify: false });
+      } catch (submitError) {
+        clearPendingDelivery(tempMessageId);
+        removeOptimisticMessage(tempMessageId);
+        setAnswerDrafts((current) => ({ ...current, [questionMessageId]: draft }));
+        setError(submitError instanceof Error ? submitError.message : "Could not send answer.");
+      }
     },
-    [answerDrafts, sendMessage, session],
+    [
+      answerDrafts,
+      appendOptimisticMessage,
+      applyIncomingMessages,
+      clearPendingDelivery,
+      createTempMessageId,
+      messages,
+      removeOptimisticMessage,
+      sendMessage,
+      session,
+      startPendingDelivery,
+    ],
   );
 
   const handleVote = useCallback(
     async (pollMessageId: string, optionIds: string[]) => {
       if (!session) return;
+      optimisticVoteRollbackRef.current = null;
+      setMessages((current) => {
+        const optimistic = applyOptimisticPollVote(current, {
+          pollMessageId,
+          optionIds,
+          voter: {
+            id: session.clientId,
+            username: session.username,
+            profilePicture: session.profilePicture,
+          },
+        });
+        if (optimistic !== current) {
+          optimisticVoteRollbackRef.current = current;
+        }
+        return optimistic;
+      });
+
       try {
         const payload: VotePollRequest = {
           clientId: session.clientId,
           pollMessageId,
           optionIds,
         };
-        await apiJson<MessageDTO>("/api/polls/vote", {
+        const updated = await apiJson<MessageDTO>("/api/polls/vote", {
           method: "POST",
           body: JSON.stringify(payload),
         });
+        optimisticVoteRollbackRef.current = null;
+        applyIncomingMessages([updated], { notify: false });
       } catch (voteError) {
+        const rollback = optimisticVoteRollbackRef.current;
+        if (rollback) {
+          setMessages(rollback);
+        }
+        optimisticVoteRollbackRef.current = null;
         setError(voteError instanceof Error ? voteError.message : "Could not register vote.");
       }
     },
-    [session],
+    [applyIncomingMessages, session],
+  );
+
+  const handleDeleteMessage = useCallback(
+    async (messageId: string) => {
+      if (!isDeveloperMode) return;
+      if (!window.confirm("Delete this message?")) return;
+      await runAdminAction("delete_message", { targetMessageId: messageId });
+    },
+    [isDeveloperMode, runAdminAction],
   );
 
   async function saveProfile() {
@@ -390,15 +1385,21 @@ export function ChatApp() {
 
   async function onProfileImageUpload(file: File | undefined) {
     if (!file) return;
+    setError(null);
+    setProfileCropFile(file);
+    if (profileUploadRef.current) profileUploadRef.current.value = "";
+  }
+
+  async function onProfileCropConfirm(file: File) {
     setUploadingProfile(true);
     try {
       const url = await uploadProfileImage(file);
       setProfilePictureDraft(url);
+      setProfileCropFile(null);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Could not upload image.");
     } finally {
       setUploadingProfile(false);
-      if (profileUploadRef.current) profileUploadRef.current.value = "";
     }
   }
 
@@ -406,44 +1407,164 @@ export function ChatApp() {
     if (!file) return;
     setUploadingChat(true);
     try {
+      if (!SUPPORTED_CHAT_UPLOAD_MIME_TYPES.has(file.type)) {
+        throw new Error("Only jpg, png, webp, or gif images are supported.");
+      }
       const formData = new FormData();
       formData.set("file", file);
       const response = await fetch("/api/uploads/chat", { method: "POST", body: formData });
-      if (!response.ok) throw new Error("Upload failed");
+      if (!response.ok) throw new Error(await readApiError(response, "Upload failed"));
       const { url } = (await response.json()) as { url: string };
-      setMessageDraft((current) => (current ? `${current}\n![image](${url})` : `![image](${url})`));
-    } catch (err) {
-      setError("Could not upload image.");
+      setComposerMode("message");
+      setComposerOpen(true);
+      setUploadedDraftImages((current) => [
+        ...current,
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          url,
+          label: file.name || "image",
+        },
+      ]);
+      setError(null);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Could not upload image.");
     } finally {
       setUploadingChat(false);
       if (chatUploadRef.current) chatUploadRef.current.value = "";
     }
   }
 
-  async function logout() {
-    if (session) {
-      await fetch("/api/presence/logout", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ clientId: session.clientId }),
-        keepalive: true,
-      }).catch(() => { });
+  async function onChatImageDrop(files: FileList | File[]): Promise<void> {
+    const allFiles = Array.from(files);
+    if (allFiles.length === 0) return;
+
+    const imageFiles = allFiles.filter((file) => SUPPORTED_CHAT_UPLOAD_MIME_TYPES.has(file.type));
+    if (imageFiles.length === 0) {
+      setError("Only jpg, png, webp, or gif images are supported.");
+      return;
     }
+
+    setUploadingChat(true);
+    try {
+      const uploadedItems: UploadedDraftImage[] = [];
+      for (const file of imageFiles) {
+        const formData = new FormData();
+        formData.set("file", file);
+        const response = await fetch("/api/uploads/chat", { method: "POST", body: formData });
+        if (!response.ok) throw new Error(await readApiError(response, "Upload failed"));
+        const { url } = (await response.json()) as { url: string };
+        uploadedItems.push({
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          url,
+          label: file.name || "image",
+        });
+      }
+
+      setComposerMode("message");
+      setComposerOpen(true);
+      setUploadedDraftImages((current) => [...current, ...uploadedItems]);
+      setError(null);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Could not upload image.");
+    } finally {
+      setUploadingChat(false);
+    }
+  }
+
+  async function saveChatBackground(url: string | null): Promise<void> {
+    if (!session) return;
+
+    const response = await apiJson<ChatBackgroundDTO>("/api/chat/background", {
+      method: "POST",
+      body: JSON.stringify({
+        clientId: session.clientId,
+        url,
+      }),
+    });
+    setChatBackgroundUrl(response.url);
+  }
+
+  async function onBackgroundImageUpload(file: File | undefined): Promise<void> {
+    if (!file) return;
+    setUploadingBackground(true);
+    try {
+      const formData = new FormData();
+      formData.set("file", file);
+      const response = await fetch("/api/uploads/chat", { method: "POST", body: formData });
+      if (!response.ok) throw new Error(await readApiError(response, "Upload failed"));
+      const payload = (await response.json()) as UploadResponse;
+      await saveChatBackground(payload.url);
+      setError(null);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Could not update chat background.");
+    } finally {
+      setUploadingBackground(false);
+      if (backgroundUploadRef.current) backgroundUploadRef.current.value = "";
+    }
+  }
+
+  async function logout() {
+    if (!session) return;
+
+    setIsLeaving(true);
+
+    await fetch("/api/presence/typing", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ clientId: session.clientId, status: "" }),
+      keepalive: true,
+    }).catch(() => {});
+
+    await fetch("/api/presence/logout", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ clientId: session.clientId }),
+      keepalive: true,
+    }).catch(() => {});
+
     clearSession();
     router.replace("/login");
+  }
+
+  function finishOnboarding(): void {
+    window.localStorage.setItem(ONBOARDING_KEY, "done");
+    setShowOnboarding(false);
+  }
+
+  async function enableNotificationsFromOnboarding(): Promise<void> {
+    if (!("Notification" in window)) {
+      setNotificationState("unsupported");
+      finishOnboarding();
+      return;
+    }
+
+    const permission = await Notification.requestPermission();
+    setNotificationState(permission);
+    finishOnboarding();
   }
 
   if (!session) return <div className="p-6 text-sm text-slate-500">Loading…</div>;
 
   return (
-    <main className="h-[100dvh] w-screen overflow-hidden bg-[radial-gradient(circle_at_top_right,_#dbeafe_0%,_#f8fafc_45%,_#eff6ff_100%)] [touch-action:manipulation]">
-      <div className="grid h-full w-full md:grid-cols-[300px_1fr]">
+    <main
+      style={chatBackgroundStyle}
+      className="h-[100dvh] w-screen overflow-hidden bg-[radial-gradient(circle_at_top_right,_#dbeafe_0%,_#f8fafc_45%,_#eff6ff_100%)] [touch-action:manipulation]"
+    >
+      <div className="grid h-full w-full md:grid-cols-[320px_1fr]">
         <aside className="hidden h-full border-r border-slate-200 bg-white/90 p-4 backdrop-blur md:flex md:flex-col">
           <div className="flex items-center gap-3 rounded-2xl border border-slate-100 bg-slate-50 p-3">
-            <img src={session.profilePicture} alt={`${session.username} avatar`} className="h-12 w-12 rounded-full border border-slate-200 object-cover" />
+            <img
+              src={session.profilePicture}
+              alt={`${session.username} avatar`}
+              className="h-14 w-14 rounded-full border border-slate-200 object-cover"
+              loading="lazy"
+              decoding="async"
+            />
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold text-slate-900">{session.username}</p>
-              <p className="text-xs text-slate-500 text-sky-500 font-medium">online</p>
+              <p className={`text-xs font-medium ${isDeveloperMode ? "text-amber-600" : "text-sky-500"}`}>
+                {isDeveloperMode ? "developer mode" : "online"}
+              </p>
             </div>
           </div>
           <button
@@ -460,12 +1581,16 @@ export function ChatApp() {
                 placeholder="Username…"
                 className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
               />
-              <input
-                value={profilePictureDraft}
-                onChange={(event) => setProfilePictureDraft(event.target.value)}
-                placeholder="Avatar URL…"
-                className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-              />
+              <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-white p-2">
+                <img
+                  src={profilePictureDraft || getDefaultProfilePicture()}
+                  alt="Profile preview"
+                  className="h-12 w-12 rounded-full border border-slate-200 object-cover"
+                  loading="lazy"
+                  decoding="async"
+                />
+                <p className="text-xs text-slate-500">Upload and crop your profile picture before saving.</p>
+              </div>
               <div className="flex gap-2">
                 <button
                   type="button"
@@ -484,19 +1609,189 @@ export function ChatApp() {
                 <button
                   type="button"
                   onClick={() => void saveProfile()}
-                  className="h-9 rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white"
+                  className="h-9 rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white disabled:opacity-60"
+                  disabled={uploadingProfile}
                 >
                   Save
                 </button>
               </div>
             </div>
           ) : null}
+
+          <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Shared Chat Background</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => backgroundUploadRef.current?.click()}
+                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
+                disabled={uploadingBackground}
+              >
+                {uploadingBackground ? "Uploading…" : "Upload Background"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  void saveChatBackground(null).catch(() => {
+                    setError("Could not reset chat background.");
+                  });
+                }}
+                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
+              >
+                Reset
+              </button>
+            </div>
+          </div>
+
+          {isDeveloperMode ? (
+            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Developer Tools</p>
+                <button
+                  type="button"
+                  onClick={() => setShowAdminPanel((value) => !value)}
+                  className="h-7 rounded-lg border border-amber-300 bg-white px-2 text-[11px] font-semibold text-amber-900"
+                >
+                  {showAdminPanel ? "Hide" : "Open"}
+                </button>
+              </div>
+
+              {showAdminPanel ? (
+                <div className="mt-2 space-y-2">
+                  <div className="grid grid-cols-2 gap-2 text-[11px] text-amber-900">
+                    <div className="rounded-lg bg-white px-2 py-1">
+                      Users: <span className="font-semibold">{adminOverview?.usersTotal ?? "-"}</span>
+                    </div>
+                    <div className="rounded-lg bg-white px-2 py-1">
+                      Online: <span className="font-semibold">{adminOverview?.usersOnline ?? "-"}</span>
+                    </div>
+                    <div className="rounded-lg bg-white px-2 py-1">
+                      Messages: <span className="font-semibold">{adminOverview?.messagesTotal ?? "-"}</span>
+                    </div>
+                    <div className="rounded-lg bg-white px-2 py-1">
+                      Blacklist: <span className="font-semibold">{adminOverview?.blacklistTotal ?? "-"}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void fetchAdminOverview()}
+                      disabled={adminBusy}
+                      className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+                    >
+                      Refresh
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!window.confirm("Delete all chat messages and polls?")) return;
+                        void runAdminAction("delete_all_messages");
+                      }}
+                      disabled={adminBusy}
+                      className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+                    >
+                      Delete Messages
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!window.confirm("Logout all users except you?")) return;
+                        void runAdminAction("logout_all_users");
+                      }}
+                      disabled={adminBusy}
+                      className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+                    >
+                      Logout Users
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!window.confirm("Clear the username blacklist?")) return;
+                        void runAdminAction("clear_blacklist");
+                      }}
+                      disabled={adminBusy}
+                      className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+                    >
+                      Clear Blacklist
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!window.confirm("Reset everything? This deletes messages, users, and blacklist.")) return;
+                        void runAdminAction("reset_all");
+                      }}
+                      disabled={adminBusy}
+                      className="h-8 rounded-lg bg-amber-600 px-3 text-[11px] font-semibold text-white disabled:opacity-60"
+                    >
+                      Reset All
+                    </button>
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex gap-2">
+                      <input
+                        value={adminTargetUsername}
+                        onChange={(event) => setAdminTargetUsername(event.target.value)}
+                        placeholder="Username to delete…"
+                        className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const target = adminTargetUsername.trim();
+                          if (!target) return;
+                          if (!window.confirm(`Delete user ${target}?`)) return;
+                          void runAdminAction("delete_user", { targetUsername: target });
+                        }}
+                        disabled={adminBusy}
+                        className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+                      >
+                        Delete User
+                      </button>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <input
+                        value={adminTargetMessageId}
+                        onChange={(event) => setAdminTargetMessageId(event.target.value)}
+                        placeholder="Message ID to delete…"
+                        className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const target = adminTargetMessageId.trim();
+                          if (!target) return;
+                          if (!window.confirm(`Delete message ${target}?`)) return;
+                          void runAdminAction("delete_message", { targetMessageId: target });
+                        }}
+                        disabled={adminBusy}
+                        className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+                      >
+                        Delete Message
+                      </button>
+                    </div>
+                  </div>
+
+                  {adminNotice ? <p className="text-[11px] font-medium text-amber-900">{adminNotice}</p> : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
             <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Class Online</p>
             <div className="space-y-2">
               {onlineUsers.map((user) => (
                 <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
-                  <img src={user.profilePicture} alt={`${user.username} avatar`} className="h-10 w-10 rounded-full border border-slate-200 object-cover" />
+                  <img
+                    src={user.profilePicture}
+                    alt={`${user.username} avatar`}
+                    className="h-11 w-11 rounded-full border border-slate-200 object-cover"
+                    loading="lazy"
+                    decoding="async"
+                  />
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
                     <p className="truncate text-xs text-slate-500">{user.status || "online"}</p>
@@ -510,11 +1805,53 @@ export function ChatApp() {
           </button>
         </aside>
 
-        <section className="relative flex min-h-0 flex-col">
+        <section
+          className="relative flex min-h-0 flex-col"
+          onDragEnter={(event) => {
+            event.preventDefault();
+            dragDepthRef.current += 1;
+            setIsDraggingUpload(true);
+          }}
+          onDragOver={(event) => {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "copy";
+            if (!isDraggingUpload) {
+              setIsDraggingUpload(true);
+            }
+          }}
+          onDragLeave={(event) => {
+            event.preventDefault();
+            dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+            if (dragDepthRef.current === 0) {
+              setIsDraggingUpload(false);
+            }
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            dragDepthRef.current = 0;
+            setIsDraggingUpload(false);
+            void onChatImageDrop(event.dataTransfer.files);
+          }}
+        >
+          {isDraggingUpload ? (
+            <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-sky-500/12 backdrop-blur-[1px]">
+              <div className="rounded-2xl border-2 border-dashed border-sky-400 bg-white/95 px-6 py-5 text-center shadow-lg">
+                <p className="text-sm font-semibold text-slate-900">Drop image to upload</p>
+                <p className="mt-1 text-xs text-slate-500">PNG, JPG, WEBP, GIF</p>
+              </div>
+            </div>
+          ) : null}
           <header className="flex items-center justify-between border-b border-slate-200 bg-white/85 px-4 py-3 backdrop-blur">
             <div>
-              <h1 className="text-xl font-bold text-slate-900">Class Chat Bot</h1>
-              <p className="text-xs text-slate-500">AI-powered classroom assistant</p>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl font-bold text-slate-900">Class Chat Bot</h1>
+                {isDeveloperMode ? (
+                  <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-900">
+                    DEV
+                  </span>
+                ) : null}
+              </div>
+              <p className="text-xs text-slate-500">Mention @chatgpt when you want AI replies</p>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -525,9 +1862,9 @@ export function ChatApp() {
               </button>
               <button
                 className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700"
-                onClick={() => setShowShortcuts(true)}
+                onClick={() => setShowMedia(true)}
               >
-                Shortcuts
+                Media
               </button>
             </div>
           </header>
@@ -536,38 +1873,94 @@ export function ChatApp() {
             ref={scrollRef}
             className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 pb-40 sm:p-4 sm:pb-44"
           >
+            {loadingOlder ? (
+              <p className="text-center text-xs text-slate-500">Loading older messages…</p>
+            ) : null}
+
             {messages.map((message) => (
               <ChatMessage
                 key={message.id}
                 message={message}
+                currentUsername={session.username}
+                isDeveloperMode={isDeveloperMode}
+                delivery={
+                  pendingDeliveries[message.id] !== undefined
+                    ? { status: "sending", progress: pendingDeliveries[message.id] }
+                    : undefined
+                }
                 answerDraft={answerDrafts[message.id] || ""}
                 onAnswerDraftChange={(messageId, value) =>
                   setAnswerDrafts((current) => ({ ...current, [messageId]: value }))
                 }
                 onSubmitAnswer={submitAnswer}
                 onVote={handleVote}
-                currentClientId={session.clientId}
+                onDeleteMessage={handleDeleteMessage}
+                onOpenLightbox={(url, alt) => setLightbox({ url, alt: alt || "Image preview" })}
               />
             ))}
           </div>
 
+          {!isAtBottom ? (
+            <div className="pointer-events-none absolute inset-x-0 bottom-28 z-20 flex justify-center">
+              <button
+                type="button"
+                className="pointer-events-auto rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white shadow-lg"
+                onClick={() => {
+                  isAtBottomRef.current = true;
+                  setIsAtBottom(true);
+                  scrollToBottom("smooth");
+                }}
+              >
+                Jump to latest
+              </button>
+            </div>
+          ) : null}
+
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center pb-[calc(env(safe-area-inset-bottom)+0.75rem)]">
             <div
-              className={`pointer-events-auto w-[min(940px,94vw)] rounded-[2rem] border border-white/70 bg-white/90 p-3 shadow-[0_18px_50px_rgba(15,23,42,0.18)] backdrop-blur transition-all duration-300 ${composerOpen ? "scale-100" : "scale-[0.98]"
-                }`}
+              className={`pointer-events-auto w-[min(940px,94vw)] rounded-[2rem] border border-white/70 bg-white/90 p-3 shadow-[0_18px_50px_rgba(15,23,42,0.18)] backdrop-blur transition-all duration-300 ${
+                composerOpen ? "scale-100" : "scale-[0.98]"
+              }`}
             >
               <div className="mb-2 flex flex-wrap items-center gap-2">
-                {(["message", "question", "poll", "challenge"] as ComposerMode[]).map((mode) => (
+                {(["message"] as ComposerMode[]).map((mode) => (
                   <button
                     key={mode}
                     onClick={() => {
                       setComposerMode(mode);
                       setComposerOpen(true);
                     }}
-                    className={`h-7 rounded-full px-3 text-xs font-semibold capitalize transition ${composerMode === mode
-                      ? "bg-slate-900 text-white"
-                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                      }`}
+                    className={`h-7 rounded-full px-3 text-xs font-semibold capitalize transition ${
+                      composerMode === mode
+                        ? "bg-slate-900 text-white"
+                        : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                    }`}
+                  >
+                    {mode}
+                  </button>
+                ))}
+                <button
+                  onClick={activateAskChatGpt}
+                  className={`h-7 rounded-full px-3 text-xs font-semibold transition ${
+                    composerMode === "message" && /(^|\s)@chatgpt\b/i.test(messageDraft)
+                      ? "bg-sky-600 text-white"
+                      : "bg-sky-100 text-sky-700 hover:bg-sky-200"
+                  }`}
+                >
+                  Ask ChatGPT
+                </button>
+                {(["question", "poll", "challenge"] as ComposerMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    onClick={() => {
+                      setComposerMode(mode);
+                      setComposerOpen(true);
+                    }}
+                    className={`h-7 rounded-full px-3 text-xs font-semibold capitalize transition ${
+                      composerMode === mode
+                        ? "bg-slate-900 text-white"
+                        : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                    }`}
                   >
                     {mode}
                   </button>
@@ -603,81 +1996,148 @@ export function ChatApp() {
               </div>
 
               {composerMode === "message" ? (
-                <textarea
-                  ref={messageInputRef}
-                  value={messageDraft}
-                  onFocus={() => setComposerOpen(true)}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    setMessageDraft(value);
+                <div className="space-y-2">
+                  {uploadedDraftImages.length > 0 ? (
+                    <div className="flex flex-wrap gap-2">
+                      {uploadedDraftImages.map((image) => (
+                        <DraftImagePreview
+                          key={image.id}
+                          image={image}
+                          onRemove={() =>
+                            setUploadedDraftImages((current) =>
+                              current.filter((uploadedImage) => uploadedImage.id !== image.id),
+                            )
+                          }
+                        />
+                      ))}
+                    </div>
+                  ) : null}
 
-                    // Check for @mention
-                    const cursor = event.target.selectionStart;
-                    const textBefore = value.slice(0, cursor);
-                    const match = textBefore.match(/@(\w*)$/);
-                    if (match) {
-                      setShowMentionSuggestions(true);
-                      setMentionFilter(match[1]);
-                      setMentionIndex(0);
-                    } else {
-                      setShowMentionSuggestions(false);
-                    }
-                  }}
-                  onKeyDown={(event) => {
-                    if (showMentionSuggestions && filteredMentionUsers.length > 0) {
-                      if (event.key === "ArrowDown") {
-                        event.preventDefault();
-                        setMentionIndex((i) => (i + 1) % filteredMentionUsers.length);
-                        return;
-                      }
-                      if (event.key === "ArrowUp") {
-                        event.preventDefault();
-                        setMentionIndex((i) => (i - 1 + filteredMentionUsers.length) % filteredMentionUsers.length);
-                        return;
-                      }
-                      if (event.key === "Enter" || event.key === "Tab") {
-                        event.preventDefault();
-                        const user = filteredMentionUsers[mentionIndex];
-                        const textBefore = messageDraft.slice(0, messageInputRef.current?.selectionStart || 0);
-                        const textAfter = messageDraft.slice(messageInputRef.current?.selectionStart || 0);
-                        const newTextBefore = textBefore.replace(/@(\w*)$/, `@${user.username} `);
-                        setMessageDraft(newTextBefore + textAfter);
-                        setShowMentionSuggestions(false);
-                        return;
-                      }
-                      if (event.key === "Escape") {
-                        setShowMentionSuggestions(false);
-                        return;
-                      }
-                    }
+                  <textarea
+                    ref={messageInputRef}
+                    value={messageDraft}
+                    onFocus={() => setComposerOpen(true)}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      setMessageDraft(value);
+                      setComposerHistoryIndex(-1);
+                      draftBeforeHistoryRef.current = "";
 
-                    if (event.key === "Enter" && !event.shiftKey) {
-                      event.preventDefault();
-                      void submitComposer();
-                    }
-                  }}
-                  placeholder="Type a message… Ask anything!"
-                  rows={1}
-                  className="w-full resize-none rounded-xl border border-slate-200 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                />
+                      const cursor = event.target.selectionStart;
+                      const textBefore = value.slice(0, cursor);
+                      const match = textBefore.match(/@(\w*)$/);
+                      if (match) {
+                        setShowMentionSuggestions(true);
+                        setMentionFilter(match[1]);
+                        setMentionIndex(0);
+                      } else {
+                        setShowMentionSuggestions(false);
+                      }
+                    }}
+                    onKeyDown={(event) => {
+                      if (showMentionSuggestions && filteredMentionUsers.length > 0) {
+                        if (event.key === "ArrowDown") {
+                          event.preventDefault();
+                          setMentionIndex((index) => (index + 1) % filteredMentionUsers.length);
+                          return;
+                        }
+                        if (event.key === "ArrowUp") {
+                          event.preventDefault();
+                          setMentionIndex(
+                            (index) => (index - 1 + filteredMentionUsers.length) % filteredMentionUsers.length,
+                          );
+                          return;
+                        }
+                        if (event.key === "Enter" || event.key === "Tab") {
+                          event.preventDefault();
+                          const user = filteredMentionUsers[mentionIndex];
+                          const selectionStart = messageInputRef.current?.selectionStart || 0;
+                          const textBefore = messageDraft.slice(0, selectionStart);
+                          const textAfter = messageDraft.slice(selectionStart);
+                          const newTextBefore = textBefore.replace(/@(\w*)$/, `@${user.username} `);
+                          setMessageDraft(newTextBefore + textAfter);
+                          setShowMentionSuggestions(false);
+                          return;
+                        }
+                        if (event.key === "Escape") {
+                          setShowMentionSuggestions(false);
+                          return;
+                        }
+                      }
+
+                      if (event.key === "ArrowUp" && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
+                        event.preventDefault();
+                        if (ownMessageHistory.length === 0) return;
+
+                        if (composerHistoryIndex === -1) {
+                          draftBeforeHistoryRef.current = messageDraft;
+                          const nextIndex = ownMessageHistory.length - 1;
+                          setComposerHistoryIndex(nextIndex);
+                          setMessageDraft(ownMessageHistory[nextIndex] || "");
+                          return;
+                        }
+
+                        const nextIndex = Math.max(0, composerHistoryIndex - 1);
+                        setComposerHistoryIndex(nextIndex);
+                        setMessageDraft(ownMessageHistory[nextIndex] || "");
+                        return;
+                      }
+
+                      if (event.key === "ArrowDown" && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
+                        if (composerHistoryIndex === -1) return;
+                        event.preventDefault();
+
+                        if (composerHistoryIndex < ownMessageHistory.length - 1) {
+                          const nextIndex = composerHistoryIndex + 1;
+                          setComposerHistoryIndex(nextIndex);
+                          setMessageDraft(ownMessageHistory[nextIndex] || "");
+                          return;
+                        }
+
+                        setComposerHistoryIndex(-1);
+                        setMessageDraft(draftBeforeHistoryRef.current);
+                        draftBeforeHistoryRef.current = "";
+                        return;
+                      }
+
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        void submitComposer();
+                      }
+                    }}
+                    placeholder="Type a message…"
+                    rows={1}
+                    className="w-full resize-none rounded-xl border border-slate-200 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  />
+                </div>
               ) : null}
 
               {showMentionSuggestions && filteredMentionUsers.length > 0 && composerMode === "message" ? (
                 <div className="absolute bottom-full left-4 mb-2 max-h-40 w-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
-                  {filteredMentionUsers.map((user, i) => (
+                  {filteredMentionUsers.map((user, index) => (
                     <button
                       key={user.clientId}
                       onClick={() => {
-                        const textBefore = messageDraft.slice(0, messageInputRef.current?.selectionStart || 0);
-                        const textAfter = messageDraft.slice(messageInputRef.current?.selectionStart || 0);
+                        const selectionStart = messageInputRef.current?.selectionStart || 0;
+                        const textBefore = messageDraft.slice(0, selectionStart);
+                        const textAfter = messageDraft.slice(selectionStart);
                         const newTextBefore = textBefore.replace(/@(\w*)$/, `@${user.username} `);
                         setMessageDraft(newTextBefore + textAfter);
                         setShowMentionSuggestions(false);
                       }}
-                      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition ${i === mentionIndex ? "bg-sky-100 text-sky-900" : "hover:bg-slate-50 text-slate-700"
-                        }`}
+                      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition ${
+                        index === mentionIndex
+                          ? "bg-sky-100 text-sky-900"
+                          : "text-slate-700 hover:bg-slate-50"
+                      }`}
                     >
-                      <img src={user.profilePicture} className="h-5 w-5 rounded-full object-cover" alt="" />
+                      <img
+                        src={user.profilePicture}
+                        className="h-5 w-5 rounded-full object-cover"
+                        alt=""
+                        loading="lazy"
+                        decoding="async"
+                      />
                       <span className="truncate">{user.username}</span>
                     </button>
                   ))}
@@ -730,26 +2190,13 @@ export function ChatApp() {
                       <input
                         key={`poll-option-${index}`}
                         value={option}
-                        onChange={(event) =>
-                          setPollOptions((current) =>
-                            current.map((value, i) => (i === index ? event.target.value : value)),
-                          )
-                        }
+                        onChange={(event) => updatePollOptionValue(index, event.target.value)}
                         placeholder={`Option ${index + 1}…`}
                         className="h-8 rounded-lg border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
                       />
                     ))}
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setPollOptions((current) => (current.length >= 15 ? current : [...current, ""]))
-                      }
-                      className="h-7 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
-                    >
-                      Add Option
-                    </button>
                     <button
                       type="button"
                       onClick={() =>
@@ -767,14 +2214,9 @@ export function ChatApp() {
                       />
                       Multi select
                     </label>
-                    <label className="inline-flex items-center gap-2 text-xs text-slate-600">
-                      <input
-                        type="checkbox"
-                        checked={pollAllowVoteChange}
-                        onChange={(event) => setPollAllowVoteChange(event.target.checked)}
-                      />
-                      Allow vote changes
-                    </label>
+                    <p className="text-xs text-slate-500">
+                      Votes update immediately on click and can always be changed.
+                    </p>
                   </div>
                 </div>
               ) : null}
@@ -782,7 +2224,10 @@ export function ChatApp() {
           </div>
 
           {error ? (
-            <p className="absolute left-1/2 top-16 z-30 -translate-x-1/2 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-600" aria-live="polite">
+            <p
+              className="absolute left-1/2 top-16 z-30 -translate-x-1/2 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-600"
+              aria-live="polite"
+            >
               {error}
             </p>
           ) : null}
@@ -806,7 +2251,13 @@ export function ChatApp() {
             <div className="space-y-2">
               {onlineUsers.map((user) => (
                 <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
-                  <img src={user.profilePicture} alt={`${user.username} avatar`} className="h-8 w-8 rounded-full border border-slate-200 object-cover" />
+                  <img
+                    src={user.profilePicture}
+                    alt={`${user.username} avatar`}
+                    className="h-9 w-9 rounded-full border border-slate-200 object-cover"
+                    loading="lazy"
+                    decoding="async"
+                  />
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
                     <p className="truncate text-xs text-slate-500">{user.status || "online"}</p>
@@ -814,21 +2265,218 @@ export function ChatApp() {
                 </div>
               ))}
             </div>
-            <button onClick={() => void logout()} className="mt-4 h-10 w-full rounded-xl bg-rose-600 text-sm font-semibold text-white">
+            <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Shared Chat Background</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => backgroundUploadRef.current?.click()}
+                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
+                  disabled={uploadingBackground}
+                >
+                  {uploadingBackground ? "Uploading…" : "Upload Background"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void saveChatBackground(null).catch(() => {
+                      setError("Could not reset chat background.");
+                    });
+                  }}
+                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+            {isDeveloperMode ? (
+              <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Developer Tools</p>
+                <p className="mt-1 text-[11px] text-amber-900">
+                  Open desktop sidebar to access reset/delete/moderation controls.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void fetchAdminOverview()}
+                  disabled={adminBusy}
+                  className="mt-2 h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+                >
+                  Refresh Stats
+                </button>
+              </div>
+            ) : null}
+            <button
+              onClick={() => void logout()}
+              className="mt-4 h-10 w-full rounded-xl bg-rose-600 text-sm font-semibold text-white"
+            >
               Leave Chat
             </button>
           </div>
         </div>
       ) : null}
 
-      {showShortcuts ? (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-slate-900/40 p-4" onClick={() => setShowShortcuts(false)}>
-          <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
-            <p className="mt-2 text-sm text-slate-600">Cmd/Ctrl + K opens the message bubble quickly.</p>
-            <p className="text-sm text-slate-600">The AI reads all messages and will respond automatically.</p>
-            <button className="mt-4 h-10 w-full rounded-xl bg-slate-900 text-sm font-semibold text-white" onClick={() => setShowShortcuts(false)}>
+      <input
+        ref={backgroundUploadRef}
+        type="file"
+        className="hidden"
+        accept="image/png,image/jpeg,image/webp,image/gif"
+        onChange={(event) => void onBackgroundImageUpload(event.target.files?.[0])}
+      />
+
+      {profileCropFile ? (
+        <ProfileImageCropModal
+          key={`${profileCropFile.name}-${profileCropFile.size}-${profileCropFile.lastModified}`}
+          file={profileCropFile}
+          busy={uploadingProfile}
+          onCancel={() => setProfileCropFile(null)}
+          onConfirm={onProfileCropConfirm}
+        />
+      ) : null}
+
+      {lightbox ? (
+        <div
+          className="fixed inset-0 z-[70] grid place-items-center bg-slate-950/85 p-4"
+          onClick={() => setLightbox(null)}
+        >
+          <div
+            className="relative max-h-[92vh] max-w-[92vw]"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setLightbox(null)}
+              className="absolute right-2 top-2 z-10 h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
+            >
               Close
             </button>
+            <img
+              src={lightbox.url}
+              alt={lightbox.alt}
+              className="max-h-[92vh] max-w-[92vw] rounded-2xl object-contain shadow-2xl"
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {showOnboarding ? (
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-900/55 p-4">
+          <div className="w-full max-w-xl rounded-3xl border border-white/70 bg-white p-6 shadow-2xl">
+            <p className="inline-flex rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700">
+              Willkommen bei Chat PPC
+            </p>
+            <h2 className="mt-3 text-2xl font-bold text-slate-900">Kurzer Start in 30 Sekunden</h2>
+            <div className="mt-4 space-y-2 text-sm text-slate-700">
+              <p>1. Schreibe Nachrichten, Fragen und Challenges direkt im Composer.</p>
+              <p>2. Erstelle Umfragen mit mehreren Optionen, Stimmen werden sofort gesetzt und sind jederzeit änderbar.</p>
+              <p>3. Teile Bilder und GIFs per Upload, Links zeigen moderne Vorschaukarten.</p>
+              <p>4. Für KI-Antworten erwähne gezielt <span className="font-semibold text-slate-900">@chatgpt</span>.</p>
+            </div>
+            <div className="mt-5 rounded-2xl border border-sky-100 bg-sky-50 p-3 text-sm text-sky-900">
+              Natürlicher nächster Schritt: Aktiviere Benachrichtigungen, damit du neue Nachrichten sofort siehst.
+            </div>
+            <div className="mt-5 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void enableNotificationsFromOnboarding()}
+                className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
+              >
+                {notificationState === "granted" ? "Benachrichtigungen sind aktiv" : "Benachrichtigungen aktivieren"}
+              </button>
+              <button
+                type="button"
+                onClick={finishOnboarding}
+                className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+              >
+                Später fortfahren
+              </button>
+            </div>
+            <p className="mt-3 text-xs text-slate-500">
+              {notificationState === "denied"
+                ? "Benachrichtigungen sind im Browser blockiert. Du kannst sie später in den Browser-Einstellungen aktivieren."
+                : notificationState === "unsupported"
+                  ? "Dieser Browser unterstützt Desktop-Benachrichtigungen nicht."
+                  : "Du kannst diese Einstellung später jederzeit über den Browser anpassen."}
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      {showMedia ? (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-slate-900/40 p-4"
+          onClick={() => setShowMedia(false)}
+        >
+          <div
+            className="w-full max-w-5xl rounded-2xl bg-white p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900">Media</h2>
+                <p className="text-sm text-slate-500">
+                  {loadingMedia && mediaItems.length === 0
+                    ? "Loading full media history…"
+                    : `${mediaTotalCount} image${mediaTotalCount === 1 ? "" : "s"} in database`}
+                </p>
+              </div>
+              <button
+                className="h-9 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700"
+                onClick={() => setShowMedia(false)}
+              >
+                Close
+              </button>
+            </div>
+
+            {loadingMedia && mediaItems.length === 0 ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
+                Loading media…
+              </div>
+            ) : mediaItems.length === 0 ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
+                No images shared yet.
+              </div>
+            ) : (
+              <div ref={mediaScrollRef} className="max-h-[70vh] overflow-y-auto pr-1">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                  {mediaItems.map((item) => (
+                    <a
+                      key={item.id}
+                      href={item.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="group overflow-hidden rounded-xl border border-slate-200 bg-slate-50"
+                      title={`Shared by ${item.username}`}
+                    >
+                      <div className="relative aspect-square w-full bg-slate-100">
+                        <img
+                          src={item.url}
+                          alt="Shared media"
+                          className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.03]"
+                          loading="lazy"
+                          decoding="async"
+                        />
+                      </div>
+                      <div className="px-2 py-1.5">
+                        <p className="truncate text-[11px] font-medium text-slate-700">{item.username}</p>
+                        <p className="text-[10px] text-slate-500">{new Date(item.createdAt).toLocaleString()}</p>
+                      </div>
+                    </a>
+                  ))}
+                </div>
+                {mediaHasMore ? (
+                  <div className="mt-3 flex justify-center">
+                    <button
+                      type="button"
+                      className="h-9 rounded-xl border border-slate-200 bg-white px-4 text-xs font-semibold text-slate-700"
+                      disabled={loadingMediaMore}
+                      onClick={() => void fetchMediaItems({ append: true, silent: true })}
+                    >
+                      {loadingMediaMore ? "Loading…" : "Load 3 more"}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            )}
           </div>
         </div>
       ) : null}

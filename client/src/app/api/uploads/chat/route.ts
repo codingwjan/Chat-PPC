@@ -6,7 +6,7 @@ import { handleApiError } from "@/server/http";
 export const runtime = "nodejs";
 
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB for chat images
-const MAX_INLINE_DATA_URL_BYTES = 2 * 1024 * 1024;
+const MAX_INLINE_DATA_URL_BYTES = 6 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
 
 function extensionFor(type: string): string {
@@ -37,7 +37,7 @@ export async function POST(request: Request): Promise<NextResponse> {
         if (!process.env.BLOB_READ_WRITE_TOKEN) {
             if (file.size > MAX_INLINE_DATA_URL_BYTES) {
                 throw new AppError(
-                    "Blob storage is not configured. Upload an image up to 2MB or set BLOB_READ_WRITE_TOKEN.",
+                    "Blob storage is not configured. Upload an image up to 6MB or set BLOB_READ_WRITE_TOKEN.",
                     400,
                 );
             }
