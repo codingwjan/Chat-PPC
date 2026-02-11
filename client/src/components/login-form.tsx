@@ -136,7 +136,7 @@ export function LoginForm() {
         <section className="grid w-full overflow-hidden rounded-3xl border border-white/70 bg-white/70 shadow-2xl backdrop-blur md:grid-cols-[1.1fr_1fr]">
           <div className="bg-slate-900 p-8 text-white md:p-10">
             <p className="mb-3 inline-flex rounded-full bg-white/10 px-3 py-1 text-xs font-semibold tracking-wide">
-              Chat PPC
+              ChatPPC
             </p>
             <h1 className="text-3xl font-bold leading-tight">Jump into your group chat in seconds.</h1>
             <p className="mt-4 text-sm text-slate-200">

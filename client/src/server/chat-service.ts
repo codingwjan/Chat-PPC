@@ -356,6 +356,11 @@ export async function setChatBackground(input: {
 }): Promise<ChatBackgroundDTO> {
   const actor = await getUserByClientId(input.clientId);
   const normalizedUrl = normalizeBackgroundUrl(input.url);
+  const existingBackground = await prisma.user.findUnique({
+    where: { clientId: CHAT_BACKGROUND_CLIENT_ID },
+    select: { profilePicture: true },
+  });
+  const previousBackground = normalizeBackgroundUrl(existingBackground?.profilePicture);
 
   if (normalizedUrl) {
     // Validate upload URL / external URL format.
@@ -381,6 +386,12 @@ export async function setChatBackground(input: {
       lastSeenAt: now,
     },
   });
+
+  if (normalizedUrl && normalizedUrl !== previousBackground) {
+    await emitSystemMessage(`${actor.username} changed the background image`);
+  } else if (!normalizedUrl && previousBackground) {
+    await emitSystemMessage(`${actor.username} reset the background image`);
+  }
 
   return {
     url: normalizedUrl,

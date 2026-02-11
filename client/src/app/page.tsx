@@ -8,14 +8,14 @@ export default function HomePage() {
 
       <section className="relative z-10 w-full max-w-3xl rounded-3xl border border-white/70 bg-white/80 p-8 shadow-2xl backdrop-blur sm:p-12">
         <p className="inline-flex rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold tracking-wide text-white">
-          2026 Class Chat
+          2026 ChatPPC
         </p>
         <h1 className="mt-4 text-4xl font-bold leading-tight text-slate-900 text-balance sm:text-5xl">
-          Learn, Vote, Challenge, and Chat Together
+          ChatPPC for Real-Time Group Chat
         </h1>
         <p className="mt-4 max-w-2xl text-sm text-slate-600 sm:text-base">
-          A fun classroom chat with smart `@chatgpt` help, rich polls (up to 15 options), questions, and
-          challenge posts in one fast realtime app.
+          ChatPPC combines realtime chat, `@chatgpt` help, polls (up to 15 options), questions, and
+          challenge posts in one fast app.
         </p>
         <div className="mt-8 flex flex-wrap items-center gap-3">
           <Link
