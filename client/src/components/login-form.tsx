@@ -3,9 +3,10 @@
 
 import { FormEvent, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { apiJson } from "@/lib/http";
 import { getDefaultProfilePicture, saveSession } from "@/lib/session";
-import type { LoginRequest, UserPresenceDTO } from "@/lib/types";
+import type { LoginRequest, LoginResponseDTO } from "@/lib/types";
 
 interface UploadResponse {
   url: string;
@@ -43,6 +44,7 @@ export function LoginForm() {
 
   const [username, setUsername] = useState("");
   const [profilePicture, setProfilePicture] = useState("");
+  const [cropFile, setCropFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,16 +58,6 @@ export function LoginForm() {
       return;
     }
 
-    const avatarCandidate = profilePicture.trim();
-    if (avatarCandidate) {
-      try {
-        new URL(avatarCandidate);
-      } catch {
-        setError("Profile picture must be a valid URL.");
-        return;
-      }
-    }
-
     setLoading(true);
     setError(null);
 
@@ -73,10 +65,10 @@ export function LoginForm() {
       const payload: LoginRequest = {
         username: trimmed,
         clientId: createClientId(),
-        profilePicture: avatarCandidate || getDefaultProfilePicture(),
+        profilePicture: profilePicture || getDefaultProfilePicture(),
       };
 
-      const user = await apiJson<UserPresenceDTO>("/api/auth/login", {
+      const user = await apiJson<LoginResponseDTO>("/api/auth/login", {
         method: "POST",
         body: JSON.stringify(payload),
       });
@@ -85,6 +77,8 @@ export function LoginForm() {
         clientId: user.clientId,
         username: user.username,
         profilePicture: user.profilePicture,
+        devMode: user.devMode,
+        devAuthToken: user.devAuthToken,
       });
 
       router.push("/chat");
@@ -97,20 +91,25 @@ export function LoginForm() {
 
   async function onUploadChange(file: File | undefined) {
     if (!file) return;
+    setError(null);
+    setCropFile(file);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  }
 
+  async function onCropConfirm(file: File) {
     setUploading(true);
     setError(null);
 
     try {
       const url = await uploadProfileImage(file);
       setProfilePicture(url);
+      setCropFile(null);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Upload failed");
     } finally {
       setUploading(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
     }
   }
 
@@ -127,7 +126,7 @@ export function LoginForm() {
               Fast realtime chat, polls, questions, and fun social vibes built for small groups.
             </p>
             <div className="mt-8 rounded-2xl border border-white/15 bg-white/5 p-4 text-xs text-slate-200">
-              Tip: You can upload an avatar or paste an image URL.
+              Tip: Upload an avatar and crop it before joining.
             </div>
           </div>
 
@@ -149,19 +148,9 @@ export function LoginForm() {
                   onChange={(event) => setUsername(event.target.value)}
                 />
               </label>
-
-              <label className="block text-sm font-medium text-slate-700">
-                Profile picture URL (optional)
-                <input
-                  className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm transition focus:border-sky-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                  type="url"
-                  placeholder="https://…"
-                  name="profile_picture"
-                  autoComplete="off"
-                  value={profilePicture}
-                  onChange={(event) => setProfilePicture(event.target.value)}
-                />
-              </label>
+              <p className="text-xs text-slate-500">
+                Developer mode: enter your private 16-digit unlock code as username.
+              </p>
 
               <div className="flex items-center gap-3">
                 <button
@@ -179,7 +168,7 @@ export function LoginForm() {
                   accept="image/png,image/jpeg,image/webp,image/gif"
                   onChange={(event) => void onUploadChange(event.target.files?.[0])}
                 />
-                <div className="text-xs text-slate-500">Max 4MB</div>
+                <div className="text-xs text-slate-500">Max 6MB</div>
               </div>
 
               <div className="flex items-center gap-3">
@@ -211,6 +200,16 @@ export function LoginForm() {
           </div>
         </section>
       </div>
+
+      {cropFile ? (
+        <ProfileImageCropModal
+          key={`${cropFile.name}-${cropFile.size}-${cropFile.lastModified}`}
+          file={cropFile}
+          busy={uploading}
+          onCancel={() => setCropFile(null)}
+          onConfirm={onCropConfirm}
+        />
+      ) : null}
     </main>
   );
 }

@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 :root {
-  --font-heading: "Space Grotesk", sans-serif;
-  --font-body: "IBM Plex Sans", sans-serif;
+  --font-heading: "Avenir Next", "Segoe UI", sans-serif;
+  --font-body: "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 
 * {

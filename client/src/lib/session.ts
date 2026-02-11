@@ -6,6 +6,8 @@ export interface SessionState {
   clientId: string;
   username: string;
   profilePicture: string;
+  devMode?: boolean;
+  devAuthToken?: string;
 }
 
 export function getDefaultProfilePicture(): string {
@@ -31,6 +33,8 @@ export function loadSession(): SessionState | null {
     return {
       ...parsed,
       profilePicture: parsed.profilePicture || getDefaultProfilePicture(),
+      devMode: Boolean(parsed.devMode && parsed.devAuthToken),
+      devAuthToken: parsed.devAuthToken,
     };
   } catch {
     return null;

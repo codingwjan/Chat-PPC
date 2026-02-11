@@ -1,10 +1,13 @@
 import { z } from "zod";
 import type {
+  AdminActionRequest,
+  AdminOverviewRequest,
   CreateMessageRequest,
   LoginRequest,
   PresencePingRequest,
   RenameUserRequest,
   TypingRequest,
+  UpdateChatBackgroundRequest,
   VotePollRequest,
 } from "@/lib/types";
 import { AppError } from "@/server/errors";
@@ -46,6 +49,13 @@ const presencePingSchema = z.object({
 const typingSchema = z.object({
   clientId: text("clientId"),
   status: z.string().max(128),
+});
+
+const chatBackgroundSchema = z.object({
+  clientId: text("clientId"),
+  url: z
+    .union([z.string().trim().url("url must be a valid URL"), z.literal(""), z.null()])
+    .optional(),
 });
 
 const createMessageSchema = z
@@ -121,6 +131,42 @@ const votePollSchema = z.object({
   }
 });
 
+const adminOverviewSchema = z.object({
+  clientId: text("clientId"),
+  devAuthToken: text("devAuthToken"),
+});
+
+const adminActionSchema = adminOverviewSchema
+  .extend({
+    action: z.enum([
+      "reset_all",
+      "delete_all_messages",
+      "logout_all_users",
+      "clear_blacklist",
+      "delete_user",
+      "delete_message",
+    ]),
+    targetUsername: z.string().trim().optional(),
+    targetMessageId: z.string().trim().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.action === "delete_user" && !value.targetUsername) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "targetUsername is required for delete_user",
+        path: ["targetUsername"],
+      });
+    }
+
+    if (value.action === "delete_message" && !value.targetMessageId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "targetMessageId is required for delete_message",
+        path: ["targetMessageId"],
+      });
+    }
+  });
+
 function parseOrThrow<T>(schema: z.ZodType<T>, payload: unknown): T {
   const parsed = schema.safeParse(payload);
   if (!parsed.success) {
@@ -146,10 +192,22 @@ export function parseTypingRequest(payload: unknown): TypingRequest {
   return parseOrThrow(typingSchema, payload);
 }
 
+export function parseUpdateChatBackgroundRequest(payload: unknown): UpdateChatBackgroundRequest {
+  return parseOrThrow(chatBackgroundSchema, payload);
+}
+
 export function parseCreateMessageRequest(payload: unknown): CreateMessageRequest {
   return parseOrThrow(createMessageSchema, payload);
 }
 
 export function parseVotePollRequest(payload: unknown): VotePollRequest {
   return parseOrThrow(votePollSchema, payload);
+}
+
+export function parseAdminOverviewRequest(payload: unknown): AdminOverviewRequest {
+  return parseOrThrow(adminOverviewSchema, payload);
+}
+
+export function parseAdminActionRequest(payload: unknown): AdminActionRequest {
+  return parseOrThrow(adminActionSchema, payload);
 }
