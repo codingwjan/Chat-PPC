@@ -34,13 +34,17 @@ export interface CreateMessageRequest {
   message: string;
   optionOne?: string;
   optionTwo?: string;
+  pollOptions?: string[];
+  pollMultiSelect?: boolean;
+  pollAllowVoteChange?: boolean;
   questionId?: string;
 }
 
 export interface VotePollRequest {
   clientId: string;
   pollMessageId: string;
-  side: "left" | "right";
+  side?: "left" | "right";
+  optionIds?: string[];
 }
 
 export interface UserPresenceDTO {
@@ -68,6 +72,17 @@ export interface MessageDTO {
   questionId?: string;
   oldusername?: string;
   oldmessage?: string;
+  poll?: {
+    options: Array<{
+      id: string;
+      label: string;
+      votes: number;
+    }>;
+    settings: {
+      multiSelect: boolean;
+      allowVoteChange: boolean;
+    };
+  };
 }
 
 export interface SnapshotDTO {

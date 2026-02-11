@@ -55,6 +55,9 @@ const createMessageSchema = z
     message: z.string().trim(),
     optionOne: z.string().trim().optional(),
     optionTwo: z.string().trim().optional(),
+    pollOptions: z.array(z.string().trim().min(1)).max(15).optional(),
+    pollMultiSelect: z.boolean().optional(),
+    pollAllowVoteChange: z.boolean().optional(),
     questionId: z.string().trim().optional(),
   })
   .superRefine((value, ctx) => {
@@ -67,18 +70,28 @@ const createMessageSchema = z
     }
 
     if (value.type === "votingPoll") {
-      if (!value.optionOne) {
+      const options = value.pollOptions?.map((option) => option.trim()).filter(Boolean) ?? [];
+
+      if (options.length > 15) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "optionOne is required for votingPoll",
+          message: "pollOptions supports a maximum of 15 options",
+          path: ["pollOptions"],
+        });
+      }
+
+      if (options.length < 2 && !value.optionOne) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "At least two poll options are required",
           path: ["optionOne"],
         });
       }
 
-      if (!value.optionTwo) {
+      if (options.length < 2 && !value.optionTwo) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "optionTwo is required for votingPoll",
+          message: "At least two poll options are required",
           path: ["optionTwo"],
         });
       }
@@ -96,7 +109,16 @@ const createMessageSchema = z
 const votePollSchema = z.object({
   clientId: text("clientId"),
   pollMessageId: text("pollMessageId"),
-  side: z.enum(["left", "right"]),
+  side: z.enum(["left", "right"]).optional(),
+  optionIds: z.array(text("optionIds[]")).max(15).optional(),
+}).superRefine((value, ctx) => {
+  if (!value.side && (!value.optionIds || value.optionIds.length === 0)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Either side or optionIds is required",
+      path: ["optionIds"],
+    });
+  }
 });
 
 function parseOrThrow<T>(schema: z.ZodType<T>, payload: unknown): T {

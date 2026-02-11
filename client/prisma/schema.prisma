@@ -30,6 +30,7 @@ model User {
   updatedAt      DateTime   @updatedAt
   messages       Message[]
   pollVotes      PollVote[]
+  pollChoiceVotes PollChoiceVote[]
 
   @@index([isOnline])
   @@index([lastSeenAt])
@@ -54,6 +55,8 @@ model Message {
   optionTwo            String?
   pollLeftCount        Int         @default(0)
   pollRightCount       Int         @default(0)
+  pollMultiSelect      Boolean     @default(false)
+  pollAllowVoteChange  Boolean     @default(false)
   questionMessageId    String?
   createdAt            DateTime    @default(now())
   updatedAt            DateTime    @updatedAt
@@ -61,6 +64,8 @@ model Message {
   questionMessage      Message?    @relation("MessageAnswers", fields: [questionMessageId], references: [id], onDelete: SetNull)
   answers              Message[]   @relation("MessageAnswers")
   pollVotes            PollVote[]
+  pollOptions          PollOption[]
+  pollChoiceVotes      PollChoiceVote[]
 
   @@index([type])
   @@index([createdAt])
@@ -78,4 +83,33 @@ model PollVote {
 
   @@unique([pollMessageId, userId])
   @@index([pollMessageId])
+}
+
+model PollOption {
+  id            String           @id @default(cuid())
+  pollMessageId String
+  label         String
+  sortOrder     Int
+  createdAt     DateTime         @default(now())
+  pollMessage   Message          @relation(fields: [pollMessageId], references: [id], onDelete: Cascade)
+  votes         PollChoiceVote[]
+
+  @@index([pollMessageId])
+  @@unique([pollMessageId, sortOrder])
+}
+
+model PollChoiceVote {
+  id            String     @id @default(cuid())
+  pollMessageId String
+  pollOptionId  String
+  userId        String
+  createdAt     DateTime   @default(now())
+  pollMessage   Message    @relation(fields: [pollMessageId], references: [id], onDelete: Cascade)
+  pollOption    PollOption @relation(fields: [pollOptionId], references: [id], onDelete: Cascade)
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([pollMessageId])
+  @@index([pollOptionId])
+  @@index([userId])
+  @@unique([pollMessageId, userId, pollOptionId])
 }

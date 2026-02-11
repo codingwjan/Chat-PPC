@@ -1,10 +1,8 @@
 @import "tailwindcss";
-@import "./legacy-ui.css";
 
 :root {
   --font-heading: "Space Grotesk", sans-serif;
   --font-body: "IBM Plex Sans", sans-serif;
-  --bg-gradient: radial-gradient(circle at 15% 10%, #dbeafe 0%, #f8fafc 35%, #f1f5f9 100%);
 }
 
 * {
@@ -19,6 +17,8 @@ body {
 body {
   margin: 0;
   font-family: var(--font-body);
+  color: #0f172a;
+  background: #f8fafc;
 }
 
 h1,

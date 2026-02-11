@@ -1,3 +1,5 @@
+import { getDefaultProfilePicture as getDefaultAvatar } from "@/lib/default-avatar";
+
 const SESSION_KEY = "chatppc.session";
 
 export interface SessionState {
@@ -7,10 +9,7 @@ export interface SessionState {
 }
 
 export function getDefaultProfilePicture(): string {
-  return (
-    process.env.NEXT_PUBLIC_DEFAULT_PROFILE_PICTURE ||
-    "https://www.nailseatowncouncil.gov.uk/wp-content/uploads/blank-profile-picture-973460_1280.jpg"
-  );
+  return process.env.NEXT_PUBLIC_DEFAULT_PROFILE_PICTURE || getDefaultAvatar();
 }
 
 export function loadSession(): SessionState | null {

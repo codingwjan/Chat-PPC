@@ -4,7 +4,7 @@ This folder now contains the active Chat-PPC application:
 
 - Next.js (App Router) + TypeScript
 - Tailwind CSS
-- Prisma + PostgreSQL
+- Prisma + Neon PostgreSQL
 - REST + SSE realtime transport
 
 Legacy CRA files were moved to `legacy-cra/` for reference only.
@@ -13,7 +13,7 @@ Legacy CRA files were moved to `legacy-cra/` for reference only.
 
 - Node.js 20+
 - pnpm 10+
-- PostgreSQL database (local or cloud)
+- Neon Postgres database (or any PostgreSQL instance)
 
 ## Environment
 
@@ -26,6 +26,7 @@ cp .env.example .env
 Required values:
 
 - `DATABASE_URL` PostgreSQL connection string
+- `BLOB_READ_WRITE_TOKEN` required for profile image uploads
 - `OPENAI_API_KEY` optional, needed for real `!ai` model responses
 - `OPENAI_MODEL` optional, defaults to `gpt-4o-mini`
 
@@ -81,13 +82,18 @@ Implemented route handlers:
 - `PATCH /api/users/me`
 - `POST /api/presence/ping`
 - `POST /api/presence/typing`
+- `POST /api/presence/logout`
 - `GET /api/messages`
 - `POST /api/messages`
 - `POST /api/polls/vote`
 - `GET /api/stream` (SSE)
+- `POST /api/uploads/profile`
 
 ## Notes
 
 - Typing state, online presence, poll voting, question/answer threading, and `!ai` message trigger are preserved from the legacy app behavior.
 - Poll voting is now enforced server-side (one vote per user per poll).
 - If `OPENAI_API_KEY` is not set, the app still responds with a deterministic fallback AI message.
+- Login creates a system message in chat: `"username joined the chat"`.
+- Going offline creates a system message in chat: `"username left the chat"`.
+- If `BLOB_READ_WRITE_TOKEN` is missing, avatar uploads still work for small files via inline data URLs.

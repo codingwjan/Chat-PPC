@@ -1,22 +1,16 @@
-import { MessageType, Prisma, VoteSide } from "@prisma/client";
+import { MessageType, Prisma } from "@prisma/client";
 import OpenAI from "openai";
+import { getDefaultProfilePicture as getDefaultAvatar } from "@/lib/default-avatar";
 import { prisma } from "@/lib/prisma";
 import { publish } from "@/lib/sse-bus";
-import type {
-  CreateMessageRequest,
-  MessageDTO,
-  SnapshotDTO,
-  UserPresenceDTO,
-} from "@/lib/types";
+import type { CreateMessageRequest, MessageDTO, SnapshotDTO, UserPresenceDTO } from "@/lib/types";
 import { AppError, assert } from "@/server/errors";
+import chatgptProfilePicture from "@/resources/chatgpt.png";
 
 const PRESENCE_TIMEOUT_MS = 15_000;
 
 function getDefaultProfilePicture(): string {
-  return (
-    process.env.NEXT_PUBLIC_DEFAULT_PROFILE_PICTURE ||
-    "https://www.nailseatowncouncil.gov.uk/wp-content/uploads/blank-profile-picture-973460_1280.jpg"
-  );
+  return process.env.NEXT_PUBLIC_DEFAULT_PROFILE_PICTURE || getDefaultAvatar();
 }
 
 function normalizeUsername(username: string): string {
@@ -57,11 +51,38 @@ function mapUser(user: {
   };
 }
 
-function mapMessage(
-  message: Prisma.MessageGetPayload<{
-    include: { questionMessage: true; author: true };
-  }>,
-): MessageDTO {
+type MessageRow = Prisma.MessageGetPayload<{
+  include: { questionMessage: true; author: true; pollOptions: { include: { votes: true } } };
+}>;
+
+function mapMessage(message: MessageRow): MessageDTO {
+  const modernPollOptions =
+    message.pollOptions?.length > 0
+      ? message.pollOptions
+          .sort((a, b) => a.sortOrder - b.sortOrder)
+          .map((option) => ({
+            id: option.id,
+            label: option.label,
+            votes: option.votes.length,
+          }))
+      : [];
+
+  const legacyPollOptions =
+    message.type === MessageType.VOTING_POLL && modernPollOptions.length === 0
+      ? [
+          {
+            id: `${message.id}-legacy-left`,
+            label: message.optionOne || "Option 1",
+            votes: message.pollLeftCount,
+          },
+          {
+            id: `${message.id}-legacy-right`,
+            label: message.optionTwo || "Option 2",
+            votes: message.pollRightCount,
+          },
+        ]
+      : [];
+
   return {
     id: message.id,
     authorId: message.authorId ?? undefined,
@@ -72,17 +93,21 @@ function mapMessage(
     createdAt: message.createdAt.toISOString(),
     optionOne: message.optionOne ?? undefined,
     optionTwo: message.optionTwo ?? undefined,
-    resultone:
-      message.type === MessageType.VOTING_POLL
-        ? String(message.pollLeftCount)
-        : undefined,
-    resulttwo:
-      message.type === MessageType.VOTING_POLL
-        ? String(message.pollRightCount)
-        : undefined,
+    resultone: message.type === MessageType.VOTING_POLL ? String(message.pollLeftCount) : undefined,
+    resulttwo: message.type === MessageType.VOTING_POLL ? String(message.pollRightCount) : undefined,
     questionId: message.questionMessageId ?? undefined,
     oldusername: message.questionMessage?.authorName ?? undefined,
     oldmessage: message.questionMessage?.content ?? undefined,
+    poll:
+      message.type === MessageType.VOTING_POLL
+        ? {
+            options: modernPollOptions.length > 0 ? modernPollOptions : legacyPollOptions,
+            settings: {
+              multiSelect: message.pollMultiSelect,
+              allowVoteChange: message.pollAllowVoteChange,
+            },
+          }
+        : undefined,
   };
 }
 
@@ -96,10 +121,7 @@ async function assertUsernameAllowed(username: string): Promise<void> {
   }
 }
 
-async function assertUsernameAvailable(
-  username: string,
-  exceptClientId?: string,
-): Promise<void> {
+async function assertUsernameAvailable(username: string, exceptClientId?: string): Promise<void> {
   const existing = await prisma.user.findFirst({
     where: {
       username: {
@@ -114,18 +136,48 @@ async function assertUsernameAvailable(
   }
 }
 
+async function emitSystemMessage(content: string): Promise<void> {
+  const created = await prisma.message.create({
+    data: {
+      type: MessageType.MESSAGE,
+      content,
+      authorName: "System",
+      authorProfilePicture: getDefaultProfilePicture(),
+    },
+    include: { questionMessage: true, author: true, pollOptions: { include: { votes: true } } },
+  });
+
+  publish("message.created", mapMessage(created));
+}
+
 async function cleanupOfflineUsers(): Promise<void> {
   const threshold = new Date(Date.now() - PRESENCE_TIMEOUT_MS);
-  await prisma.user.updateMany({
+  const staleUsers = await prisma.user.findMany({
     where: {
       isOnline: true,
       OR: [{ lastSeenAt: null }, { lastSeenAt: { lt: threshold } }],
     },
-    data: {
+    orderBy: [{ lastSeenAt: "asc" }],
+  });
+
+  for (const user of staleUsers) {
+    const result = await prisma.user.updateMany({
+      where: { id: user.id, isOnline: true },
+      data: { isOnline: false, status: "" },
+    });
+
+    if (result.count === 0) {
+      continue;
+    }
+
+    const dto = mapUser({
+      ...user,
       isOnline: false,
       status: "",
-    },
-  });
+    });
+    publish("presence.updated", dto);
+    await emitSystemMessage(`${user.username} left the chat`);
+  }
 }
 
 async function getOnlineUsers(): Promise<UserPresenceDTO[]> {
@@ -139,20 +191,16 @@ async function getOnlineUsers(): Promise<UserPresenceDTO[]> {
   return users.map(mapUser);
 }
 
-async function getMessageRows(): Promise<
-  Prisma.MessageGetPayload<{ include: { questionMessage: true; author: true } }>[
-]
-> {
+async function getMessageRows(): Promise<MessageRow[]> {
   return prisma.message.findMany({
-    include: { questionMessage: true, author: true },
+    include: { questionMessage: true, author: true, pollOptions: { include: { votes: true } } },
     orderBy: [{ createdAt: "asc" }],
   });
 }
 
 async function emitAiResponse(prompt: string): Promise<void> {
   const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  const profilePicture = "https://nowmag.gr/wp-content/uploads/2020/07/gpt3-1024x500.jpg";
-
+  const profilePicture = getDefaultProfilePicture();
   let text = "No OPENAI_API_KEY configured, so this is a local fallback response.";
 
   if (process.env.OPENAI_API_KEY) {
@@ -160,15 +208,11 @@ async function emitAiResponse(prompt: string): Promise<void> {
       const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
       const response = await client.responses.create({
         model,
-        input: `User asked: ${prompt}\n\nReply like a concise helpful chat assistant.`,
+        input: `Classroom prompt: ${prompt}\nRespond with one concise helpful message.`,
       });
-
       text = response.output_text?.trim() || "I could not generate a response.";
     } catch (error) {
-      text =
-        error instanceof Error
-          ? `OpenAI request failed: ${error.message}`
-          : "OpenAI request failed.";
+      text = error instanceof Error ? `OpenAI request failed: ${error.message}` : "OpenAI request failed.";
     }
   }
 
@@ -176,10 +220,10 @@ async function emitAiResponse(prompt: string): Promise<void> {
     data: {
       type: MessageType.MESSAGE,
       content: text,
-      authorName: "GPT",
-      authorProfilePicture: profilePicture,
+      authorName: "ChatGPT",
+      authorProfilePicture: chatgptProfilePicture.src,
     },
-    include: { questionMessage: true, author: true },
+    include: { questionMessage: true, author: true, pollOptions: { include: { votes: true } } },
   });
 
   publish("message.created", mapMessage(created));
@@ -193,10 +237,7 @@ async function getUserByClientId(clientId: string) {
 
 export async function getSnapshot(): Promise<SnapshotDTO> {
   const [users, messages] = await Promise.all([getOnlineUsers(), getMessageRows()]);
-  return {
-    users,
-    messages: messages.map(mapMessage),
-  };
+  return { users, messages: messages.map(mapMessage) };
 }
 
 export async function getMessages(): Promise<MessageDTO[]> {
@@ -214,6 +255,11 @@ export async function loginUser(input: {
 
   await assertUsernameAllowed(username);
   await assertUsernameAvailable(username, input.clientId);
+
+  const existingUser = await prisma.user.findUnique({
+    where: { clientId: input.clientId },
+    select: { isOnline: true },
+  });
 
   const user = await prisma.user.upsert({
     where: { clientId: input.clientId },
@@ -237,6 +283,11 @@ export async function loginUser(input: {
   const dto = mapUser(user);
   publish("user.updated", dto);
   publish("presence.updated", dto);
+
+  if (!existingUser?.isOnline) {
+    await emitSystemMessage(`${user.username} joined the chat`);
+  }
+
   return dto;
 }
 
@@ -247,7 +298,6 @@ export async function renameUser(input: {
 }): Promise<UserPresenceDTO> {
   const newUsername = input.newUsername?.trim();
   const profilePicture = input.profilePicture?.trim();
-
   assert(newUsername || profilePicture, "Either newUsername or profilePicture is required", 400);
 
   if (newUsername) {
@@ -273,10 +323,7 @@ export async function renameUser(input: {
 export async function pingPresence(input: { clientId: string }): Promise<UserPresenceDTO> {
   const user = await prisma.user.update({
     where: { clientId: input.clientId },
-    data: {
-      isOnline: true,
-      lastSeenAt: new Date(),
-    },
+    data: { isOnline: true, lastSeenAt: new Date() },
   });
 
   await cleanupOfflineUsers();
@@ -285,21 +332,26 @@ export async function pingPresence(input: { clientId: string }): Promise<UserPre
   return dto;
 }
 
-export async function setTypingStatus(input: {
-  clientId: string;
-  status: string;
-}): Promise<UserPresenceDTO> {
+export async function setTypingStatus(input: { clientId: string; status: string }): Promise<UserPresenceDTO> {
   const user = await prisma.user.update({
     where: { clientId: input.clientId },
-    data: {
-      status: input.status,
-      isOnline: true,
-      lastSeenAt: new Date(),
-    },
+    data: { status: input.status, isOnline: true, lastSeenAt: new Date() },
   });
 
   const dto = mapUser(user);
   publish("presence.updated", dto);
+  return dto;
+}
+
+export async function markUserOffline(input: { clientId: string }): Promise<UserPresenceDTO> {
+  const user = await prisma.user.update({
+    where: { clientId: input.clientId },
+    data: { isOnline: false, status: "", lastSeenAt: new Date() },
+  });
+
+  const dto = mapUser(user);
+  publish("presence.updated", dto);
+  await emitSystemMessage(`${user.username} left the chat`);
   return dto;
 }
 
@@ -309,45 +361,75 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
   assert(message.length > 0, "Message cannot be empty", 400);
 
   const type = toDbMessageType(input.type);
-
   let questionMessageId: string | undefined;
+
   if (type === MessageType.ANSWER) {
     assert(input.questionId, "questionId is required for answer", 400);
-    const questionMessage = await prisma.message.findUnique({
-      where: { id: input.questionId },
-    });
-
+    const questionMessage = await prisma.message.findUnique({ where: { id: input.questionId } });
     assert(questionMessage, "Question message not found", 404);
     assert(questionMessage.type === MessageType.QUESTION, "questionId must reference a question", 400);
     questionMessageId = questionMessage.id;
   }
 
+  const normalizedPollOptions = input.pollOptions?.map((value) => value.trim()).filter(Boolean) ?? [];
+  const fallbackPollOptions = [input.optionOne?.trim(), input.optionTwo?.trim()].filter(Boolean) as string[];
+  const pollOptions = normalizedPollOptions.length > 0 ? normalizedPollOptions : fallbackPollOptions;
+
   if (type === MessageType.VOTING_POLL) {
-    assert(input.optionOne?.trim(), "optionOne is required for votingPoll", 400);
-    assert(input.optionTwo?.trim(), "optionTwo is required for votingPoll", 400);
+    assert(pollOptions.length >= 2, "At least two poll options are required", 400);
+    assert(pollOptions.length <= 15, "Poll supports up to 15 options", 400);
+    assert(
+      new Set(pollOptions.map((value) => value.toLowerCase())).size === pollOptions.length,
+      "Poll options must be unique",
+      400,
+    );
+  }
+
+  let content = message;
+  if (type === MessageType.MESSAGE) {
+    if (message.startsWith("/roll")) {
+      content = `${user.username} rolled ${Math.floor(Math.random() * 6) + 1}`;
+    } else if (message.startsWith("/coin")) {
+      content = `${user.username} flipped ${Math.random() < 0.5 ? "heads" : "tails"}`;
+    } else if (message.startsWith("/help")) {
+      content = "Try /ai <prompt>, /roll, /coin, and polls with up to 15 options.";
+    }
   }
 
   const created = await prisma.message.create({
     data: {
       type,
-      content: message,
+      content,
       authorId: user.id,
       authorName: user.username,
       authorProfilePicture: user.profilePicture,
-      optionOne: input.optionOne?.trim() || null,
-      optionTwo: input.optionTwo?.trim() || null,
+      optionOne: pollOptions[0] || null,
+      optionTwo: pollOptions[1] || null,
+      pollMultiSelect: Boolean(input.pollMultiSelect),
+      pollAllowVoteChange: Boolean(input.pollAllowVoteChange),
       questionMessageId: questionMessageId || null,
       pollLeftCount: 0,
       pollRightCount: 0,
+      ...(type === MessageType.VOTING_POLL
+        ? {
+            pollOptions: {
+              create: pollOptions.map((label, sortOrder) => ({
+                label,
+                sortOrder,
+              })),
+            },
+          }
+        : {}),
     },
-    include: { questionMessage: true, author: true },
+    include: { questionMessage: true, author: true, pollOptions: { include: { votes: true } } },
   });
 
   const dto = mapMessage(created);
   publish("message.created", dto);
 
-  if (type === MessageType.MESSAGE && message.includes("!ai")) {
-    void emitAiResponse(message).catch((error) => {
+  if (type === MessageType.MESSAGE && message.startsWith("/ai")) {
+    const prompt = message.replace(/^\/ai\s*/i, "").trim() || "Give one concise study tip.";
+    void emitAiResponse(prompt).catch((error) => {
       const fallback = error instanceof Error ? error.message : "Unknown AI processing error";
       console.error("Failed to generate AI response:", fallback);
     });
@@ -359,36 +441,77 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
 export async function votePoll(input: {
   clientId: string;
   pollMessageId: string;
-  side: "left" | "right";
+  side?: "left" | "right";
+  optionIds?: string[];
 }): Promise<MessageDTO> {
   const user = await getUserByClientId(input.clientId);
-
   const poll = await prisma.message.findUnique({
     where: { id: input.pollMessageId },
+    include: { questionMessage: true, author: true, pollOptions: { include: { votes: true } } },
   });
 
   assert(poll, "Poll not found", 404);
   assert(poll.type === MessageType.VOTING_POLL, "Message is not a voting poll", 400);
 
-  try {
-    await prisma.pollVote.create({
-      data: {
-        pollMessageId: poll.id,
-        userId: user.id,
-        side: input.side === "left" ? VoteSide.LEFT : VoteSide.RIGHT,
-      },
-    });
-  } catch {
-    throw new AppError("You have already voted on this poll", 409);
+  const sortedOptions = [...poll.pollOptions].sort((a, b) => a.sortOrder - b.sortOrder);
+  let targetOptionIds = input.optionIds?.filter(Boolean) ?? [];
+
+  if (targetOptionIds.length === 0 && input.side) {
+    const legacyOption = input.side === "left" ? sortedOptions[0] : sortedOptions[1];
+    if (legacyOption) targetOptionIds = [legacyOption.id];
   }
+
+  assert(targetOptionIds.length > 0, "At least one poll option is required", 400);
+  assert(targetOptionIds.length <= 15, "Poll supports up to 15 selected options", 400);
+
+  if (!poll.pollMultiSelect) {
+    assert(targetOptionIds.length === 1, "This poll allows only one vote", 400);
+  }
+
+  const validOptionIds = new Set(sortedOptions.map((option) => option.id));
+  assert(
+    targetOptionIds.every((optionId) => validOptionIds.has(optionId)),
+    "One or more poll options are invalid",
+    400,
+  );
+
+  const existingVotes = await prisma.pollChoiceVote.findMany({
+    where: { pollMessageId: poll.id, userId: user.id },
+  });
+
+  if (!poll.pollAllowVoteChange && existingVotes.length > 0) {
+    throw new AppError("This poll does not allow changing your vote", 409);
+  }
+
+  if (existingVotes.length > 0) {
+    await prisma.pollChoiceVote.deleteMany({
+      where: { pollMessageId: poll.id, userId: user.id },
+    });
+  }
+
+  await prisma.pollChoiceVote.createMany({
+    data: [...new Set(targetOptionIds)].map((optionId) => ({
+      pollMessageId: poll.id,
+      pollOptionId: optionId,
+      userId: user.id,
+    })),
+    skipDuplicates: true,
+  });
+
+  const groupedVotes = await prisma.pollChoiceVote.groupBy({
+    by: ["pollOptionId"],
+    where: { pollMessageId: poll.id },
+    _count: { pollOptionId: true },
+  });
+  const voteByOptionId = new Map(groupedVotes.map((row) => [row.pollOptionId, row._count.pollOptionId]));
 
   const updated = await prisma.message.update({
     where: { id: poll.id },
-    data:
-      input.side === "left"
-        ? { pollLeftCount: { increment: 1 } }
-        : { pollRightCount: { increment: 1 } },
-    include: { questionMessage: true, author: true },
+    data: {
+      pollLeftCount: sortedOptions[0] ? voteByOptionId.get(sortedOptions[0].id) || 0 : 0,
+      pollRightCount: sortedOptions[1] ? voteByOptionId.get(sortedOptions[1].id) || 0 : 0,
+    },
+    include: { questionMessage: true, author: true, pollOptions: { include: { votes: true } } },
   });
 
   const dto = mapMessage(updated);
@@ -398,9 +521,7 @@ export async function votePoll(input: {
 
 export async function importLegacyBlacklist(usernames: string[]): Promise<void> {
   const normalized = [...new Set(usernames.map((name) => normalizeUsername(name).trim()).filter(Boolean))];
-  if (normalized.length === 0) {
-    return;
-  }
+  if (normalized.length === 0) return;
 
   await prisma.blacklistEntry.createMany({
     data: normalized.map((username) => ({ username })),
