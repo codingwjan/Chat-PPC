@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
-import { useEffect, useMemo, useRef, useState, type ImgHTMLAttributes } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ImgHTMLAttributes } from "react";
 import type { LinkPreviewDTO, MessageDTO } from "@/lib/types";
 
 interface ChatMessageProps {
@@ -34,6 +34,7 @@ function isSystemPresenceMessage(message: MessageDTO): boolean {
     message.username === "System" &&
     (message.message.endsWith(" joined the chat") ||
       message.message.endsWith(" left the chat") ||
+      message.message.endsWith(" reset the background image") ||
       message.message.includes(" is now "))
   );
 }
@@ -201,7 +202,7 @@ function LinkPreviewCard({ url }: { url: string }) {
   );
 }
 
-export function ChatMessage({
+function ChatMessageComponent({
   message,
   currentUsername,
   isDeveloperMode,
@@ -605,3 +606,5 @@ export function ChatMessage({
     </div>
   );
 }
+
+export const ChatMessage = memo(ChatMessageComponent);

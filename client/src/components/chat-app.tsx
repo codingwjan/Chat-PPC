@@ -1540,6 +1540,14 @@ export function ChatApp() {
     [isDeveloperMode, runAdminAction],
   );
 
+  const handleAnswerDraftChange = useCallback((messageId: string, value: string) => {
+    setAnswerDrafts((current) => ({ ...current, [messageId]: value }));
+  }, []);
+
+  const handleOpenLightbox = useCallback((url: string, alt?: string) => {
+    setLightbox({ url, alt: alt || "Image preview" });
+  }, []);
+
   const handleRemixImage = useCallback(
     (url: string, alt?: string) => {
       setComposerMode("message");
@@ -2197,13 +2205,11 @@ export function ChatApp() {
                     : undefined
                 }
                 answerDraft={answerDrafts[message.id] || ""}
-                onAnswerDraftChange={(messageId, value) =>
-                  setAnswerDrafts((current) => ({ ...current, [messageId]: value }))
-                }
+                onAnswerDraftChange={handleAnswerDraftChange}
                 onSubmitAnswer={submitAnswer}
                 onVote={handleVote}
                 onDeleteMessage={handleDeleteMessage}
-                onOpenLightbox={(url, alt) => setLightbox({ url, alt: alt || "Image preview" })}
+                onOpenLightbox={handleOpenLightbox}
                 onRemixImage={handleRemixImage}
               />
             ))}
