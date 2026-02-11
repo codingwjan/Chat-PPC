@@ -5,6 +5,7 @@ import {
   parseCreateMessageRequest,
   parseLoginRequest,
   parseRenameUserRequest,
+  parseUpdateChatBackgroundRequest,
   parseVotePollRequest,
 } from "@/server/contracts";
 
@@ -53,6 +54,24 @@ describe("contracts", () => {
         clientId: "client-123",
       }),
     ).toThrow("Either newUsername or profilePicture is required");
+  });
+
+  it("rejects data URLs for profilePicture updates", () => {
+    expect(() =>
+      parseRenameUserRequest({
+        clientId: "client-123",
+        profilePicture: "data:image/png;base64,abcd",
+      }),
+    ).toThrow("profilePicture must not be a data URL");
+  });
+
+  it("rejects data URLs for chat background updates", () => {
+    expect(() =>
+      parseUpdateChatBackgroundRequest({
+        clientId: "client-123",
+        url: "data:image/png;base64,abcd",
+      }),
+    ).toThrow("url must not be a data URL");
   });
 
   it("requires questionId for answers", () => {

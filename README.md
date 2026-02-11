@@ -5,7 +5,7 @@ Chat-PPC is modernized to a single active runtime in `client/`:
 - Next.js App Router + TypeScript
 - Tailwind CSS
 - Neon PostgreSQL via Prisma
-- REST + DB polling realtime updates
+- REST + SSE realtime updates
 
 The old Node/Socket.IO server is archived in `server/` for legacy data import only.
 

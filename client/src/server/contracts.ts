@@ -18,6 +18,16 @@ const text = (field: string) =>
     .trim()
     .min(1, `${field} is required`);
 
+function externalUrl(field: string) {
+  return z
+    .string()
+    .trim()
+    .url(`${field} must be a valid URL`)
+    .refine((value) => !value.toLowerCase().startsWith("data:"), {
+      message: `${field} must not be a data URL`,
+    });
+}
+
 const loginSchema = z.object({
   username: text("username").min(3, "username must be at least 3 characters"),
   clientId: text("clientId"),
@@ -31,7 +41,7 @@ const renameSchema = z.object({
     .trim()
     .min(3, "newUsername must be at least 3 characters")
     .optional(),
-  profilePicture: z.string().url("profilePicture must be a valid URL").optional(),
+  profilePicture: externalUrl("profilePicture").optional(),
 }).superRefine((value, ctx) => {
   if (!value.newUsername && !value.profilePicture) {
     ctx.addIssue({
@@ -54,7 +64,7 @@ const typingSchema = z.object({
 const chatBackgroundSchema = z.object({
   clientId: text("clientId"),
   url: z
-    .union([z.string().trim().url("url must be a valid URL"), z.literal(""), z.null()])
+    .union([externalUrl("url"), z.literal(""), z.null()])
     .optional(),
 });
 

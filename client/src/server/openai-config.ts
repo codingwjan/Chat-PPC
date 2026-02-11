@@ -46,7 +46,7 @@ const DEFAULTS = {
     contextSize: "low" as WebSearchContextSize,
   },
   imageGeneration: {
-    enabled: true,
+    enabled: false,
     model: "gpt-image-1-mini",
     background: "auto" as ImageBackground,
     moderation: "low" as ImageModeration,

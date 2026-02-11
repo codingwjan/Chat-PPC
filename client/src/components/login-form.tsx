@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { apiJson } from "@/lib/http";
@@ -12,11 +12,7 @@ interface UploadResponse {
   url: string;
 }
 
-const USERNAME_PLACEHOLDERS = [
-  "Lorenz A3",
-  "Jonnys Brotdose",
-  "Hilpischs 10-Finger Kurs",
-];
+const USERNAME_PLACEHOLDER = "Your username";
 
 function createClientId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -48,28 +44,18 @@ export function LoginForm() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [username, setUsername] = useState("");
   const [profilePicture, setProfilePicture] = useState("");
   const [cropFile, setCropFile] = useState<File | null>(null);
-  const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      setPlaceholderIndex((current) => (current + 1) % USERNAME_PLACEHOLDERS.length);
-    }, 3_000);
-
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, []);
-
-  async function onSubmit(event: FormEvent) {
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    const trimmed = username.trim();
+    const formData = new FormData(event.currentTarget);
+    const submittedUsername = formData.get("username");
+    const trimmed = typeof submittedUsername === "string" ? submittedUsername.trim() : "";
     if (trimmed.length < 3) {
       setError("Username must be at least 3 characters.");
       return;
@@ -130,6 +116,13 @@ export function LoginForm() {
     }
   }
 
+  function onUsernameKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    if (loading || uploading) return;
+    event.currentTarget.form?.requestSubmit();
+  }
+
   return (
     <main className="h-[100dvh] w-screen overflow-y-auto bg-[radial-gradient(circle_at_top_left,_#dbeafe_0%,_#f8fafc_40%,_#eef2ff_100%)] px-4 py-6 sm:px-6 [padding-bottom:calc(env(safe-area-inset-bottom)+1rem)]">
       <div className="mx-auto flex min-h-full max-w-4xl items-center">
@@ -157,12 +150,11 @@ export function LoginForm() {
                 <input
                   className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm transition focus:border-sky-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
                   type="text"
-                  placeholder={USERNAME_PLACEHOLDERS[placeholderIndex]}
+                  placeholder={USERNAME_PLACEHOLDER}
                   name="username"
                   autoComplete="username"
                   spellCheck={false}
-                  value={username}
-                  onChange={(event) => setUsername(event.target.value)}
+                  onKeyDown={onUsernameKeyDown}
                 />
               </label>
               <div className="flex items-center gap-3">

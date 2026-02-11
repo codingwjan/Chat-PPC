@@ -8,7 +8,7 @@ interface ChatMessageProps {
   message: MessageDTO;
   currentUsername?: string;
   isDeveloperMode?: boolean;
-  delivery?: { status: "sending"; progress: number };
+  delivery?: { status: "sending" };
   answerDraft?: string;
   onAnswerDraftChange: (messageId: string, value: string) => void;
   onSubmitAnswer: (messageId: string) => void;
@@ -34,6 +34,7 @@ function isSystemPresenceMessage(message: MessageDTO): boolean {
     message.username === "System" &&
     (message.message.endsWith(" joined the chat") ||
       message.message.endsWith(" left the chat") ||
+      message.message.endsWith(" changed the background image") ||
       message.message.endsWith(" reset the background image") ||
       message.message.includes(" is now "))
   );
@@ -217,6 +218,7 @@ function ChatMessageComponent({
 }: ChatMessageProps) {
   const pollSettings = message.poll?.settings;
   const previewUrls = useMemo(() => extractPreviewUrls(message.message), [message.message]);
+  const messageLines = useMemo(() => message.message.split("\n"), [message.message]);
   const viewerUsernameNormalized = currentUsername?.trim().toLowerCase() ?? "";
   const isOwnMessage = viewerUsernameNormalized.length > 0
     && message.username.toLowerCase() === viewerUsernameNormalized;
@@ -238,7 +240,7 @@ function ChatMessageComponent({
     const totalVotes = options.reduce((sum, option) => sum + option.votes, 0);
 
     return (
-      <div className={`flex w-full ${isOwnMessage ? "justify-end" : "justify-start"}`}>
+      <div className={`flex w-full ${isOwnMessage ? "justify-end" : "justify-start"} [content-visibility:auto] [contain-intrinsic-size:320px]`}>
         <article
           data-message-id={message.id}
           className={`w-full max-w-[min(92vw,42rem)] rounded-2xl border p-4 shadow-sm ${isOwnMessage
@@ -325,17 +327,7 @@ function ChatMessageComponent({
           {isOwnMessage ? (
             <div className="mt-2">
               {delivery?.status === "sending" ? (
-                <div className="space-y-1.5">
-                  <p className="text-[11px] font-medium text-sky-600">
-                    sending {Math.max(0, Math.min(100, Math.round(delivery.progress)))}%
-                  </p>
-                  <div className="h-1.5 w-28 overflow-hidden rounded-full bg-slate-200">
-                    <div
-                      className="h-full rounded-full bg-sky-500 transition-all duration-200"
-                      style={{ width: `${Math.max(2, Math.min(100, delivery.progress))}%` }}
-                    />
-                  </div>
-                </div>
+                <p className="text-[11px] font-medium text-sky-600">sending…</p>
               ) : (
                 <p className="text-[11px] font-medium text-slate-400">sent</p>
               )}
@@ -348,7 +340,7 @@ function ChatMessageComponent({
 
   if (message.type === "question") {
     return (
-      <div className={`flex w-full ${isOwnMessage ? "justify-end" : "justify-start"}`}>
+      <div className={`flex w-full ${isOwnMessage ? "justify-end" : "justify-start"} [content-visibility:auto] [contain-intrinsic-size:320px]`}>
         <article
           data-message-id={message.id}
           className={`w-full max-w-[min(92vw,42rem)] rounded-2xl border p-4 shadow-sm ${isOwnMessage
@@ -403,17 +395,7 @@ function ChatMessageComponent({
           {isOwnMessage ? (
             <div className="mt-2">
               {delivery?.status === "sending" ? (
-                <div className="space-y-1.5">
-                  <p className="text-[11px] font-medium text-sky-600">
-                    sending {Math.max(0, Math.min(100, Math.round(delivery.progress)))}%
-                  </p>
-                  <div className="h-1.5 w-28 overflow-hidden rounded-full bg-slate-200">
-                    <div
-                      className="h-full rounded-full bg-sky-500 transition-all duration-200"
-                      style={{ width: `${Math.max(2, Math.min(100, delivery.progress))}%` }}
-                    />
-                  </div>
-                </div>
+                <p className="text-[11px] font-medium text-sky-600">sending…</p>
               ) : (
                 <p className="text-[11px] font-medium text-slate-400">sent</p>
               )}
@@ -427,7 +409,7 @@ function ChatMessageComponent({
   const answerContext = message.type === "answer" && message.oldmessage && message.oldusername;
 
   return (
-    <div className={`flex w-full ${isOwnMessage ? "justify-end" : "justify-start"}`}>
+    <div className={`flex w-full ${isOwnMessage ? "justify-end" : "justify-start"} [content-visibility:auto] [contain-intrinsic-size:320px]`}>
       <article
         data-message-id={message.id}
         className={`max-w-[min(92vw,44rem)] rounded-2xl border p-4 shadow-sm ${isOwnMessage
@@ -464,7 +446,7 @@ function ChatMessageComponent({
                 In reply to &quot;{message.oldmessage}&quot; by {message.oldusername}
               </p>
             ) : null}
-            {message.message.split("\n").map((line, i) => {
+            {messageLines.map((line, i) => {
               // Check for markdown image syntax first (e.g. from AI)
               const imgMatch = line.match(/^!\[(.*?)\]\((.*?)\)$/);
               if (imgMatch) {
@@ -584,17 +566,7 @@ function ChatMessageComponent({
             {isOwnMessage ? (
               <div className="mt-2">
                 {delivery?.status === "sending" ? (
-                  <div className="space-y-1.5">
-                    <p className="text-[11px] font-medium text-sky-600">
-                      sending {Math.max(0, Math.min(100, Math.round(delivery.progress)))}%
-                    </p>
-                    <div className="h-1.5 w-28 overflow-hidden rounded-full bg-slate-200">
-                      <div
-                        className="h-full rounded-full bg-sky-500 transition-all duration-200"
-                        style={{ width: `${Math.max(2, Math.min(100, delivery.progress))}%` }}
-                      />
-                    </div>
-                  </div>
+                  <p className="text-[11px] font-medium text-sky-600">sending…</p>
                 ) : (
                   <p className="text-[11px] font-medium text-slate-400">sent</p>
                 )}

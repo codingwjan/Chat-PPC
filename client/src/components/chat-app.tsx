@@ -2,7 +2,7 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
 import { ChatMessage } from "@/components/chat-message";
 import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { apiJson } from "@/lib/http";
@@ -25,6 +25,7 @@ import type {
   MessageDTO,
   MessagePageDTO,
   RenameUserRequest,
+  SnapshotDTO,
   UserPresenceDTO,
   VotePollRequest,
 } from "@/lib/types";
@@ -76,13 +77,15 @@ function DraftImagePreview({
 }
 
 const MESSAGE_PAGE_SIZE = 12;
-const MESSAGE_DELTA_LIMIT = 24;
-const MESSAGE_POLL_INTERVAL_MS = 2_000;
-const PRESENCE_POLL_INTERVAL_MS = 2_000;
-const PRESENCE_PING_INTERVAL_MS = 4_000;
+const SNAPSHOT_LIMIT = 40;
+const RECONCILE_INTERVAL_MS = 30_000;
+const PRESENCE_PING_INTERVAL_MS = 20_000;
 const NEAR_BOTTOM_PX = 80;
 const ONBOARDING_KEY = "chatppc.onboarding.v1";
 const MAX_MESSAGE_INPUT_LINES = 10;
+const MAX_VISIBLE_MESSAGES = 120;
+const MESSAGE_RENDER_WINDOW = 40;
+const MESSAGE_RENDER_CHUNK = 20;
 const SUPPORTED_CHAT_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const MEDIA_PAGE_SIZE = 3;
 const MEDIA_CACHE_KEY = "chatppc.media.cache.v1";
@@ -112,6 +115,11 @@ function mergeMessage(messages: MessageDTO[], next: MessageDTO): MessageDTO[] {
 
 function mergeMessages(messages: MessageDTO[], incoming: MessageDTO[]): MessageDTO[] {
   return incoming.reduce((current, message) => mergeMessage(current, message), messages);
+}
+
+function limitVisibleMessages(messages: MessageDTO[]): MessageDTO[] {
+  if (messages.length <= MAX_VISIBLE_MESSAGES) return messages;
+  return messages.slice(-MAX_VISIBLE_MESSAGES);
 }
 
 function mergeMediaItems(current: MediaItemDTO[], incoming: MediaItemDTO[]): MediaItemDTO[] {
@@ -323,6 +331,94 @@ function shouldShowAiProgress(user: UserPresenceDTO): boolean {
   return user.clientId === "chatgpt" && aiProgressForStatus(user.status) > 0;
 }
 
+interface MessageListProps {
+  messages: MessageDTO[];
+  currentUsername: string;
+  isDeveloperMode: boolean;
+  pendingDeliveries: Record<string, true>;
+  answerDrafts: Record<string, string>;
+  onAnswerDraftChange: (messageId: string, value: string) => void;
+  onSubmitAnswer: (messageId: string) => void;
+  onVote: (messageId: string, optionIds: string[]) => void;
+  onDeleteMessage: (messageId: string) => void;
+  onOpenLightbox: (url: string, alt?: string) => void;
+  onRemixImage: (url: string, alt?: string) => void;
+}
+
+const MessageList = memo(function MessageList({
+  messages,
+  currentUsername,
+  isDeveloperMode,
+  pendingDeliveries,
+  answerDrafts,
+  onAnswerDraftChange,
+  onSubmitAnswer,
+  onVote,
+  onDeleteMessage,
+  onOpenLightbox,
+  onRemixImage,
+}: MessageListProps) {
+  return (
+    <>
+      {messages.map((message) => (
+        <ChatMessage
+          key={message.id}
+          message={message}
+          currentUsername={currentUsername}
+          isDeveloperMode={isDeveloperMode}
+          delivery={
+            pendingDeliveries[message.id] !== undefined
+              ? { status: "sending" }
+              : undefined
+          }
+          answerDraft={answerDrafts[message.id] || ""}
+          onAnswerDraftChange={onAnswerDraftChange}
+          onSubmitAnswer={onSubmitAnswer}
+          onVote={onVote}
+          onDeleteMessage={onDeleteMessage}
+          onOpenLightbox={onOpenLightbox}
+          onRemixImage={onRemixImage}
+        />
+      ))}
+    </>
+  );
+});
+
+interface OnlineUsersListProps {
+  users: UserPresenceDTO[];
+  avatarSizeClassName: string;
+}
+
+const OnlineUsersList = memo(function OnlineUsersList({ users, avatarSizeClassName }: OnlineUsersListProps) {
+  return (
+    <>
+      {users.map((user) => (
+        <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
+          <img
+            src={user.profilePicture}
+            alt={`${user.username} avatar`}
+            className={`${avatarSizeClassName} rounded-full border border-slate-200 object-cover`}
+            loading="lazy"
+            decoding="async"
+          />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
+            <p className="truncate text-xs text-slate-500">{formatPresenceStatus(user)}</p>
+            {shouldShowAiProgress(user) ? (
+              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
+                <div
+                  className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out animate-pulse"
+                  style={{ width: `${aiProgressForStatus(user.status)}%` }}
+                />
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ))}
+    </>
+  );
+});
+
 export function ChatApp() {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -343,11 +439,13 @@ export function ChatApp() {
   const optimisticVoteRollbackRef = useRef<MessageDTO[] | null>(null);
   const draftBeforeHistoryRef = useRef("");
   const dragDepthRef = useRef(0);
-  const deliveryTimersRef = useRef<Record<string, number>>({});
+  const messageInputLineHeightRef = useRef<number | null>(null);
+  const messageInputResizeFrameRef = useRef<number | null>(null);
 
   const [session, setSession] = useState<SessionState | null>(() => loadSession());
   const [users, setUsers] = useState<UserPresenceDTO[]>([]);
   const [messages, setMessages] = useState<MessageDTO[]>([]);
+  const [messageWindowSize, setMessageWindowSize] = useState(MESSAGE_RENDER_WINDOW);
   const [error, setError] = useState<string | null>(null);
   const [aiStatus, setAiStatus] = useState("online");
   const [uploadingChat, setUploadingChat] = useState(false);
@@ -383,7 +481,7 @@ export function ChatApp() {
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [adminTargetUsername, setAdminTargetUsername] = useState("");
   const [adminTargetMessageId, setAdminTargetMessageId] = useState("");
-  const [pendingDeliveries, setPendingDeliveries] = useState<Record<string, number>>({});
+  const [pendingDeliveries, setPendingDeliveries] = useState<Record<string, true>>({});
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
 
   const [messageDraft, setMessageDraft] = useState("");
@@ -440,6 +538,11 @@ export function ChatApp() {
       .filter((value) => value.trim().length > 0);
   }, [messages, session]);
 
+  const visibleMessages = useMemo(() => {
+    if (messages.length <= messageWindowSize) return messages;
+    return messages.slice(-messageWindowSize);
+  }, [messageWindowSize, messages]);
+
   const derivedStatus = useMemo(
     () =>
       statusForComposer({
@@ -463,12 +566,6 @@ export function ChatApp() {
   }, []);
 
   const clearPendingDelivery = useCallback((messageId: string) => {
-    const timer = deliveryTimersRef.current[messageId];
-    if (timer) {
-      window.clearInterval(timer);
-      delete deliveryTimersRef.current[messageId];
-    }
-
     setPendingDeliveries((current) => {
       if (!(messageId in current)) return current;
       const next = { ...current };
@@ -479,22 +576,9 @@ export function ChatApp() {
 
   const startPendingDelivery = useCallback(
     (messageId: string) => {
-      clearPendingDelivery(messageId);
-      setPendingDeliveries((current) => ({ ...current, [messageId]: 8 }));
-
-      const interval = window.setInterval(() => {
-        setPendingDeliveries((current) => {
-          const value = current[messageId];
-          if (value === undefined) return current;
-          const nextValue = Math.min(94, value + Math.max(2, Math.floor(Math.random() * 10)));
-          if (nextValue === value) return current;
-          return { ...current, [messageId]: nextValue };
-        });
-      }, 170);
-
-      deliveryTimersRef.current[messageId] = interval;
+      setPendingDeliveries((current) => ({ ...current, [messageId]: true }));
     },
-    [clearPendingDelivery],
+    [],
   );
 
   const createTempMessageId = useCallback((): string => {
@@ -503,7 +587,7 @@ export function ChatApp() {
 
   const appendOptimisticMessage = useCallback(
     (message: MessageDTO) => {
-      setMessages((current) => mergeMessage(current, message));
+      setMessages((current) => limitVisibleMessages(mergeMessage(current, message)));
       if (isAtBottomRef.current) {
         requestAnimationFrame(() => scrollToBottom("smooth"));
       }
@@ -521,12 +605,48 @@ export function ChatApp() {
     if (!textarea) return;
 
     textarea.style.height = "auto";
-    const lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight || "20") || 20;
+    let lineHeight = messageInputLineHeightRef.current;
+    if (!lineHeight || !Number.isFinite(lineHeight) || lineHeight <= 0) {
+      lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight || "20") || 20;
+      messageInputLineHeightRef.current = lineHeight;
+    }
     const maxHeight = lineHeight * MAX_MESSAGE_INPUT_LINES;
     const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
     textarea.style.height = `${Math.max(lineHeight, nextHeight)}px`;
     textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
   }, []);
+
+  const scheduleMessageInputResize = useCallback(() => {
+    if (messageInputResizeFrameRef.current !== null) return;
+    messageInputResizeFrameRef.current = window.requestAnimationFrame(() => {
+      messageInputResizeFrameRef.current = null;
+      resizeMessageInput();
+    });
+  }, [resizeMessageInput]);
+
+  const handleMessageDraftChange = useCallback(
+    (event: ChangeEvent<HTMLTextAreaElement>) => {
+      const value = event.target.value;
+      setMessageDraft(value);
+      setComposerHistoryIndex((current) => (current === -1 ? current : -1));
+      draftBeforeHistoryRef.current = "";
+
+      const cursor = event.target.selectionStart ?? value.length;
+      const textBefore = value.slice(0, cursor);
+      const match = textBefore.match(/@(\w*)$/);
+      if (match) {
+        const nextFilter = match[1];
+        setShowMentionSuggestions((current) => (current ? current : true));
+        setMentionFilter((current) => (current === nextFilter ? current : nextFilter));
+        setMentionIndex((current) => (current === 0 ? current : 0));
+      } else {
+        setShowMentionSuggestions((current) => (current ? false : current));
+      }
+
+      scheduleMessageInputResize();
+    },
+    [scheduleMessageInputResize],
+  );
 
   const activateAskChatGpt = useCallback(() => {
     setComposerMode("message");
@@ -709,7 +829,7 @@ export function ChatApp() {
       if (incoming.length === 0) return;
 
       const fresh = incoming.filter((message) => !knownMessageIdsRef.current.has(message.id));
-      setMessages((current) => mergeMessages(current, incoming));
+      setMessages((current) => limitVisibleMessages(mergeMessages(current, incoming)));
       updateLatestMessageCursor(incoming);
 
       for (const message of fresh) {
@@ -731,10 +851,34 @@ export function ChatApp() {
     [fetchMediaItems, notifyMessages, scrollToBottom, showMedia, updateLatestMessageCursor],
   );
 
+  const applySnapshot = useCallback(
+    (snapshot: SnapshotDTO) => {
+      if (isLeavingRef.current) return;
+
+      setUsers(snapshot.users);
+      setAiStatus(snapshot.aiStatus.status || "online");
+      setChatBackgroundUrl(snapshot.background.url);
+
+      const limitedMessages = limitVisibleMessages(snapshot.messages);
+      setMessages(limitedMessages);
+      setMessageWindowSize(Math.min(limitedMessages.length, MESSAGE_RENDER_WINDOW));
+      setHasMoreOlder(limitedMessages.length >= SNAPSHOT_LIMIT && limitedMessages.length < MAX_VISIBLE_MESSAGES);
+
+      knownMessageIdsRef.current = new Set(limitedMessages.map((message) => message.id));
+      latestMessageAtRef.current = null;
+      updateLatestMessageCursor(limitedMessages);
+
+      if (showMedia) {
+        void fetchMediaItems({ silent: true });
+      }
+    },
+    [fetchMediaItems, showMedia, updateLatestMessageCursor],
+  );
+
   const syncChatState = useCallback(async () => {
     const [presence, page, ai, background] = await Promise.all([
       fetchPresence(),
-      fetchMessagePage({ limit: MESSAGE_PAGE_SIZE }),
+      fetchMessagePage({ limit: SNAPSHOT_LIMIT }),
       fetchAiStatus().catch(() => ({ status: "online", updatedAt: new Date().toISOString() })),
       fetchChatBackground().catch(() => ({ url: null, updatedAt: null, updatedBy: null })),
     ]);
@@ -742,12 +886,14 @@ export function ChatApp() {
     setUsers(presence);
     setAiStatus(ai.status || "online");
     setChatBackgroundUrl(background.url);
-    setMessages(page.messages);
-    setHasMoreOlder(page.hasMore);
+    const limitedMessages = limitVisibleMessages(page.messages);
+    setMessages(limitedMessages);
+    setMessageWindowSize(Math.min(limitedMessages.length, MESSAGE_RENDER_WINDOW));
+    setHasMoreOlder(page.hasMore && limitedMessages.length < MAX_VISIBLE_MESSAGES);
 
-    knownMessageIdsRef.current = new Set(page.messages.map((message) => message.id));
+    knownMessageIdsRef.current = new Set(limitedMessages.map((message) => message.id));
     latestMessageAtRef.current = null;
-    updateLatestMessageCursor(page.messages);
+    updateLatestMessageCursor(limitedMessages);
   }, [fetchAiStatus, fetchChatBackground, fetchMessagePage, fetchPresence, updateLatestMessageCursor]);
 
   const fetchAdminOverview = useCallback(async () => {
@@ -870,6 +1016,7 @@ export function ChatApp() {
 
   const loadOlderMessages = useCallback(async () => {
     if (!session || loadingOlder || !hasMoreOlder || messages.length === 0) return;
+    if (messages.length >= MAX_VISIBLE_MESSAGES) return;
     if (!scrollRef.current) return;
 
     setLoadingOlder(true);
@@ -884,7 +1031,7 @@ export function ChatApp() {
 
       const page = await fetchMessagePage({ before: oldest, limit: MESSAGE_PAGE_SIZE });
       applyIncomingMessages(page.messages, { notify: false });
-      setHasMoreOlder(page.hasMore);
+      setHasMoreOlder(page.hasMore && messages.length < MAX_VISIBLE_MESSAGES);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Could not load older messages.");
     } finally {
@@ -906,8 +1053,17 @@ export function ChatApp() {
 
   useEffect(() => {
     if (composerMode !== "message") return;
-    resizeMessageInput();
-  }, [composerMode, messageDraft, resizeMessageInput, uploadedDraftImages.length]);
+    scheduleMessageInputResize();
+  }, [composerMode, messageDraft, scheduleMessageInputResize, uploadedDraftImages.length]);
+
+  useEffect(() => {
+    setMessageWindowSize((current) => {
+      if (messages.length <= MESSAGE_RENDER_WINDOW) {
+        return messages.length;
+      }
+      return Math.min(current, messages.length);
+    });
+  }, [messages.length]);
 
   useEffect(() => {
     if (!session) router.replace("/login");
@@ -915,10 +1071,10 @@ export function ChatApp() {
 
   useEffect(() => {
     return () => {
-      for (const timer of Object.values(deliveryTimersRef.current)) {
-        window.clearInterval(timer);
+      if (messageInputResizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(messageInputResizeFrameRef.current);
+        messageInputResizeFrameRef.current = null;
       }
-      deliveryTimersRef.current = {};
     };
   }, []);
 
@@ -1063,67 +1219,102 @@ export function ChatApp() {
   useEffect(() => {
     if (!session) return;
 
-    let cancelled = false;
+    const stream = new EventSource(`/api/stream?limit=${SNAPSHOT_LIMIT}`);
 
-    const pollPresence = async () => {
+    const parseEvent = <TValue,>(event: MessageEvent<string>): TValue | null => {
       try {
-        const [nextUsers, nextAi, nextBackground] = await Promise.all([
-          fetchPresence(),
-          fetchAiStatus().catch(() => ({ status: "online", updatedAt: new Date().toISOString() })),
-          fetchChatBackground().catch(() => ({ url: null, updatedAt: null, updatedBy: null })),
-        ]);
-        if (cancelled || isLeavingRef.current) return;
-        setUsers(nextUsers);
-        setAiStatus(nextAi.status || "online");
-        setChatBackgroundUrl(nextBackground.url);
+        return JSON.parse(event.data) as TValue;
       } catch {
-        if (!cancelled) {
-          setError("Presence refresh failed. Retrying…");
-        }
+        return null;
       }
     };
 
-    void pollPresence();
-    const interval = window.setInterval(() => {
-      void pollPresence();
-    }, PRESENCE_POLL_INTERVAL_MS);
+    const onSnapshot = (event: Event) => {
+      const parsed = parseEvent<SnapshotDTO>(event as MessageEvent<string>);
+      if (!parsed) return;
+      applySnapshot(parsed);
+      setError((current) => (current === "Realtime disconnected. Reconnecting…" ? null : current));
+    };
+
+    const onPresenceUpdated = (event: Event) => {
+      const parsed = parseEvent<UserPresenceDTO>(event as MessageEvent<string>);
+      if (!parsed || isLeavingRef.current) return;
+      setUsers((current) => mergeUser(current, parsed));
+    };
+
+    const onUserUpdated = (event: Event) => {
+      const parsed = parseEvent<UserPresenceDTO>(event as MessageEvent<string>);
+      if (!parsed || isLeavingRef.current) return;
+      setUsers((current) => mergeUser(current, parsed));
+      setMessages((current) => limitVisibleMessages(syncProfilePictureForUser(current, parsed)));
+    };
+
+    const onMessageCreated = (event: Event) => {
+      const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
+      if (!parsed || isLeavingRef.current) return;
+      applyIncomingMessages([parsed], { notify: true });
+    };
+
+    const onPollUpdated = (event: Event) => {
+      const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
+      if (!parsed || isLeavingRef.current) return;
+      applyIncomingMessages([parsed], { notify: false });
+    };
+
+    const onAiStatus = (event: Event) => {
+      const parsed = parseEvent<{ status: string }>(event as MessageEvent<string>);
+      if (!parsed || isLeavingRef.current) return;
+      setAiStatus(parsed.status || "online");
+    };
+
+    const onBackgroundUpdated = (event: Event) => {
+      const parsed = parseEvent<ChatBackgroundDTO>(event as MessageEvent<string>);
+      if (!parsed || isLeavingRef.current) return;
+      setChatBackgroundUrl(parsed.url);
+    };
+
+    stream.addEventListener("snapshot", onSnapshot);
+    stream.addEventListener("presence.updated", onPresenceUpdated);
+    stream.addEventListener("user.updated", onUserUpdated);
+    stream.addEventListener("message.created", onMessageCreated);
+    stream.addEventListener("poll.updated", onPollUpdated);
+    stream.addEventListener("ai.status", onAiStatus);
+    stream.addEventListener("chat.background.updated", onBackgroundUpdated);
+    stream.onerror = () => {
+      if (isLeavingRef.current) return;
+      setError((current) => current || "Realtime disconnected. Reconnecting…");
+    };
 
     return () => {
-      cancelled = true;
-      window.clearInterval(interval);
+      stream.close();
     };
-  }, [fetchAiStatus, fetchChatBackground, fetchPresence, session]);
+  }, [applyIncomingMessages, applySnapshot, session]);
 
   useEffect(() => {
     if (!session) return;
 
     let cancelled = false;
-
-    const pollMessages = async () => {
+    const reconcile = async () => {
       try {
-        const cursor = latestMessageAtRef.current;
-        if (!cursor) return;
-
-        const page = await fetchMessagePage({ after: cursor, limit: MESSAGE_DELTA_LIMIT });
-        if (cancelled || isLeavingRef.current) return;
-
-        applyIncomingMessages(page.messages, { notify: true });
-      } catch {
+        await syncChatState();
         if (!cancelled) {
-          setError("Message sync failed. Retrying…");
+          setError((current) => (current === "Realtime disconnected. Reconnecting…" ? null : current));
         }
+      } catch {
+        if (!cancelled) setError("State reconciliation failed. Retrying…");
       }
     };
 
+    void reconcile();
     const interval = window.setInterval(() => {
-      void pollMessages();
-    }, MESSAGE_POLL_INTERVAL_MS);
+      void reconcile();
+    }, RECONCILE_INTERVAL_MS);
 
     return () => {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [applyIncomingMessages, fetchMessagePage, session]);
+  }, [session, syncChatState]);
 
   useEffect(() => {
     if (!session) return;
@@ -1172,8 +1363,20 @@ export function ChatApp() {
       isAtBottomRef.current = atBottom;
       setIsAtBottom(atBottom);
 
-      if (element.scrollTop < 120 && hasMoreOlder && !loadingOlder) {
-        void loadOlderMessages();
+      if (element.scrollTop < 120 && !loadingOlder) {
+        if (messageWindowSize < messages.length) {
+          prependAnchorRef.current = {
+            height: element.scrollHeight,
+            top: element.scrollTop,
+          };
+          setMessageWindowSize((current) => Math.min(messages.length, current + MESSAGE_RENDER_CHUNK));
+          return;
+        }
+
+        if (hasMoreOlder) {
+          if (messages.length >= MAX_VISIBLE_MESSAGES) return;
+          void loadOlderMessages();
+        }
       }
     };
 
@@ -1183,7 +1386,7 @@ export function ChatApp() {
     return () => {
       element.removeEventListener("scroll", onScroll);
     };
-  }, [hasMoreOlder, loadOlderMessages, loadingOlder, messages.length]);
+  }, [hasMoreOlder, loadOlderMessages, loadingOlder, messageWindowSize, messages.length]);
 
   useEffect(() => {
     const anchor = prependAnchorRef.current;
@@ -1230,7 +1433,7 @@ export function ChatApp() {
       });
 
       setUsers((current) => mergeUser(current, user));
-      setMessages((current) => syncProfilePictureForUser(current, user));
+      setMessages((current) => limitVisibleMessages(syncProfilePictureForUser(current, user)));
 
       const nextSession = {
         ...session,
@@ -1504,7 +1707,7 @@ export function ChatApp() {
         if (optimistic !== current) {
           optimisticVoteRollbackRef.current = current;
         }
-        return optimistic;
+        return limitVisibleMessages(optimistic);
       });
 
       try {
@@ -1522,7 +1725,7 @@ export function ChatApp() {
       } catch (voteError) {
         const rollback = optimisticVoteRollbackRef.current;
         if (rollback) {
-          setMessages(rollback);
+          setMessages(limitVisibleMessages(rollback));
         }
         optimisticVoteRollbackRef.current = null;
         setError(voteError instanceof Error ? voteError.message : "Could not register vote.");
@@ -1545,7 +1748,9 @@ export function ChatApp() {
   }, []);
 
   const handleOpenLightbox = useCallback((url: string, alt?: string) => {
-    setLightbox({ url, alt: alt || "Image preview" });
+    window.requestAnimationFrame(() => {
+      setLightbox({ url, alt: alt || "Image preview" });
+    });
   }, []);
 
   const handleRemixImage = useCallback(
@@ -1734,6 +1939,18 @@ export function ChatApp() {
     } finally {
       setUploadingChat(false);
     }
+  }
+
+  function onMessageInputPaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
+    const imageFiles = Array.from(event.clipboardData.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter(
+        (file): file is File => file !== null && SUPPORTED_CHAT_UPLOAD_MIME_TYPES.has(file.type),
+      );
+
+    if (imageFiles.length === 0) return;
+    void onChatImageDrop(imageFiles);
   }
 
   async function saveChatBackground(url: string | null): Promise<void> {
@@ -2068,34 +2285,12 @@ export function ChatApp() {
             </div>
           ) : null}
 
-          <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">ChatPPC Online</p>
-            <div className="space-y-2">
-              {onlineUsers.map((user) => (
-                <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
-                  <img
-                    src={user.profilePicture}
-                    alt={`${user.username} avatar`}
-                    className="h-11 w-11 rounded-full border border-slate-200 object-cover"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
-                    <p className="truncate text-xs text-slate-500">{formatPresenceStatus(user)}</p>
-                    {shouldShowAiProgress(user) ? (
-                      <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
-                        <div
-                          className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out animate-pulse"
-                          style={{ width: `${aiProgressForStatus(user.status)}%` }}
-                        />
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
+	          <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
+	            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">ChatPPC Online</p>
+	            <div className="space-y-2">
+	              <OnlineUsersList users={onlineUsers} avatarSizeClassName="h-11 w-11" />
+	            </div>
+	          </div>
           <button onClick={() => void logout()} className="mt-4 h-10 rounded-xl bg-rose-600 text-sm font-semibold text-white">
             Leave Chat
           </button>
@@ -2193,26 +2388,19 @@ export function ChatApp() {
               <p className="text-center text-xs text-slate-500">Loading older messages…</p>
             ) : null}
 
-            {messages.map((message) => (
-              <ChatMessage
-                key={message.id}
-                message={message}
-                currentUsername={session.username}
-                isDeveloperMode={isDeveloperMode}
-                delivery={
-                  pendingDeliveries[message.id] !== undefined
-                    ? { status: "sending", progress: pendingDeliveries[message.id] }
-                    : undefined
-                }
-                answerDraft={answerDrafts[message.id] || ""}
-                onAnswerDraftChange={handleAnswerDraftChange}
-                onSubmitAnswer={submitAnswer}
-                onVote={handleVote}
-                onDeleteMessage={handleDeleteMessage}
-                onOpenLightbox={handleOpenLightbox}
-                onRemixImage={handleRemixImage}
-              />
-            ))}
+            <MessageList
+              messages={visibleMessages}
+              currentUsername={session.username}
+              isDeveloperMode={isDeveloperMode}
+              pendingDeliveries={pendingDeliveries}
+              answerDrafts={answerDrafts}
+              onAnswerDraftChange={handleAnswerDraftChange}
+              onSubmitAnswer={submitAnswer}
+              onVote={handleVote}
+              onDeleteMessage={handleDeleteMessage}
+              onOpenLightbox={handleOpenLightbox}
+              onRemixImage={handleRemixImage}
+            />
           </div>
 
           {!isAtBottom ? (
@@ -2223,6 +2411,7 @@ export function ChatApp() {
                 onClick={() => {
                   isAtBottomRef.current = true;
                   setIsAtBottom(true);
+                  setMessageWindowSize(Math.min(messages.length, MESSAGE_RENDER_WINDOW));
                   scrollToBottom("smooth");
                 }}
               >
@@ -2332,23 +2521,8 @@ export function ChatApp() {
                     ref={messageInputRef}
                     value={messageDraft}
                     onFocus={() => setComposerOpen(true)}
-                    onChange={(event) => {
-                      const value = event.target.value;
-                      setMessageDraft(value);
-                      setComposerHistoryIndex(-1);
-                      draftBeforeHistoryRef.current = "";
-
-                      const cursor = event.target.selectionStart;
-                      const textBefore = value.slice(0, cursor);
-                      const match = textBefore.match(/@(\w*)$/);
-                      if (match) {
-                        setShowMentionSuggestions(true);
-                        setMentionFilter(match[1]);
-                        setMentionIndex(0);
-                      } else {
-                        setShowMentionSuggestions(false);
-                      }
-                    }}
+                    onChange={handleMessageDraftChange}
+                    onPaste={onMessageInputPaste}
                     onKeyDown={(event) => {
                       if (showMentionSuggestions && filteredMentionUsers.length > 0) {
                         if (event.key === "ArrowDown") {
@@ -2564,29 +2738,7 @@ export function ChatApp() {
               Close
             </button>
             <div className="space-y-2">
-              {onlineUsers.map((user) => (
-                <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
-                  <img
-                    src={user.profilePicture}
-                    alt={`${user.username} avatar`}
-                    className="h-9 w-9 rounded-full border border-slate-200 object-cover"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
-                    <p className="truncate text-xs text-slate-500">{formatPresenceStatus(user)}</p>
-                    {shouldShowAiProgress(user) ? (
-                      <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
-                        <div
-                          className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out animate-pulse"
-                          style={{ width: `${aiProgressForStatus(user.status)}%` }}
-                        />
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              ))}
+              <OnlineUsersList users={onlineUsers} avatarSizeClassName="h-9 w-9" />
             </div>
             {notificationState !== "granted" ? (
               <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 p-3">
@@ -2705,6 +2857,7 @@ export function ChatApp() {
             <img
               src={lightbox.url}
               alt={lightbox.alt}
+              decoding="async"
               className="max-h-[92vh] max-w-[92vw] rounded-2xl object-contain shadow-2xl"
             />
           </div>

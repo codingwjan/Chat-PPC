@@ -1,4 +1,4 @@
-import { MessageType, Prisma } from "@prisma/client";
+import { AiJobStatus, MessageType, Prisma } from "@prisma/client";
 import { put } from "@vercel/blob";
 import OpenAI from "openai";
 import type { Response as OpenAIResponse } from "openai/resources/responses/responses";
@@ -29,7 +29,6 @@ const PRESENCE_TIMEOUT_MS = 10 * 60 * 1_000;
 const DEFAULT_MESSAGE_PAGE_LIMIT = 20;
 const MAX_MESSAGE_PAGE_LIMIT = 100;
 const AI_IMAGE_MIME_TYPE = "image/png";
-const MAX_INLINE_AI_IMAGE_BYTES = 12 * 1024 * 1024;
 const AI_STATUS_CLIENT_ID = "__chatppc_ai_status__";
 const AI_STATUS_USERNAME = "__chatppc_ai_status__";
 const CHAT_BACKGROUND_CLIENT_ID = "__chatppc_chat_background__";
@@ -50,11 +49,20 @@ const IMAGE_URL_REGEX = /\.(jpeg|jpg|gif|png|webp|svg)(\?.*)?$/i;
 const DEFAULT_MEDIA_PAGE_LIMIT = 3;
 const MAX_MEDIA_PAGE_LIMIT = 30;
 const MEDIA_CACHE_TTL_MS = 30_000;
+const AI_QUEUE_CONCURRENCY = 1;
+const AI_QUEUE_MAX_PENDING = 40;
+const AI_QUEUE_MAX_ATTEMPTS = 4;
+const AI_BUSY_NOTICE_COOLDOWN_MS = 5_000;
+const AI_QUEUE_LOCK_KEY_MAJOR = 7_426;
+const AI_QUEUE_LOCK_KEY_MINOR = 1_117;
 
 let aiStatusState: AiStatusDTO = {
   status: "online",
   updatedAt: new Date().toISOString(),
 };
+
+let aiQueueDrainScheduled = false;
+let lastAiBusyNoticeAt = 0;
 
 let mediaItemsCache:
   | {
@@ -63,6 +71,10 @@ let mediaItemsCache:
     items: MediaItemDTO[];
   }
   | null = null;
+
+function getBlobReadWriteToken(): string | undefined {
+  return process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB;
+}
 
 function getDefaultProfilePicture(): string {
   return process.env.NEXT_PUBLIC_DEFAULT_PROFILE_PICTURE || getDefaultAvatar();
@@ -365,6 +377,7 @@ export async function setChatBackground(input: {
   if (normalizedUrl) {
     // Validate upload URL / external URL format.
     new URL(normalizedUrl);
+    assert(!normalizedUrl.toLowerCase().startsWith("data:"), "Background must not be a data URL", 400);
   }
 
   const now = new Date();
@@ -393,18 +406,13 @@ export async function setChatBackground(input: {
     await emitSystemMessage(`${actor.username} reset the background image`);
   }
 
-  return {
+  const result: ChatBackgroundDTO = {
     url: normalizedUrl,
     updatedAt: now.toISOString(),
     updatedBy: actor.username,
   };
-}
-
-async function getMessageRows(): Promise<MessageRow[]> {
-  return prisma.message.findMany({
-    include: { questionMessage: true, author: true, pollOptions: { include: { votes: { include: { user: true } } } } },
-    orderBy: [{ createdAt: "asc" }],
-  });
+  publish("chat.background.updated", result);
+  return result;
 }
 
 function clampMessageLimit(limit: number | undefined): number {
@@ -650,22 +658,37 @@ async function persistGeneratedImage(base64Image: string, imageIndex: number): P
     return null;
   }
 
-  if (process.env.BLOB_READ_WRITE_TOKEN) {
-    const path = `chatgpt/${Date.now()}-${imageIndex}.png`;
-    const blob = await put(path, bytes, {
-      access: "public",
-      addRandomSuffix: true,
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-      contentType: AI_IMAGE_MIME_TYPE,
-    });
-    return blob.url;
-  }
-
-  if (bytes.length > MAX_INLINE_AI_IMAGE_BYTES) {
+  const blobToken = getBlobReadWriteToken();
+  if (!blobToken) {
     return null;
   }
 
-  return `data:${AI_IMAGE_MIME_TYPE};base64,${normalized}`;
+  const path = `chatgpt/${Date.now()}-${imageIndex}.png`;
+  const blob = await put(path, bytes, {
+    access: "public",
+    addRandomSuffix: true,
+    token: blobToken,
+    contentType: AI_IMAGE_MIME_TYPE,
+  });
+  return blob.url;
+}
+
+async function emitAiBusyNotice(): Promise<void> {
+  const now = Date.now();
+  if (now - lastAiBusyNoticeAt < AI_BUSY_NOTICE_COOLDOWN_MS) return;
+  lastAiBusyNoticeAt = now;
+
+  const created = await prisma.message.create({
+    data: {
+      type: MessageType.MESSAGE,
+      content: "Zu viele @chatgpt Anfragen gleichzeitig. Bitte in wenigen Sekunden erneut versuchen.",
+      authorName: "ChatGPT",
+      authorProfilePicture: chatgptProfilePicture.src,
+    },
+    include: { questionMessage: true, author: true, pollOptions: { include: { votes: { include: { user: true } } } } },
+  });
+  invalidateMediaCache();
+  publish("message.created", mapMessage(created));
 }
 
 async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
@@ -829,8 +852,190 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
   }
 }
 
-async function maybeRespondAsAi(payload: AiTriggerPayload): Promise<void> {
-  await emitAiResponse(payload);
+function scheduleAiQueueDrain(): void {
+  if (aiQueueDrainScheduled) return;
+  aiQueueDrainScheduled = true;
+  queueMicrotask(() => {
+    aiQueueDrainScheduled = false;
+    void processAiQueue({ maxJobs: AI_QUEUE_CONCURRENCY }).catch((error) => {
+      console.error("AI queue worker error:", error instanceof Error ? error.message : error);
+    });
+  });
+}
+
+type EnqueueAiResult = "queued" | "duplicate" | "full";
+
+interface ClaimedAiJobRow {
+  id: string;
+  sourceMessageId: string;
+  username: string;
+  message: string;
+  imageUrls: Prisma.JsonValue;
+  attempts: number;
+}
+
+function parseAiJobImageUrls(raw: Prisma.JsonValue): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((item): item is string => typeof item === "string").slice(0, 4);
+}
+
+async function tryAcquireAiQueueLock(): Promise<boolean> {
+  const result = await prisma.$queryRaw<Array<{ locked: boolean }>>`
+    SELECT pg_try_advisory_lock(${AI_QUEUE_LOCK_KEY_MAJOR}, ${AI_QUEUE_LOCK_KEY_MINOR}) AS locked
+  `;
+  return Boolean(result[0]?.locked);
+}
+
+async function releaseAiQueueLock(): Promise<void> {
+  await prisma.$queryRaw`
+    SELECT pg_advisory_unlock(${AI_QUEUE_LOCK_KEY_MAJOR}, ${AI_QUEUE_LOCK_KEY_MINOR})
+  `;
+}
+
+async function claimNextAiJob(): Promise<ClaimedAiJobRow | null> {
+  const rows = await prisma.$queryRawUnsafe<ClaimedAiJobRow[]>(`
+    WITH next_job AS (
+      SELECT "id"
+      FROM "AiJob"
+      WHERE "status" = 'PENDING'::"AiJobStatus"
+        AND "runAt" <= NOW()
+      ORDER BY "createdAt" ASC
+      FOR UPDATE SKIP LOCKED
+      LIMIT 1
+    )
+    UPDATE "AiJob" AS job
+    SET
+      "status" = 'PROCESSING'::"AiJobStatus",
+      "lockedAt" = NOW(),
+      "attempts" = job."attempts" + 1,
+      "updatedAt" = NOW()
+    FROM next_job
+    WHERE job."id" = next_job."id"
+    RETURNING
+      job."id",
+      job."sourceMessageId",
+      job."username",
+      job."message",
+      job."imageUrls",
+      job."attempts";
+  `);
+
+  return rows[0] || null;
+}
+
+async function enqueueAiResponse(
+  payload: AiTriggerPayload & { sourceMessageId: string },
+): Promise<EnqueueAiResult> {
+  const pendingTotal = await prisma.aiJob.count({
+    where: {
+      status: {
+        in: [AiJobStatus.PENDING, AiJobStatus.PROCESSING],
+      },
+    },
+  });
+
+  if (pendingTotal >= AI_QUEUE_MAX_PENDING) {
+    return "full";
+  }
+
+  try {
+    await prisma.aiJob.create({
+      data: {
+        sourceMessageId: payload.sourceMessageId,
+        username: payload.username,
+        message: payload.message,
+        imageUrls: payload.imageUrls,
+        status: AiJobStatus.PENDING,
+      },
+    });
+    return "queued";
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      return "duplicate";
+    }
+    throw error;
+  }
+}
+
+export async function processAiQueue(input: { maxJobs?: number } = {}): Promise<{ processed: number; lockSkipped: boolean }> {
+  if (!process.env.OPENAI_API_KEY) return { processed: 0, lockSkipped: false };
+  const lockAcquired = await tryAcquireAiQueueLock();
+  if (!lockAcquired) {
+    return { processed: 0, lockSkipped: true };
+  }
+
+  const maxJobs = Math.max(1, Math.min(20, input.maxJobs ?? AI_QUEUE_CONCURRENCY));
+  let processed = 0;
+
+  try {
+    while (processed < maxJobs) {
+      const job = await claimNextAiJob();
+      if (!job) break;
+
+      try {
+        await emitAiResponse({
+          username: job.username,
+          message: job.message,
+          imageUrls: parseAiJobImageUrls(job.imageUrls),
+        });
+        await prisma.aiJob.update({
+          where: { id: job.id },
+          data: {
+            status: AiJobStatus.COMPLETED,
+            completedAt: new Date(),
+            lockedAt: null,
+            lastError: null,
+          },
+        });
+      } catch (error) {
+        const shouldFail = job.attempts >= AI_QUEUE_MAX_ATTEMPTS;
+        const retryDelayMs = Math.min(60_000, 3_000 * job.attempts);
+        await prisma.aiJob.update({
+          where: { id: job.id },
+          data: {
+            status: shouldFail ? AiJobStatus.FAILED : AiJobStatus.PENDING,
+            ...(shouldFail ? {} : { runAt: new Date(Date.now() + retryDelayMs) }),
+            failedAt: shouldFail ? new Date() : null,
+            lockedAt: null,
+            lastError: error instanceof Error ? error.message : "Unknown queue error",
+          },
+        });
+      }
+
+      processed += 1;
+    }
+  } finally {
+    await releaseAiQueueLock();
+  }
+
+  const remaining = await prisma.aiJob.count({
+    where: {
+      status: AiJobStatus.PENDING,
+      runAt: { lte: new Date() },
+    },
+  });
+  if (remaining > 0) {
+    scheduleAiQueueDrain();
+  }
+
+  return { processed, lockSkipped: false };
+}
+
+async function maybeRespondAsAi(payload: AiTriggerPayload & { sourceMessageId: string }): Promise<void> {
+  if (!process.env.OPENAI_API_KEY) return;
+  const queued = await enqueueAiResponse(payload);
+  if (queued === "full") {
+    await emitAiBusyNotice();
+    return;
+  }
+  if (queued === "queued") {
+    scheduleAiQueueDrain();
+  }
+}
+
+export function __resetAiQueueForTests(): void {
+  aiQueueDrainScheduled = false;
+  lastAiBusyNoticeAt = 0;
 }
 
 async function getUserByClientId(clientId: string) {
@@ -839,9 +1044,19 @@ async function getUserByClientId(clientId: string) {
   return user;
 }
 
-export async function getSnapshot(): Promise<SnapshotDTO> {
-  const [users, messages] = await Promise.all([getOnlineUsers(), getMessageRows()]);
-  return { users, messages: messages.map(mapMessage) };
+export async function getSnapshot(input: { limit?: number } = {}): Promise<SnapshotDTO> {
+  const [users, messagePage, aiStatus, background] = await Promise.all([
+    getOnlineUsers(),
+    getMessages({ limit: input.limit }),
+    getAiStatus(),
+    getChatBackground(),
+  ]);
+  return {
+    users,
+    messages: messagePage.messages,
+    aiStatus,
+    background,
+  };
 }
 
 export async function getMessages(input: {
@@ -1037,6 +1252,9 @@ export async function renameUser(input: {
   const newUsername = input.newUsername?.trim();
   const profilePicture = input.profilePicture?.trim();
   assert(newUsername || profilePicture, "Either newUsername or profilePicture is required", 400);
+  if (profilePicture) {
+    assert(!profilePicture.toLowerCase().startsWith("data:"), "Profile picture must not be a data URL", 400);
+  }
 
   if (newUsername) {
     assert(newUsername.length >= 3, "Username must be at least 3 characters", 400);
@@ -1190,6 +1408,7 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
 
   if (shouldTriggerAi) {
     void maybeRespondAsAi({
+      sourceMessageId: created.id,
       username: user.username,
       message,
       imageUrls: extractImageUrlsForAi(message),

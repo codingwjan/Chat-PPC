@@ -25,6 +25,13 @@ const prismaMock = vi.hoisted(() => ({
     deleteMany: vi.fn(),
     groupBy: vi.fn(),
   },
+  aiJob: {
+    count: vi.fn(),
+    create: vi.fn(),
+    update: vi.fn(),
+  },
+  $queryRaw: vi.fn(),
+  $queryRawUnsafe: vi.fn(),
 }));
 
 const publishMock = vi.hoisted(() => vi.fn());
@@ -39,10 +46,12 @@ vi.mock("openai", () => ({
 }));
 
 import {
+  __resetAiQueueForTests,
   createMessage,
   getChatBackground,
   loginUser,
   markUserOffline,
+  processAiQueue,
   pingPresence,
   renameUser,
   setChatBackground,
@@ -75,6 +84,7 @@ function baseMessage(overrides: Record<string, unknown> = {}) {
 describe("chat service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetAiQueueForTests();
     prismaMock.blacklistEntry.findUnique.mockResolvedValue(null);
     prismaMock.user.findFirst.mockResolvedValue(null);
     prismaMock.user.findUnique.mockResolvedValue({
@@ -112,6 +122,11 @@ describe("chat service", () => {
     prismaMock.pollChoiceVote.createMany.mockResolvedValue({ count: 1 });
     prismaMock.pollChoiceVote.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.pollChoiceVote.groupBy.mockResolvedValue([]);
+    prismaMock.aiJob.count.mockResolvedValue(0);
+    prismaMock.aiJob.create.mockResolvedValue({ id: "job-1" });
+    prismaMock.aiJob.update.mockResolvedValue({ id: "job-1" });
+    prismaMock.$queryRaw.mockResolvedValue([{ locked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValue([]);
     openAiCreateMock.mockResolvedValue({ output_text: "", output: [] });
   });
 
@@ -289,6 +304,13 @@ describe("chat service", () => {
         }),
       }),
     );
+    expect(publishMock).toHaveBeenCalledWith(
+      "chat.background.updated",
+      expect.objectContaining({
+        url: "https://example.com/bg.png",
+        updatedBy: "tester",
+      }),
+    );
   });
 
   it("creates poll with up to 15 options and settings", async () => {
@@ -384,60 +406,175 @@ describe("chat service", () => {
     );
   });
 
-  it("processes @chatgpt mention without blocking response", async () => {
+  it("queues @chatgpt mention without blocking response", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+
     prismaMock.message.create.mockResolvedValueOnce(
       baseMessage({ id: "msg-user", content: "@chatgpt explain gravity" }),
     );
 
-    const result = await Promise.race([
-      createMessage({
+    try {
+      const result = await Promise.race([
+        createMessage({
+          clientId: "client-1",
+          type: "message",
+          message: "@chatgpt explain gravity",
+        }).then(() => "resolved"),
+        new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 80)),
+      ]);
+
+      expect(result).toBe("resolved");
+      expect(prismaMock.aiJob.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            sourceMessageId: "msg-user",
+            username: "tester",
+          }),
+        }),
+      );
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+    }
+  });
+
+  it("emits busy notice when pending AI queue is full", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+
+    prismaMock.aiJob.count.mockResolvedValueOnce(40);
+    prismaMock.message.create
+      .mockResolvedValueOnce(baseMessage({ id: "msg-user", content: "@chatgpt explain gravity" }))
+      .mockResolvedValueOnce(baseMessage({ id: "msg-busy", content: "busy", authorName: "ChatGPT" }));
+
+    try {
+      await createMessage({
         clientId: "client-1",
         type: "message",
         message: "@chatgpt explain gravity",
-      }).then(() => "resolved"),
-      new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 80)),
-    ]);
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-    expect(result).toBe("resolved");
+      expect(prismaMock.aiJob.create).not.toHaveBeenCalled();
+      expect(prismaMock.message.create).toHaveBeenCalledTimes(2);
+      expect(prismaMock.message.create).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            authorName: "ChatGPT",
+            content: expect.stringContaining("Zu viele @chatgpt"),
+          }),
+        }),
+      );
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+    }
   });
 
-  it("does not call OpenAI when @chatgpt is not mentioned", async () => {
+  it("processes queued AI jobs via DB worker", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@chatgpt explain gravity",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-ai", content: "AI answer", authorName: "ChatGPT" }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({ output_text: "AI answer", output: [] });
+
+    try {
+      const result = await processAiQueue({ maxJobs: 1 });
+      expect(result.processed).toBe(1);
+      expect(result.lockSkipped).toBe(false);
+      expect(openAiCreateMock).toHaveBeenCalledTimes(1);
+      expect(prismaMock.aiJob.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "job-1" },
+          data: expect.objectContaining({
+            status: "COMPLETED",
+          }),
+        }),
+      );
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+    }
+  });
+
+  it("skips processing when AI queue advisory lock is already held", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+
+    prismaMock.$queryRaw.mockResolvedValueOnce([{ locked: false }]);
+
+    try {
+      const result = await processAiQueue({ maxJobs: 1 });
+      expect(result.processed).toBe(0);
+      expect(result.lockSkipped).toBe(true);
+      expect(prismaMock.$queryRawUnsafe).not.toHaveBeenCalled();
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+    }
+  });
+
+  it("does not enqueue AI jobs when @chatgpt is not mentioned", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+
     prismaMock.message.create.mockResolvedValueOnce(baseMessage({ id: "msg-user", content: "hello class" }));
 
-    await createMessage({
-      clientId: "client-1",
-      type: "message",
-      message: "hello class",
-    });
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-
-    expect(openAiCreateMock).not.toHaveBeenCalled();
+    try {
+      await createMessage({
+        clientId: "client-1",
+        type: "message",
+        message: "hello class",
+      });
+      expect(prismaMock.aiJob.create).not.toHaveBeenCalled();
+      expect(openAiCreateMock).not.toHaveBeenCalled();
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+    }
   });
 
   it("retries OpenAI once with reduced context when context window is exceeded", async () => {
     const previousOpenAiKey = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "test-key";
 
-    try {
-      prismaMock.message.create.mockResolvedValueOnce(
-        baseMessage({
-          id: "msg-user",
-          content: "@chatgpt explain this",
-        }),
-      );
-      openAiCreateMock
-        .mockRejectedValueOnce(
-          new Error("400 Your input exceeds the context window of this model. Please adjust your input and try again."),
-        )
-        .mockResolvedValueOnce({ output_text: "Short answer", output: [] });
-
-      await createMessage({
-        clientId: "client-1",
-        type: "message",
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-2",
+        sourceMessageId: "msg-user",
+        username: "tester",
         message: "@chatgpt explain this with details",
-      });
-      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-ai", content: "Short answer", authorName: "ChatGPT" }),
+    );
+    openAiCreateMock
+      .mockRejectedValueOnce(
+        new Error("400 Your input exceeds the context window of this model. Please adjust your input and try again."),
+      )
+      .mockResolvedValueOnce({ output_text: "Short answer", output: [] });
 
+    try {
+      await processAiQueue({ maxJobs: 1 });
       expect(openAiCreateMock).toHaveBeenCalledTimes(2);
       expect(prismaMock.message.findMany).toHaveBeenCalledWith(
         expect.objectContaining({

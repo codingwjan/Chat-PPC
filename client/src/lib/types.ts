@@ -6,6 +6,7 @@ export type SseEventName =
   | "message.created"
   | "poll.updated"
   | "user.updated"
+  | "chat.background.updated"
   | "ai.status";
 
 export interface LoginRequest {
@@ -176,6 +177,8 @@ export interface ChatBackgroundDTO {
 export interface SnapshotDTO {
   users: UserPresenceDTO[];
   messages: MessageDTO[];
+  aiStatus: AiStatusDTO;
+  background: ChatBackgroundDTO;
 }
 
 export interface SseEventPayloadMap {
@@ -184,6 +187,7 @@ export interface SseEventPayloadMap {
   "message.created": MessageDTO;
   "poll.updated": MessageDTO;
   "user.updated": UserPresenceDTO;
+  "chat.background.updated": ChatBackgroundDTO;
   "ai.status": { status: string };
 }
 

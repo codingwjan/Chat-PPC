@@ -18,6 +18,13 @@ enum VoteSide {
   RIGHT
 }
 
+enum AiJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
 model User {
   id             String     @id @default(cuid())
   clientId       String     @unique
@@ -112,4 +119,23 @@ model PollChoiceVote {
   @@index([pollOptionId])
   @@index([userId])
   @@unique([pollMessageId, userId, pollOptionId])
+}
+
+model AiJob {
+  id              String      @id @default(cuid())
+  sourceMessageId String      @unique
+  username        String
+  message         String
+  imageUrls       Json
+  status          AiJobStatus @default(PENDING)
+  attempts        Int         @default(0)
+  runAt           DateTime    @default(now())
+  lockedAt        DateTime?
+  completedAt     DateTime?
+  failedAt        DateTime?
+  lastError       String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([status, runAt, createdAt])
 }
