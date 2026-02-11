@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Chat PPC",
-  description: "Modernized Chat PPC with Next.js, Tailwind, and PostgreSQL",
+  title: "ChatPPC",
+  description: "Modernized ChatPPC with Next.js, Tailwind, and PostgreSQL",
 };
 
 export default function RootLayout({

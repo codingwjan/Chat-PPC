@@ -257,6 +257,72 @@ function statusForComposer(input: {
   return "";
 }
 
+const LAST_SEEN_TIME_OPTIONS: Intl.DateTimeFormatOptions = {
+  hour: "numeric",
+  minute: "2-digit",
+};
+
+function formatLastSeenStatus(timestamp: string | Date): string {
+  const date = timestamp instanceof Date ? timestamp : new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return "last seen recently";
+  return `last seen ${date.toLocaleTimeString([], LAST_SEEN_TIME_OPTIONS)}`;
+}
+
+function formatPresenceStatus(user: UserPresenceDTO): string {
+  const explicitStatus = user.status.trim();
+  if (explicitStatus) return explicitStatus;
+  if (user.isOnline) return "online";
+  if (user.lastSeenAt) return formatLastSeenStatus(user.lastSeenAt);
+  return "online";
+}
+
+function describeNotificationState(state: NotificationState): string {
+  if (state === "denied") {
+    return "Notifications are blocked. Allow them in browser site settings, then click enable again.";
+  }
+  if (state === "unsupported") {
+    return "This browser does not support desktop notifications.";
+  }
+  if (state === "granted") {
+    return "Desktop notifications are enabled.";
+  }
+  return "Enable desktop notifications to see new messages instantly.";
+}
+
+function notificationButtonLabel(state: NotificationState): string {
+  if (state === "granted") return "Notifications Enabled";
+  if (state === "denied") return "Enable Notifications";
+  if (state === "unsupported") return "Not Supported";
+  return "Enable Notifications";
+}
+
+function buildDownloadFileName(alt: string): string {
+  const sanitized = alt
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!sanitized) return "chatppc-image.png";
+  return `${sanitized.slice(0, 48)}.png`;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function aiProgressForStatus(status: string): number {
+  const normalized = status.trim().toLowerCase();
+  if (!normalized || normalized === "online") return 0;
+  if (normalized.includes("thinking")) return 34;
+  if (normalized.includes("creating image")) return 70;
+  if (normalized.includes("writing")) return 90;
+  return 55;
+}
+
+function shouldShowAiProgress(user: UserPresenceDTO): boolean {
+  return user.clientId === "chatgpt" && aiProgressForStatus(user.status) > 0;
+}
+
 export function ChatApp() {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -269,7 +335,9 @@ export function ChatApp() {
   const latestMessageAtRef = useRef<string | null>(null);
   const knownMessageIdsRef = useRef<Set<string>>(new Set());
   const mediaItemsRef = useRef<MediaItemDTO[]>([]);
+  const mediaNextCursorRef = useRef<string | null>(null);
   const isLeavingRef = useRef(false);
+  const isWindowFocusedRef = useRef(typeof document === "undefined" ? true : !document.hidden);
   const lastSentStatusRef = useRef<string>("");
   const prependAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const optimisticVoteRollbackRef = useRef<MessageDTO[] | null>(null);
@@ -286,7 +354,6 @@ export function ChatApp() {
   const [uploadingBackground, setUploadingBackground] = useState(false);
   const [chatBackgroundUrl, setChatBackgroundUrl] = useState<string | null>(null);
   const [mediaItems, setMediaItems] = useState<MediaItemDTO[]>([]);
-  const [mediaNextCursor, setMediaNextCursor] = useState<string | null>(null);
   const [mediaHasMore, setMediaHasMore] = useState(false);
   const [mediaTotalCount, setMediaTotalCount] = useState(0);
   const [loadingMedia, setLoadingMedia] = useState(false);
@@ -299,6 +366,10 @@ export function ChatApp() {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [isLeaving, setIsLeaving] = useState(false);
+  const [isWindowFocused, setIsWindowFocused] = useState(() => {
+    if (typeof document === "undefined") return true;
+    return !document.hidden;
+  });
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [notificationState, setNotificationState] = useState<NotificationState>(() => {
     if (typeof window === "undefined" || !("Notification" in window)) {
@@ -548,7 +619,7 @@ export function ChatApp() {
       }
 
       setMediaItems(parsed.items);
-      setMediaNextCursor(parsed.nextCursor ?? null);
+      mediaNextCursorRef.current = parsed.nextCursor ?? null;
       setMediaHasMore(Boolean(parsed.hasMore));
       setMediaTotalCount(Number.isFinite(parsed.total) ? parsed.total : parsed.items.length);
       return true;
@@ -588,7 +659,7 @@ export function ChatApp() {
       cursor?: string | null;
     }): Promise<void> => {
       const append = Boolean(options?.append);
-      const cursor = append ? options?.cursor ?? mediaNextCursor : options?.cursor ?? null;
+      const cursor = append ? options?.cursor ?? mediaNextCursorRef.current : options?.cursor ?? null;
 
       if (append) {
         setLoadingMediaMore(true);
@@ -609,7 +680,7 @@ export function ChatApp() {
         });
         const nextItems = append ? mergeMediaItems(mediaItemsRef.current, page.items) : page.items;
         setMediaItems(nextItems);
-        setMediaNextCursor(page.nextCursor);
+        mediaNextCursorRef.current = page.nextCursor;
         setMediaHasMore(page.hasMore);
         setMediaTotalCount(page.total);
         persistMediaCache({
@@ -630,7 +701,7 @@ export function ChatApp() {
         }
       }
     },
-    [mediaNextCursor, persistMediaCache],
+    [persistMediaCache],
   );
 
   const applyIncomingMessages = useCallback(
@@ -748,6 +819,55 @@ export function ChatApp() {
     } as const;
   }, [chatBackgroundUrl]);
 
+  const refreshNotificationState = useCallback(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      setNotificationState("unsupported");
+      return;
+    }
+    setNotificationState(Notification.permission);
+  }, []);
+
+  const requestNotificationPermission = useCallback(async (): Promise<void> => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      setNotificationState("unsupported");
+      return;
+    }
+    const permission = await Notification.requestPermission();
+    setNotificationState(permission);
+  }, []);
+
+  const pushPresenceStatus = useCallback(
+    async (status: string): Promise<void> => {
+      if (!session || isLeavingRef.current) return;
+
+      const nowIso = new Date().toISOString();
+      setUsers((current) => {
+        const existing = current.find((user) => user.clientId === session.clientId);
+        if (!existing) return current;
+        return mergeUser(current, {
+          ...existing,
+          status,
+          isOnline: true,
+          lastSeenAt: nowIso,
+        });
+      });
+
+      await fetch("/api/presence/typing", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          clientId: session.clientId,
+          status,
+        }),
+      }).catch(() => {
+        // Ignore status failures.
+      });
+
+      lastSentStatusRef.current = status;
+    },
+    [session],
+  );
+
   const loadOlderMessages = useCallback(async () => {
     if (!session || loadingOlder || !hasMoreOlder || messages.length === 0) return;
     if (!scrollRef.current) return;
@@ -777,6 +897,10 @@ export function ChatApp() {
   }, [isLeaving]);
 
   useEffect(() => {
+    isWindowFocusedRef.current = isWindowFocused;
+  }, [isWindowFocused]);
+
+  useEffect(() => {
     mediaItemsRef.current = mediaItems;
   }, [mediaItems]);
 
@@ -797,6 +921,46 @@ export function ChatApp() {
       deliveryTimersRef.current = {};
     };
   }, []);
+
+  useEffect(() => {
+    refreshNotificationState();
+    window.addEventListener("focus", refreshNotificationState);
+    return () => {
+      window.removeEventListener("focus", refreshNotificationState);
+    };
+  }, [refreshNotificationState]);
+
+  useEffect(() => {
+    if (!session) return;
+
+    const applyFocusState = (focused: boolean) => {
+      if (isWindowFocusedRef.current === focused) return;
+
+      isWindowFocusedRef.current = focused;
+      setIsWindowFocused(focused);
+      if (focused) {
+        void pushPresenceStatus("");
+        return;
+      }
+      void pushPresenceStatus(formatLastSeenStatus(new Date()));
+    };
+
+    applyFocusState(!document.hidden);
+
+    const onFocus = () => applyFocusState(true);
+    const onBlur = () => applyFocusState(false);
+    const onVisibilityChange = () => applyFocusState(!document.hidden);
+
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [pushPresenceStatus, session]);
 
   useEffect(() => {
     if (!session) return;
@@ -859,6 +1023,17 @@ export function ChatApp() {
       container.removeEventListener("scroll", onScroll);
     };
   }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasMore, showMedia]);
+
+  useEffect(() => {
+    if (!showMedia || !mediaHasMore || loadingMedia || loadingMediaMore) return;
+    const container = mediaScrollRef.current;
+    if (!container) return;
+
+    const canScroll = container.scrollHeight > container.clientHeight + 8;
+    if (canScroll) return;
+
+    void fetchMediaItems({ append: true, silent: true });
+  }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasMore, mediaItems.length, showMedia]);
 
   useEffect(() => {
     if (!isDeveloperMode) {
@@ -954,7 +1129,7 @@ export function ChatApp() {
     if (!session) return;
 
     const pingPresence = async () => {
-      if (isLeavingRef.current) return;
+      if (isLeavingRef.current || !isWindowFocusedRef.current) return;
       await fetch("/api/presence/ping", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -975,29 +1150,17 @@ export function ChatApp() {
   }, [session]);
 
   useEffect(() => {
-    if (!session || isLeaving) return;
+    if (!session || isLeaving || !isWindowFocused) return;
 
     const timeout = window.setTimeout(() => {
       if (lastSentStatusRef.current === derivedStatus) return;
-
-      void fetch("/api/presence/typing", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          clientId: session.clientId,
-          status: derivedStatus,
-        }),
-      }).catch(() => {
-        // Ignore status failures.
-      });
-
-      lastSentStatusRef.current = derivedStatus;
+      void pushPresenceStatus(derivedStatus);
     }, 350);
 
     return () => {
       window.clearTimeout(timeout);
     };
-  }, [derivedStatus, isLeaving, session]);
+  }, [derivedStatus, isLeaving, isWindowFocused, pushPresenceStatus, session]);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -1162,7 +1325,7 @@ export function ChatApp() {
       } else if (composerMode === "challenge") {
         const content = challengeDraft.trim();
         if (!content) return;
-        const challengeMessage = `Class Challenge: ${content}`;
+        const challengeMessage = `ChatPPC Challenge: ${content}`;
 
         tempMessageId = createTempMessageId();
         appendOptimisticMessage({
@@ -1418,6 +1581,53 @@ export function ChatApp() {
     [],
   );
 
+  const downloadLightboxImage = useCallback(() => {
+    if (!lightbox) return;
+
+    const anchor = document.createElement("a");
+    anchor.href = lightbox.url;
+    anchor.download = buildDownloadFileName(lightbox.alt);
+    anchor.rel = "noopener";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+  }, [lightbox]);
+
+  const shareLightboxImage = useCallback(async () => {
+    if (!lightbox) return;
+
+    if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
+      try {
+        const response = await fetch(lightbox.url);
+        const imageBlob = await response.blob();
+        const imageFile = new File([imageBlob], buildDownloadFileName(lightbox.alt), {
+          type: imageBlob.type || "image/png",
+        });
+
+        if (typeof navigator.canShare === "function" && navigator.canShare({ files: [imageFile] })) {
+          await navigator.share({
+            files: [imageFile],
+          });
+          return;
+        }
+
+        if (!lightbox.url.startsWith("data:")) {
+          await navigator.share({ url: lightbox.url });
+          return;
+        }
+      } catch (shareError) {
+        if (isAbortError(shareError)) return;
+        // Fall through to clipboard fallback.
+      }
+    }
+
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(lightbox.url).catch(() => {
+        // Ignore clipboard failures.
+      });
+    }
+  }, [lightbox]);
+
   async function saveProfile() {
     const username = usernameDraft.trim();
     const profilePicture = profilePictureDraft.trim() || getDefaultProfilePicture();
@@ -1579,15 +1789,12 @@ export function ChatApp() {
   }
 
   async function enableNotificationsFromOnboarding(): Promise<void> {
-    if (!("Notification" in window)) {
-      setNotificationState("unsupported");
-      finishOnboarding();
-      return;
-    }
-
-    const permission = await Notification.requestPermission();
-    setNotificationState(permission);
+    await requestNotificationPermission();
     finishOnboarding();
+  }
+
+  async function enableNotificationsFromSidebar(): Promise<void> {
+    await requestNotificationPermission();
   }
 
   if (!session) return <div className="p-6 text-sm text-slate-500">Loading…</div>;
@@ -1838,8 +2045,23 @@ export function ChatApp() {
             </div>
           ) : null}
 
+          {notificationState !== "granted" ? (
+            <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Notifications</p>
+              <p className="mt-1 text-xs text-slate-600">{describeNotificationState(notificationState)}</p>
+              <button
+                type="button"
+                onClick={() => void enableNotificationsFromSidebar()}
+                disabled={notificationState === "unsupported"}
+                className="mt-2 h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 disabled:opacity-60"
+              >
+                {notificationButtonLabel(notificationState)}
+              </button>
+            </div>
+          ) : null}
+
           <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
-            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Class Online</p>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">ChatPPC Online</p>
             <div className="space-y-2">
               {onlineUsers.map((user) => (
                 <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
@@ -1850,9 +2072,17 @@ export function ChatApp() {
                     loading="lazy"
                     decoding="async"
                   />
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
-                    <p className="truncate text-xs text-slate-500">{user.status || "online"}</p>
+                    <p className="truncate text-xs text-slate-500">{formatPresenceStatus(user)}</p>
+                    {shouldShowAiProgress(user) ? (
+                      <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
+                        <div
+                          className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out animate-pulse"
+                          style={{ width: `${aiProgressForStatus(user.status)}%` }}
+                        />
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ))}
@@ -1921,14 +2151,14 @@ export function ChatApp() {
               </button>
               <div>
                 <div className="flex items-center gap-2">
-                  <h1 className="text-xl font-bold text-slate-900">Class Chat Bot</h1>
+                  <h1 className="text-xl font-bold text-slate-900">ChatPPC</h1>
                   {isDeveloperMode ? (
                     <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-900">
                       DEV
                     </span>
                   ) : null}
                 </div>
-                <p className="text-xs text-slate-500">Mention @chatgpt when you want AI replies</p>
+                <p className="text-xs text-slate-500">Chat with your group. Mention @chatgpt for AI replies.</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -2337,13 +2567,35 @@ export function ChatApp() {
                     loading="lazy"
                     decoding="async"
                   />
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
-                    <p className="truncate text-xs text-slate-500">{user.status || "online"}</p>
+                    <p className="truncate text-xs text-slate-500">{formatPresenceStatus(user)}</p>
+                    {shouldShowAiProgress(user) ? (
+                      <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
+                        <div
+                          className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out animate-pulse"
+                          style={{ width: `${aiProgressForStatus(user.status)}%` }}
+                        />
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ))}
             </div>
+            {notificationState !== "granted" ? (
+              <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Notifications</p>
+                <p className="mt-1 text-xs text-slate-600">{describeNotificationState(notificationState)}</p>
+                <button
+                  type="button"
+                  onClick={() => void enableNotificationsFromSidebar()}
+                  disabled={notificationState === "unsupported"}
+                  className="mt-2 h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 disabled:opacity-60"
+                >
+                  {notificationButtonLabel(notificationState)}
+                </button>
+              </div>
+            ) : null}
             <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 p-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Shared Chat Background</p>
               <div className="mt-2 flex flex-wrap gap-2">
@@ -2421,13 +2673,29 @@ export function ChatApp() {
             className="relative max-h-[92vh] max-w-[92vw]"
             onClick={(event) => event.stopPropagation()}
           >
-            <button
-              type="button"
-              onClick={() => setLightbox(null)}
-              className="absolute right-2 top-2 z-10 h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
-            >
-              Close
-            </button>
+            <div className="absolute right-2 top-2 z-10 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void shareLightboxImage()}
+                className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
+              >
+                Share
+              </button>
+              <button
+                type="button"
+                onClick={downloadLightboxImage}
+                className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
+              >
+                Download
+              </button>
+              <button
+                type="button"
+                onClick={() => setLightbox(null)}
+                className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
+              >
+                Close
+              </button>
+            </div>
             <img
               src={lightbox.url}
               alt={lightbox.alt}
@@ -2441,17 +2709,17 @@ export function ChatApp() {
         <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-900/55 p-4">
           <div className="w-full max-w-xl rounded-3xl border border-white/70 bg-white p-6 shadow-2xl">
             <p className="inline-flex rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700">
-              Willkommen bei Chat PPC
+              Welcome to ChatPPC
             </p>
-            <h2 className="mt-3 text-2xl font-bold text-slate-900">Kurzer Start in 30 Sekunden</h2>
+            <h2 className="mt-3 text-2xl font-bold text-slate-900">Quick Start in 30 Seconds</h2>
             <div className="mt-4 space-y-2 text-sm text-slate-700">
-              <p>1. Schreibe Nachrichten, Fragen und Challenges direkt im Composer.</p>
-              <p>2. Erstelle Umfragen mit mehreren Optionen, Stimmen werden sofort gesetzt und sind jederzeit änderbar.</p>
-              <p>3. Teile Bilder und GIFs per Upload, Links zeigen moderne Vorschaukarten.</p>
-              <p>4. Für KI-Antworten erwähne gezielt <span className="font-semibold text-slate-900">@chatgpt</span>.</p>
+              <p>1. Post messages, questions, and challenges in the composer.</p>
+              <p>2. Create polls with multiple options and instant vote updates.</p>
+              <p>3. Share images and GIFs with drag-and-drop uploads.</p>
+              <p>4. Mention <span className="font-semibold text-slate-900">@chatgpt</span> when you want AI replies.</p>
             </div>
             <div className="mt-5 rounded-2xl border border-sky-100 bg-sky-50 p-3 text-sm text-sky-900">
-              Natürlicher nächster Schritt: Aktiviere Benachrichtigungen, damit du neue Nachrichten sofort siehst.
+              Next step: enable notifications so you never miss new messages.
             </div>
             <div className="mt-5 flex flex-wrap gap-2">
               <button
@@ -2459,23 +2727,17 @@ export function ChatApp() {
                 onClick={() => void enableNotificationsFromOnboarding()}
                 className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
               >
-                {notificationState === "granted" ? "Benachrichtigungen sind aktiv" : "Benachrichtigungen aktivieren"}
+                {notificationButtonLabel(notificationState)}
               </button>
               <button
                 type="button"
                 onClick={finishOnboarding}
                 className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
               >
-                Später fortfahren
+                Continue for now
               </button>
             </div>
-            <p className="mt-3 text-xs text-slate-500">
-              {notificationState === "denied"
-                ? "Benachrichtigungen sind im Browser blockiert. Du kannst sie später in den Browser-Einstellungen aktivieren."
-                : notificationState === "unsupported"
-                  ? "Dieser Browser unterstützt Desktop-Benachrichtigungen nicht."
-                  : "Du kannst diese Einstellung später jederzeit über den Browser anpassen."}
-            </p>
+            <p className="mt-3 text-xs text-slate-500">{describeNotificationState(notificationState)}</p>
           </div>
         </div>
       ) : null}
@@ -2541,16 +2803,11 @@ export function ChatApp() {
                     </button>
                   ))}
                 </div>
-                {mediaHasMore ? (
+                {mediaHasMore || loadingMediaMore ? (
                   <div className="mt-3 flex justify-center">
-                    <button
-                      type="button"
-                      className="h-9 rounded-xl border border-slate-200 bg-white px-4 text-xs font-semibold text-slate-700"
-                      disabled={loadingMediaMore}
-                      onClick={() => void fetchMediaItems({ append: true, silent: true })}
-                    >
-                      {loadingMediaMore ? "Loading…" : "Load 3 more"}
-                    </button>
+                    <p className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-600">
+                      {loadingMediaMore ? "Loading more…" : "Scroll to load more automatically"}
+                    </p>
                   </div>
                 ) : null}
               </div>
