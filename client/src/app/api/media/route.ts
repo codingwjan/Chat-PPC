@@ -19,7 +19,7 @@ export async function GET(request: Request): Promise<NextResponse> {
 
     return NextResponse.json(page, {
       headers: {
-        "Cache-Control": "public, max-age=5, stale-while-revalidate=55",
+        "Cache-Control": "no-store",
       },
     });
   } catch (error) {

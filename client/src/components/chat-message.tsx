@@ -15,6 +15,7 @@ interface ChatMessageProps {
   onVote: (messageId: string, optionIds: string[]) => void;
   onDeleteMessage?: (messageId: string) => void;
   onOpenLightbox?: (url: string, alt?: string) => void;
+  onRemixImage?: (url: string, alt?: string) => void;
 }
 
 const IMAGE_URL_REGEX = /\.(jpeg|jpg|gif|png|webp|svg)(\?.*)?$/i;
@@ -211,6 +212,7 @@ export function ChatMessage({
   onVote,
   onDeleteMessage,
   onOpenLightbox,
+  onRemixImage,
 }: ChatMessageProps) {
   const pollSettings = message.poll?.settings;
   const previewUrls = useMemo(() => extractPreviewUrls(message.message), [message.message]);
@@ -465,20 +467,32 @@ export function ChatMessage({
               // Check for markdown image syntax first (e.g. from AI)
               const imgMatch = line.match(/^!\[(.*?)\]\((.*?)\)$/);
               if (imgMatch) {
+                const imageAlt = imgMatch[1] || "Shared image";
+                const imageUrl = imgMatch[2];
                 return (
-                  <button
-                    key={i}
-                    type="button"
-                    className="my-3 inline-block cursor-zoom-in"
-                    onClick={() => onOpenLightbox?.(imgMatch[2], imgMatch[1])}
-                  >
-                    <LazyImage
-                      src={imgMatch[2]}
-                      alt={imgMatch[1]}
-                      frameClassName="min-h-24 max-w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
-                      imageClassName="block max-h-80 max-w-full rounded-2xl object-contain transition hover:shadow-md"
-                    />
-                  </button>
+                  <span key={i} className="my-3 inline-flex flex-col items-start gap-1">
+                    <button
+                      type="button"
+                      className="inline-block cursor-zoom-in"
+                      onClick={() => onOpenLightbox?.(imageUrl, imageAlt)}
+                    >
+                      <LazyImage
+                        src={imageUrl}
+                        alt={imageAlt}
+                        frameClassName="min-h-24 max-w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
+                        imageClassName="block max-h-80 max-w-full rounded-2xl object-contain transition hover:shadow-md"
+                      />
+                    </button>
+                    {onRemixImage ? (
+                      <button
+                        type="button"
+                        onClick={() => onRemixImage(imageUrl, imageAlt)}
+                        className="rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-100"
+                      >
+                        Remix with @chatgpt
+                      </button>
+                    ) : null}
+                  </span>
                 );
               }
 
@@ -492,19 +506,29 @@ export function ChatMessage({
                   // Check if it's an image/GIF
                   if (isImageUrl(url)) {
                     return (
-                      <button
-                        key={`${i}-${j}`}
-                        type="button"
-                        className="my-3 inline-block cursor-zoom-in"
-                        onClick={() => onOpenLightbox?.(url, "Shared content")}
-                      >
-                        <LazyImage
-                          src={url}
-                          alt="Shared content"
-                          frameClassName="min-h-24 max-w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
-                          imageClassName="block max-h-80 max-w-full rounded-2xl object-contain transition hover:shadow-md"
-                        />
-                      </button>
+                      <span key={`${i}-${j}`} className="my-3 inline-flex flex-col items-start gap-1">
+                        <button
+                          type="button"
+                          className="inline-block cursor-zoom-in"
+                          onClick={() => onOpenLightbox?.(url, "Shared content")}
+                        >
+                          <LazyImage
+                            src={url}
+                            alt="Shared content"
+                            frameClassName="min-h-24 max-w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
+                            imageClassName="block max-h-80 max-w-full rounded-2xl object-contain transition hover:shadow-md"
+                          />
+                        </button>
+                        {onRemixImage ? (
+                          <button
+                            type="button"
+                            onClick={() => onRemixImage(url, "Shared content")}
+                            className="rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-100"
+                          >
+                            Remix with @chatgpt
+                          </button>
+                        ) : null}
+                      </span>
                     );
                   }
                   return (

@@ -59,6 +59,7 @@ let aiStatusState: AiStatusDTO = {
 let mediaItemsCache:
   | {
     expiresAt: number;
+    latestMessageAt: string | null;
     items: MediaItemDTO[];
   }
   | null = null;
@@ -870,7 +871,17 @@ function invalidateMediaCache(): void {
 
 async function getAllMediaItemsCached(): Promise<MediaItemDTO[]> {
   const now = Date.now();
-  if (mediaItemsCache && mediaItemsCache.expiresAt > now) {
+  const latestMessage = await prisma.message.findFirst({
+    select: { createdAt: true },
+    orderBy: [{ createdAt: "desc" }],
+  });
+  const latestMessageAt = latestMessage?.createdAt?.toISOString() ?? null;
+
+  if (
+    mediaItemsCache
+    && mediaItemsCache.expiresAt > now
+    && mediaItemsCache.latestMessageAt === latestMessageAt
+  ) {
     return mediaItemsCache.items;
   }
 
@@ -920,6 +931,7 @@ async function getAllMediaItemsCached(): Promise<MediaItemDTO[]> {
   mediaItemsCache = {
     items,
     expiresAt: now + MEDIA_CACHE_TTL_MS,
+    latestMessageAt,
   };
 
   return items;

@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
-import { FormEvent, useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { apiJson } from "@/lib/http";
@@ -11,6 +11,12 @@ import type { LoginRequest, LoginResponseDTO } from "@/lib/types";
 interface UploadResponse {
   url: string;
 }
+
+const USERNAME_PLACEHOLDERS = [
+  "Lorenz A3",
+  "Jonnys Brotdose",
+  "Hilpischs 10-Finger Kurs",
+];
 
 function createClientId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -45,9 +51,20 @@ export function LoginForm() {
   const [username, setUsername] = useState("");
   const [profilePicture, setProfilePicture] = useState("");
   const [cropFile, setCropFile] = useState<File | null>(null);
+  const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setPlaceholderIndex((current) => (current + 1) % USERNAME_PLACEHOLDERS.length);
+    }, 3_000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, []);
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -140,7 +157,7 @@ export function LoginForm() {
                 <input
                   className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm transition focus:border-sky-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
                   type="text"
-                  placeholder="e.g. jan_the_builder…"
+                  placeholder={USERNAME_PLACEHOLDERS[placeholderIndex]}
                   name="username"
                   autoComplete="username"
                   spellCheck={false}
@@ -148,10 +165,6 @@ export function LoginForm() {
                   onChange={(event) => setUsername(event.target.value)}
                 />
               </label>
-              <p className="text-xs text-slate-500">
-                Developer mode: enter your private 16-digit unlock code as username.
-              </p>
-
               <div className="flex items-center gap-3">
                 <button
                   type="button"

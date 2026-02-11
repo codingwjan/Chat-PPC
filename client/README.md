@@ -95,6 +95,18 @@ pnpm -C client test
 pnpm -C client deploy:vercel
 ```
 
+## Vercel Settings
+
+For Vercel, this app must be deployed with `client` as project root:
+
+- `Root Directory`: `client`
+- `Framework Preset`: `Next.js`
+- `Install Command`: `pnpm install --frozen-lockfile`
+- `Build Command`: `pnpm deploy:vercel`
+
+If Vercel is pointed to repo root, deployment can fail with:
+`Error: No Next.js version detected ...`
+
 ## API Surface
 
 Implemented route handlers:
