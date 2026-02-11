@@ -604,7 +604,9 @@ export function ChatApp() {
           searchParams.set("cursor", cursor);
         }
 
-        const page = await apiJson<MediaPageDTO>(`/api/media?${searchParams.toString()}`);
+        const page = await apiJson<MediaPageDTO>(`/api/media?${searchParams.toString()}`, {
+          cache: "no-store",
+        });
         const nextItems = append ? mergeMediaItems(mediaItemsRef.current, page.items) : page.items;
         setMediaItems(nextItems);
         setMediaNextCursor(page.nextCursor);
@@ -617,7 +619,7 @@ export function ChatApp() {
           total: page.total,
         });
       } catch (mediaError) {
-        if (!options?.silent || append) {
+        if (!options?.silent || append || mediaItemsRef.current.length === 0) {
           setError(mediaError instanceof Error ? mediaError.message : "Could not load media.");
         }
       } finally {
@@ -647,11 +649,15 @@ export function ChatApp() {
         notifyMessages(fresh);
       }
 
+      if (showMedia && fresh.length > 0) {
+        void fetchMediaItems({ silent: true });
+      }
+
       if (isAtBottomRef.current) {
         requestAnimationFrame(() => scrollToBottom(options.notify ? "smooth" : "auto"));
       }
     },
-    [notifyMessages, scrollToBottom, updateLatestMessageCursor],
+    [fetchMediaItems, notifyMessages, scrollToBottom, showMedia, updateLatestMessageCursor],
   );
 
   const syncChatState = useCallback(async () => {

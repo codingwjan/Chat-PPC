@@ -42,6 +42,16 @@ pnpm -C client build
 
 ## Deploy to Vercel
 
+This is a monorepo. In Vercel Project Settings set:
+
+- `Root Directory`: `client`
+- `Framework Preset`: `Next.js`
+- `Install Command`: `pnpm install --frozen-lockfile`
+- `Build Command`: `pnpm deploy:vercel`
+
+If `Root Directory` is left as repo root, Vercel can fail with:
+`Error: No Next.js version detected ...`
+
 Set these project environment variables in Vercel:
 
 - `DATABASE_URL` Neon pooled connection string (`sslmode=require`)
