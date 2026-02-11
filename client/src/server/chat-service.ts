@@ -49,15 +49,18 @@ const IMAGE_URL_REGEX = /\.(jpeg|jpg|gif|png|webp|svg)(\?.*)?$/i;
 const DEFAULT_MEDIA_PAGE_LIMIT = 3;
 const MAX_MEDIA_PAGE_LIMIT = 30;
 const MEDIA_CACHE_TTL_MS = 30_000;
-const AI_QUEUE_CONCURRENCY = 1;
+const AI_QUEUE_CONCURRENCY = 2;
 const AI_QUEUE_MAX_PENDING = 40;
 const AI_QUEUE_MAX_ATTEMPTS = 4;
+const AI_QUEUE_STALE_PROCESSING_MS = 2 * 60 * 1_000;
 const AI_BUSY_NOTICE_COOLDOWN_MS = 5_000;
-const AI_QUEUE_LOCK_KEY_MAJOR = 7_426;
-const AI_QUEUE_LOCK_KEY_MINOR = 1_117;
+
+function hasOpenAiApiKey(): boolean {
+  return Boolean(process.env.OPENAI_API_KEY?.trim());
+}
 
 let aiStatusState: AiStatusDTO = {
-  status: "online",
+  status: hasOpenAiApiKey() ? "online" : "offline",
   updatedAt: new Date().toISOString(),
 };
 
@@ -197,7 +200,7 @@ async function assertUsernameAllowed(username: string): Promise<void> {
   });
 
   if (blocked) {
-    throw new AppError("Username is not allowed", 403);
+    throw new AppError("Dieser Benutzername ist nicht erlaubt", 403);
   }
 }
 
@@ -214,7 +217,7 @@ async function assertUsernameAvailable(username: string, exceptClientId?: string
   });
 
   if (existing) {
-    throw new AppError("Username is already in use", 409);
+    throw new AppError("Dieser Benutzername ist bereits vergeben", 409);
   }
 }
 
@@ -296,7 +299,7 @@ async function cleanupOfflineUsers(): Promise<void> {
       console.error("Failed to delete stale user row:", error);
     }
 
-    await emitSystemMessage(`${user.username} left the chat`);
+    await emitSystemMessage(`${user.username} hat den Chat verlassen`);
   }
 }
 
@@ -312,6 +315,13 @@ export async function getOnlineUsers(): Promise<UserPresenceDTO[]> {
 }
 
 export async function getAiStatus(): Promise<AiStatusDTO> {
+  if (!hasOpenAiApiKey()) {
+    return {
+      status: "offline",
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
   const persisted = await prisma.user.findUnique({
     where: { clientId: AI_STATUS_CLIENT_ID },
     select: {
@@ -377,7 +387,7 @@ export async function setChatBackground(input: {
   if (normalizedUrl) {
     // Validate upload URL / external URL format.
     new URL(normalizedUrl);
-    assert(!normalizedUrl.toLowerCase().startsWith("data:"), "Background must not be a data URL", 400);
+    assert(!normalizedUrl.toLowerCase().startsWith("data:"), "Hintergrund darf keine data-URL sein", 400);
   }
 
   const now = new Date();
@@ -401,9 +411,9 @@ export async function setChatBackground(input: {
   });
 
   if (normalizedUrl && normalizedUrl !== previousBackground) {
-    await emitSystemMessage(`${actor.username} changed the background image`);
+    await emitSystemMessage(`${actor.username} hat das Hintergrundbild geändert`);
   } else if (!normalizedUrl && previousBackground) {
-    await emitSystemMessage(`${actor.username} reset the background image`);
+    await emitSystemMessage(`${actor.username} hat das Hintergrundbild zurückgesetzt`);
   }
 
   const result: ChatBackgroundDTO = {
@@ -500,6 +510,7 @@ async function persistAiStatusToDatabase(payload: AiStatusDTO): Promise<void> {
 }
 
 interface AiTriggerPayload {
+  sourceMessageId: string;
   username: string;
   message: string;
   imageUrls: string[];
@@ -509,6 +520,21 @@ type AiInputMode = "full" | "minimal";
 
 function stripChatGptMention(message: string): string {
   return message.replace(/(^|\s)@chatgpt\b/gi, " ").replace(/\s+/g, " ").trim();
+}
+
+const WEB_SEARCH_HINT_REGEX =
+  /\b(aktuell|aktuelle|aktuellen|heute|gestern|morgen|neueste|neuester|news|nachrichten|latest|today|current|preis|kurse?|wetter|temperatur|score|standings?|spielplan|breaking|diese woche|this week|dieses jahr|this year|202\d)\b/i;
+const IMAGE_GENERATION_HINT_REGEX =
+  /\b(remix|remixe|bearbeite|edit|editiere|zeichne|draw|render|erstelle|generiere|generate|create)\b/i;
+
+function shouldUseWebSearchTool(message: string): boolean {
+  return WEB_SEARCH_HINT_REGEX.test(message);
+}
+
+function shouldUseImageGenerationTool(message: string, imageInputCount: number): boolean {
+  if (!IMAGE_GENERATION_HINT_REGEX.test(message)) return false;
+  if (imageInputCount > 0) return true;
+  return /\b(image|bild|grafik|illustration|photo|foto)\b/i.test(message);
 }
 
 function normalizeAiImageUrlCandidate(url: string): string {
@@ -612,17 +638,17 @@ async function buildAiInput(
 
   const cleanedPrompt = stripChatGptMention(payload.message);
   const userPrompt = clampText(
-    sanitizeMessageForAi(cleanedPrompt || "Please help with the latest message in this chat."),
+    sanitizeMessageForAi(cleanedPrompt || "Bitte hilf bei der neuesten Nachricht in diesem Chat."),
     isMinimal ? AI_USER_PROMPT_CHARS_MINIMAL : AI_USER_PROMPT_CHARS,
   );
   const hasImageInputs = payload.imageUrls.length > 0;
   const composedPrompt = [
-    "You are ChatGPT in a classroom group chat. Keep answers clear and concise.",
+    "Du bist ChatGPT in einem Gruppenchat. Antworte klar, hilfreich und auf Deutsch.",
     hasImageInputs
-      ? "The user attached image input(s). If asked to generate an image, treat these as edit/reference images."
+      ? "Die Nachricht enthält Bild-Inputs. Falls ein Bild gewünscht ist, nutze sie als Referenz-/Bearbeitungsbilder."
       : "",
-    recentContext ? `Recent chat context:\n${recentContext}` : "",
-    `Current request from ${payload.username}: ${userPrompt}`,
+    recentContext ? `Letzter Chat-Kontext:\n${recentContext}` : "",
+    `Aktuelle Anfrage von ${payload.username}: ${userPrompt}`,
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -673,7 +699,7 @@ async function persistGeneratedImage(base64Image: string, imageIndex: number): P
   return blob.url;
 }
 
-async function emitAiBusyNotice(): Promise<void> {
+async function emitAiBusyNotice(sourceMessageId: string): Promise<void> {
   const now = Date.now();
   if (now - lastAiBusyNoticeAt < AI_BUSY_NOTICE_COOLDOWN_MS) return;
   lastAiBusyNoticeAt = now;
@@ -682,6 +708,7 @@ async function emitAiBusyNotice(): Promise<void> {
     data: {
       type: MessageType.MESSAGE,
       content: "Zu viele @chatgpt Anfragen gleichzeitig. Bitte in wenigen Sekunden erneut versuchen.",
+      questionMessageId: sourceMessageId,
       authorName: "ChatGPT",
       authorProfilePicture: chatgptProfilePicture.src,
     },
@@ -692,19 +719,25 @@ async function emitAiBusyNotice(): Promise<void> {
 }
 
 async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
-  if (!process.env.OPENAI_API_KEY) return;
+  if (!hasOpenAiApiKey()) return;
 
-  publishAiStatus("thinking…");
+  publishAiStatus("denkt nach…");
 
   try {
     const openAiConfig = getChatOpenAiConfig();
     const openai = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
+    const cleanedMessage = stripChatGptMention(payload.message);
+    const useWebSearchTool = openAiConfig.webSearch.enabled
+      && (!openAiConfig.lowLatencyMode || shouldUseWebSearchTool(cleanedMessage));
+    const useImageGenerationTool = openAiConfig.imageGeneration.enabled
+      && (!openAiConfig.lowLatencyMode
+        || shouldUseImageGenerationTool(cleanedMessage, payload.imageUrls.length));
 
     const tools: NonNullable<Parameters<typeof openai.responses.create>[0]["tools"]> = [];
 
-    if (openAiConfig.webSearch.enabled) {
+    if (useWebSearchTool) {
       tools.push({
         type: "web_search",
         user_location: {
@@ -717,7 +750,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       });
     }
 
-    if (openAiConfig.imageGeneration.enabled) {
+    if (useImageGenerationTool) {
       tools.push({
         type: "image_generation",
         background: openAiConfig.imageGeneration.background,
@@ -731,10 +764,10 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
     }
 
     const include: NonNullable<Parameters<typeof openai.responses.create>[0]["include"]> = [];
-    if (openAiConfig.includeEncryptedReasoning) {
+    if (openAiConfig.includeEncryptedReasoning && !openAiConfig.lowLatencyMode) {
       include.push("reasoning.encrypted_content");
     }
-    if (openAiConfig.includeWebSources) {
+    if (openAiConfig.includeWebSources && useWebSearchTool) {
       include.push("web_search_call.action.sources");
     }
 
@@ -755,7 +788,6 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
           type: "text",
         },
       },
-      reasoning: {},
       ...(tools.length > 0 ? { tools } : {}),
       store: openAiConfig.store,
       ...(include.length > 0 ? { include } : {}),
@@ -774,7 +806,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
     const hasImageOutput = Array.isArray(response.output)
       && response.output.some((item) => item.type === "image_generation_call");
     if (hasImageOutput) {
-      publishAiStatus("creating image…");
+      publishAiStatus("erstellt Bild…");
     }
 
     const imageMarkdown: string[] = [];
@@ -788,7 +820,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
             imageMarkdown.push(`![Generated Image ${imageIndex}](${imageUrl})`);
           } else {
             imageMarkdown.push(
-              "_(Image generated but could not be attached. Configure BLOB_READ_WRITE_TOKEN for hosted AI images.)_",
+              "_(Image generated but could not be attached. Configure BLOB_READ_WRITE_TOKEN (or BLOB) for hosted AI images.)_",
             );
           }
         }
@@ -799,12 +831,13 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
 
     // Always acknowledge a mention, even when the model returns empty output.
     if (!text || text === "[NO_RESPONSE]") {
-      publishAiStatus("writing…");
+      publishAiStatus("schreibt…");
 
       const fallback = await prisma.message.create({
         data: {
           type: MessageType.MESSAGE,
           content: "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal.",
+          questionMessageId: payload.sourceMessageId,
           authorName: "ChatGPT",
           authorProfilePicture: chatgptProfilePicture.src,
         },
@@ -815,12 +848,13 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       return;
     }
 
-    publishAiStatus("writing…");
+    publishAiStatus("schreibt…");
 
     const created = await prisma.message.create({
       data: {
         type: MessageType.MESSAGE,
         content: text,
+        questionMessageId: payload.sourceMessageId,
         authorName: "ChatGPT",
         authorProfilePicture: chatgptProfilePicture.src,
       },
@@ -834,12 +868,13 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
     const errorText = isContextWindowError(error)
       ? "Die Anfrage war zu lang. Bitte formuliere deine Frage etwas kürzer und versuche es erneut."
       : error instanceof Error
-        ? `OpenAI request failed: ${error.message}`
-        : "OpenAI request failed.";
+        ? `OpenAI-Anfrage fehlgeschlagen: ${error.message}`
+        : "OpenAI-Anfrage fehlgeschlagen.";
     const created = await prisma.message.create({
       data: {
         type: MessageType.MESSAGE,
         content: errorText,
+        questionMessageId: payload.sourceMessageId,
         authorName: "ChatGPT",
         authorProfilePicture: chatgptProfilePicture.src,
       },
@@ -879,17 +914,28 @@ function parseAiJobImageUrls(raw: Prisma.JsonValue): string[] {
   return raw.filter((item): item is string => typeof item === "string").slice(0, 4);
 }
 
-async function tryAcquireAiQueueLock(): Promise<boolean> {
-  const result = await prisma.$queryRaw<Array<{ locked: boolean }>>`
-    SELECT pg_try_advisory_lock(${AI_QUEUE_LOCK_KEY_MAJOR}, ${AI_QUEUE_LOCK_KEY_MINOR}) AS locked
-  `;
-  return Boolean(result[0]?.locked);
-}
-
-async function releaseAiQueueLock(): Promise<void> {
-  await prisma.$queryRaw`
-    SELECT pg_advisory_unlock(${AI_QUEUE_LOCK_KEY_MAJOR}, ${AI_QUEUE_LOCK_KEY_MINOR})
-  `;
+async function recoverStaleAiJobs(): Promise<void> {
+  await prisma.aiJob.updateMany({
+    where: {
+      status: AiJobStatus.PROCESSING,
+      OR: [
+        {
+          lockedAt: {
+            lt: new Date(Date.now() - AI_QUEUE_STALE_PROCESSING_MS),
+          },
+        },
+        {
+          lockedAt: null,
+        },
+      ],
+    },
+    data: {
+      status: AiJobStatus.PENDING,
+      runAt: new Date(),
+      lockedAt: null,
+      lastError: "Recovered stale processing job",
+    },
+  });
 }
 
 async function claimNextAiJob(): Promise<ClaimedAiJobRow | null> {
@@ -924,7 +970,7 @@ async function claimNextAiJob(): Promise<ClaimedAiJobRow | null> {
 }
 
 async function enqueueAiResponse(
-  payload: AiTriggerPayload & { sourceMessageId: string },
+  payload: AiTriggerPayload,
 ): Promise<EnqueueAiResult> {
   const pendingTotal = await prisma.aiJob.count({
     where: {
@@ -958,54 +1004,49 @@ async function enqueueAiResponse(
 }
 
 export async function processAiQueue(input: { maxJobs?: number } = {}): Promise<{ processed: number; lockSkipped: boolean }> {
-  if (!process.env.OPENAI_API_KEY) return { processed: 0, lockSkipped: false };
-  const lockAcquired = await tryAcquireAiQueueLock();
-  if (!lockAcquired) {
-    return { processed: 0, lockSkipped: true };
-  }
+  if (!hasOpenAiApiKey()) return { processed: 0, lockSkipped: false };
+
+  await recoverStaleAiJobs();
 
   const maxJobs = Math.max(1, Math.min(20, input.maxJobs ?? AI_QUEUE_CONCURRENCY));
   let processed = 0;
 
-  try {
-    while (processed < maxJobs) {
-      const job = await claimNextAiJob();
-      if (!job) break;
+  while (processed < maxJobs) {
+    const job = await claimNextAiJob();
+    if (!job) break;
 
-      try {
-        await emitAiResponse({
-          username: job.username,
-          message: job.message,
-          imageUrls: parseAiJobImageUrls(job.imageUrls),
-        });
-        await prisma.aiJob.update({
-          where: { id: job.id },
-          data: {
-            status: AiJobStatus.COMPLETED,
-            completedAt: new Date(),
-            lockedAt: null,
-            lastError: null,
-          },
-        });
-      } catch (error) {
-        const shouldFail = job.attempts >= AI_QUEUE_MAX_ATTEMPTS;
-        const retryDelayMs = Math.min(60_000, 3_000 * job.attempts);
-        await prisma.aiJob.update({
-          where: { id: job.id },
-          data: {
-            status: shouldFail ? AiJobStatus.FAILED : AiJobStatus.PENDING,
-            ...(shouldFail ? {} : { runAt: new Date(Date.now() + retryDelayMs) }),
-            failedAt: shouldFail ? new Date() : null,
-            lockedAt: null,
-            lastError: error instanceof Error ? error.message : "Unknown queue error",
-          },
-        });
-      }
-
-      processed += 1;
+    try {
+      await emitAiResponse({
+        sourceMessageId: job.sourceMessageId,
+        username: job.username,
+        message: job.message,
+        imageUrls: parseAiJobImageUrls(job.imageUrls),
+      });
+      await prisma.aiJob.update({
+        where: { id: job.id },
+        data: {
+          status: AiJobStatus.COMPLETED,
+          completedAt: new Date(),
+          lockedAt: null,
+          lastError: null,
+        },
+      });
+    } catch (error) {
+      const shouldFail = job.attempts >= AI_QUEUE_MAX_ATTEMPTS;
+      const retryDelayMs = Math.min(60_000, 3_000 * job.attempts);
+      await prisma.aiJob.update({
+        where: { id: job.id },
+        data: {
+          status: shouldFail ? AiJobStatus.FAILED : AiJobStatus.PENDING,
+          ...(shouldFail ? {} : { runAt: new Date(Date.now() + retryDelayMs) }),
+          failedAt: shouldFail ? new Date() : null,
+          lockedAt: null,
+          lastError: error instanceof Error ? error.message : "Unknown queue error",
+        },
+      });
     }
-  } finally {
-    await releaseAiQueueLock();
+
+    processed += 1;
   }
 
   const remaining = await prisma.aiJob.count({
@@ -1021,14 +1062,21 @@ export async function processAiQueue(input: { maxJobs?: number } = {}): Promise<
   return { processed, lockSkipped: false };
 }
 
-async function maybeRespondAsAi(payload: AiTriggerPayload & { sourceMessageId: string }): Promise<void> {
-  if (!process.env.OPENAI_API_KEY) return;
+async function maybeRespondAsAi(payload: AiTriggerPayload): Promise<void> {
+  if (!hasOpenAiApiKey()) {
+    publishAiStatus("offline");
+    return;
+  }
   const queued = await enqueueAiResponse(payload);
   if (queued === "full") {
-    await emitAiBusyNotice();
+    await emitAiBusyNotice(payload.sourceMessageId);
     return;
   }
   if (queued === "queued") {
+    void processAiQueue({ maxJobs: AI_QUEUE_CONCURRENCY })
+      .catch((error) => {
+        console.error("AI queue kickoff error:", error instanceof Error ? error.message : error);
+      });
     scheduleAiQueueDrain();
   }
 }
@@ -1040,7 +1088,7 @@ export function __resetAiQueueForTests(): void {
 
 async function getUserByClientId(clientId: string) {
   const user = await prisma.user.findUnique({ where: { clientId } });
-  assert(user, "User session not found. Please login again.", 401);
+  assert(user, "Nutzersitzung nicht gefunden. Bitte erneut anmelden.", 401);
   return user;
 }
 
@@ -1188,7 +1236,7 @@ export async function loginUser(input: {
   profilePicture?: string;
 }): Promise<LoginResponseDTO> {
   const requestedUsername = input.username.trim();
-  assert(requestedUsername.length >= 3, "Username must be at least 3 characters", 400);
+  assert(requestedUsername.length >= 3, "Benutzername muss mindestens 3 Zeichen lang sein", 400);
   const devMode = isDevUnlockUsername(requestedUsername);
   const username = devMode ? await resolveDeveloperUsername(input.clientId) : requestedUsername;
 
@@ -1227,13 +1275,13 @@ export async function loginUser(input: {
   publish("presence.updated", dto);
 
   if (!existingUser?.isOnline) {
-    await emitSystemMessage(`${user.username} joined the chat`);
+    await emitSystemMessage(`${user.username} ist dem Chat beigetreten`);
   }
 
   let devAuthToken: string | undefined;
   if (devMode) {
     devAuthToken = issueDevAuthToken(user.clientId) ?? undefined;
-    assert(devAuthToken, "Developer mode is not configured on this server.", 500);
+    assert(devAuthToken, "Entwicklermodus ist auf diesem Server nicht konfiguriert.", 500);
   }
 
   return {
@@ -1251,13 +1299,13 @@ export async function renameUser(input: {
   const currentUser = await getUserByClientId(input.clientId);
   const newUsername = input.newUsername?.trim();
   const profilePicture = input.profilePicture?.trim();
-  assert(newUsername || profilePicture, "Either newUsername or profilePicture is required", 400);
+  assert(newUsername || profilePicture, "Entweder newUsername oder profilePicture ist erforderlich", 400);
   if (profilePicture) {
-    assert(!profilePicture.toLowerCase().startsWith("data:"), "Profile picture must not be a data URL", 400);
+    assert(!profilePicture.toLowerCase().startsWith("data:"), "Profilbild darf keine data-URL sein", 400);
   }
 
   if (newUsername) {
-    assert(newUsername.length >= 3, "Username must be at least 3 characters", 400);
+    assert(newUsername.length >= 3, "Benutzername muss mindestens 3 Zeichen lang sein", 400);
     await assertUsernameAllowed(newUsername);
     await assertUsernameAvailable(newUsername, input.clientId);
   }
@@ -1275,7 +1323,7 @@ export async function renameUser(input: {
   publish("user.updated", dto);
 
   if (newUsername && currentUser.username !== newUsername) {
-    await emitSystemMessage(`${currentUser.username} is now ${newUsername}`);
+    await emitSystemMessage(`${currentUser.username} heißt jetzt ${newUsername}`);
   }
 
   return dto;
@@ -1306,7 +1354,7 @@ export async function setTypingStatus(input: { clientId: string; status: string 
 
 export async function markUserOffline(input: { clientId: string }): Promise<UserPresenceDTO> {
   const user = await prisma.user.findUnique({ where: { clientId: input.clientId } });
-  assert(user, "User session not found. Please login again.", 401);
+  assert(user, "Nutzersitzung nicht gefunden. Bitte erneut anmelden.", 401);
 
   const offlineUser = await prisma.user.update({
     where: { clientId: input.clientId },
@@ -1322,24 +1370,43 @@ export async function markUserOffline(input: { clientId: string }): Promise<User
 
   const dto = mapUser(offlineUser);
   publish("presence.updated", dto);
-  await emitSystemMessage(`${user.username} left the chat`);
+  await emitSystemMessage(`${user.username} hat den Chat verlassen`);
   return dto;
 }
 
 export async function createMessage(input: CreateMessageRequest): Promise<MessageDTO> {
   const user = await getUserByClientId(input.clientId);
   const message = input.message.trim();
-  assert(message.length > 0, "Message cannot be empty", 400);
+  assert(message.length > 0, "Nachricht darf nicht leer sein", 400);
 
   const type = toDbMessageType(input.type);
   let questionMessageId: string | undefined;
+  let referencedMessage:
+    | {
+      id: string;
+      type: MessageType;
+      content: string;
+      authorName: string;
+    }
+    | null = null;
+
+  if (input.questionId) {
+    referencedMessage = await prisma.message.findUnique({
+      where: { id: input.questionId },
+      select: { id: true, type: true, content: true, authorName: true },
+    });
+    assert(referencedMessage, type === MessageType.ANSWER ? "Frage-Nachricht nicht gefunden" : "Nachricht für Antwort nicht gefunden", 404);
+  }
 
   if (type === MessageType.ANSWER) {
-    assert(input.questionId, "questionId is required for answer", 400);
-    const questionMessage = await prisma.message.findUnique({ where: { id: input.questionId } });
-    assert(questionMessage, "Question message not found", 404);
-    assert(questionMessage.type === MessageType.QUESTION, "questionId must reference a question", 400);
-    questionMessageId = questionMessage.id;
+    assert(input.questionId, "questionId ist für Antworten erforderlich", 400);
+    assert(referencedMessage, "Frage-Nachricht nicht gefunden", 404);
+    assert(referencedMessage.type === MessageType.QUESTION, "questionId muss auf eine Frage verweisen", 400);
+    questionMessageId = referencedMessage.id;
+  }
+
+  if (type === MessageType.MESSAGE && referencedMessage) {
+    questionMessageId = referencedMessage.id;
   }
 
   const normalizedPollOptions = input.pollOptions?.map((value) => value.trim()).filter(Boolean) ?? [];
@@ -1347,11 +1414,11 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
   const pollOptions = normalizedPollOptions.length > 0 ? normalizedPollOptions : fallbackPollOptions;
 
   if (type === MessageType.VOTING_POLL) {
-    assert(pollOptions.length >= 2, "At least two poll options are required", 400);
-    assert(pollOptions.length <= 15, "Poll supports up to 15 options", 400);
+    assert(pollOptions.length >= 2, "Mindestens zwei Umfrageoptionen sind erforderlich", 400);
+    assert(pollOptions.length <= 15, "Umfragen unterstützen bis zu 15 Optionen", 400);
     assert(
       new Set(pollOptions.map((value) => value.toLowerCase())).size === pollOptions.length,
-      "Poll options must be unique",
+      "Umfrageoptionen müssen eindeutig sein",
       400,
     );
   }
@@ -1359,11 +1426,11 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
   let content = message;
   if (type === MessageType.MESSAGE) {
     if (message.startsWith("/roll")) {
-      content = `${user.username} rolled ${Math.floor(Math.random() * 6) + 1}`;
+      content = `${user.username} hat ${Math.floor(Math.random() * 6) + 1} gewürfelt`;
     } else if (message.startsWith("/coin")) {
-      content = `${user.username} flipped ${Math.random() < 0.5 ? "heads" : "tails"}`;
+      content = `${user.username} hat ${Math.random() < 0.5 ? "Kopf" : "Zahl"} geworfen`;
     } else if (message.startsWith("/help")) {
-      content = "Mention @chatgpt for AI, plus /roll, /coin, and polls with up to 15 options.";
+      content = "Erwähne @chatgpt für KI. Verfügbar sind auch /roll, /coin und Umfragen mit bis zu 15 Optionen.";
     }
   }
 
@@ -1407,14 +1474,16 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
     /(^|\s)@chatgpt\b/i.test(message);
 
   if (shouldTriggerAi) {
-    void maybeRespondAsAi({
-      sourceMessageId: created.id,
-      username: user.username,
-      message,
-      imageUrls: extractImageUrlsForAi(message),
-    }).catch((error) => {
+    try {
+      await maybeRespondAsAi({
+        sourceMessageId: created.id,
+        username: user.username,
+        message,
+        imageUrls: extractImageUrlsForAi(message),
+      });
+    } catch (error) {
       console.error("AI auto-response error:", error instanceof Error ? error.message : error);
-    });
+    }
   }
 
   return dto;
@@ -1432,8 +1501,8 @@ export async function votePoll(input: {
     include: { questionMessage: true, author: true, pollOptions: { include: { votes: { include: { user: true } } } } },
   });
 
-  assert(poll, "Poll not found", 404);
-  assert(poll.type === MessageType.VOTING_POLL, "Message is not a voting poll", 400);
+  assert(poll, "Umfrage nicht gefunden", 404);
+  assert(poll.type === MessageType.VOTING_POLL, "Nachricht ist keine Umfrage", 400);
 
   const sortedOptions = [...poll.pollOptions].sort((a, b) => a.sortOrder - b.sortOrder);
   let targetOptionIds = input.optionIds?.filter(Boolean) ?? [];
@@ -1443,17 +1512,17 @@ export async function votePoll(input: {
     if (legacyOption) targetOptionIds = [legacyOption.id];
   }
 
-  assert(targetOptionIds.length > 0, "At least one poll option is required", 400);
-  assert(targetOptionIds.length <= 15, "Poll supports up to 15 selected options", 400);
+  assert(targetOptionIds.length > 0, "Mindestens eine Umfrageoption ist erforderlich", 400);
+  assert(targetOptionIds.length <= 15, "Umfragen unterstützen bis zu 15 ausgewählte Optionen", 400);
 
   if (!poll.pollMultiSelect) {
-    assert(targetOptionIds.length === 1, "This poll allows only one vote", 400);
+    assert(targetOptionIds.length === 1, "Diese Umfrage erlaubt nur eine Stimme", 400);
   }
 
   const validOptionIds = new Set(sortedOptions.map((option) => option.id));
   assert(
     targetOptionIds.every((optionId) => validOptionIds.has(optionId)),
-    "One or more poll options are invalid",
+    "Eine oder mehrere Umfrageoptionen sind ungültig",
     400,
   );
 
@@ -1499,7 +1568,7 @@ export async function votePoll(input: {
 
 async function assertDeveloperMode(input: { clientId: string; devAuthToken: string }) {
   const tokenValid = verifyDevAuthToken(input.devAuthToken, input.clientId);
-  assert(tokenValid, "Developer mode authentication failed. Login again with the 16-digit code.", 403);
+  assert(tokenValid, "Entwicklermodus-Authentifizierung fehlgeschlagen. Bitte mit dem 16-stelligen Code neu anmelden.", 403);
 
   const user = await getUserByClientId(input.clientId);
   return user;
@@ -1546,7 +1615,7 @@ export async function getAdminOverview(input: { clientId: string; devAuthToken: 
 export async function runAdminAction(input: AdminActionRequest): Promise<AdminActionResponse> {
   const actor = await assertDeveloperMode(input);
   const action = input.action;
-  let message = "Action completed.";
+  let message = "Aktion abgeschlossen.";
 
   if (action === "reset_all") {
     await prisma.$transaction([
@@ -1565,8 +1634,7 @@ export async function runAdminAction(input: AdminActionRequest): Promise<AdminAc
     ]);
     invalidateMediaCache();
 
-    await emitSystemMessage(`${actor.username} reset the chat data`);
-    message = "Everything was reset.";
+    message = "Alles wurde zurückgesetzt.";
   }
 
   if (action === "delete_all_messages") {
@@ -1577,8 +1645,7 @@ export async function runAdminAction(input: AdminActionRequest): Promise<AdminAc
       prisma.message.deleteMany({}),
     ]);
     invalidateMediaCache();
-    await emitSystemMessage(`${actor.username} cleared all messages`);
-    message = "All messages were deleted.";
+    message = "Alle Nachrichten wurden gelöscht.";
   }
 
   if (action === "logout_all_users") {
@@ -1589,18 +1656,18 @@ export async function runAdminAction(input: AdminActionRequest): Promise<AdminAc
         },
       },
     });
-    await emitSystemMessage(`${actor.username} logged out all users`);
-    message = "All other users were logged out.";
+    await emitSystemMessage(`${actor.username} hat alle Nutzer abgemeldet`);
+    message = "Alle anderen Nutzer wurden abgemeldet.";
   }
 
   if (action === "clear_blacklist") {
     await prisma.blacklistEntry.deleteMany({});
-    message = "Blacklist was cleared.";
+    message = "Sperrliste wurde geleert.";
   }
 
   if (action === "delete_user") {
     const targetUsername = input.targetUsername?.trim();
-    assert(targetUsername, "targetUsername is required for delete_user", 400);
+    assert(targetUsername, "targetUsername ist für delete_user erforderlich", 400);
 
     const target = await prisma.user.findFirst({
       where: {
@@ -1610,31 +1677,31 @@ export async function runAdminAction(input: AdminActionRequest): Promise<AdminAc
         },
       },
     });
-    assert(target, "Target user not found", 404);
-    assert(target.clientId !== actor.clientId, "You cannot delete your own active admin session.", 400);
+    assert(target, "Zielnutzer nicht gefunden", 404);
+    assert(target.clientId !== actor.clientId, "Die eigene aktive Admin-Sitzung kann nicht gelöscht werden.", 400);
 
     await prisma.user.delete({
       where: { id: target.id },
     });
-    await emitSystemMessage(`${target.username} was removed by ${actor.username}`);
-    message = `Deleted user ${target.username}.`;
+    await emitSystemMessage(`${target.username} wurde von ${actor.username} entfernt`);
+    message = `Nutzer ${target.username} wurde gelöscht.`;
   }
 
   if (action === "delete_message") {
     const targetMessageId = input.targetMessageId?.trim();
-    assert(targetMessageId, "targetMessageId is required for delete_message", 400);
+    assert(targetMessageId, "targetMessageId ist für delete_message erforderlich", 400);
 
     const target = await prisma.message.findUnique({
       where: { id: targetMessageId },
       select: { id: true },
     });
-    assert(target, "Target message not found", 404);
+    assert(target, "Zielnachricht nicht gefunden", 404);
 
     await prisma.message.delete({
       where: { id: target.id },
     });
     invalidateMediaCache();
-    message = `Deleted message ${target.id}.`;
+    message = `Nachricht ${target.id} wurde gelöscht.`;
   }
 
   const overview = await getAdminOverviewInternal();

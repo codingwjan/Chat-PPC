@@ -37,17 +37,17 @@ function isPrivateIpAddress(ip: string): boolean {
 async function assertSafeHostname(hostname: string): Promise<void> {
   const lowerHostname = hostname.toLowerCase();
   if (lowerHostname === "localhost" || lowerHostname.endsWith(".local")) {
-    throw new AppError("Local URLs are not allowed", 400);
+    throw new AppError("Lokale URLs sind nicht erlaubt", 400);
   }
 
   const addresses = await lookup(hostname, { all: true });
   if (addresses.length === 0) {
-    throw new AppError("Could not resolve URL host", 400);
+    throw new AppError("URL-Host konnte nicht aufgelöst werden", 400);
   }
 
   for (const address of addresses) {
     if (isPrivateIpAddress(address.address)) {
-      throw new AppError("Private network URLs are not allowed", 400);
+      throw new AppError("Private Netzwerk-URLs sind nicht erlaubt", 400);
     }
   }
 }
@@ -119,12 +119,12 @@ export async function GET(request: Request): Promise<NextResponse> {
     const { searchParams } = new URL(request.url);
     const rawUrl = searchParams.get("url");
     if (!rawUrl) {
-      throw new AppError("url query parameter is required", 400);
+      throw new AppError("Der Query-Parameter url ist erforderlich", 400);
     }
 
     const parsedUrl = new URL(rawUrl);
     if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
-      throw new AppError("Only http(s) URLs are supported", 400);
+      throw new AppError("Es werden nur http(s)-URLs unterstützt", 400);
     }
 
     await assertSafeHostname(parsedUrl.hostname);

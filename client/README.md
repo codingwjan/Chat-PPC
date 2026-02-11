@@ -22,7 +22,7 @@ Create or edit `client/.env` directly.
 Required values:
 
 - `DATABASE_URL` PostgreSQL connection string
-- `BLOB_READ_WRITE_TOKEN` required for image uploads (profiles, chat, AI-generated images)
+- `BLOB_READ_WRITE_TOKEN` required for image uploads (profiles, chat, AI-generated images). `BLOB` is also accepted as an alias.
 - `OPENAI_API_KEY` optional, needed for real `@chatgpt` model responses
 - `ALLOW_INLINE_UPLOADS` optional dev-only escape hatch (`true|false`, default `false`)
 
@@ -31,6 +31,7 @@ OpenAI runtime configuration (all optional, defaults can be kept as shown in you
 - `OPENAI_MODEL` fallback model when no prompt id is used
 - `OPENAI_PROMPT_ID` reusable prompt id for `responses.create`
 - `OPENAI_PROMPT_VERSION` prompt version (update this when you publish a new prompt version)
+- `OPENAI_LOW_LATENCY_MODE` `true|false` (default `true`, enables faster tool selection for normal chat)
 - `OPENAI_STORE_RESPONSES` `true|false`
 - `OPENAI_INCLUDE_REASONING_ENCRYPTED` `true|false`
 - `OPENAI_INCLUDE_WEB_SOURCES` `true|false`

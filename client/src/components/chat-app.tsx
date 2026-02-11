@@ -32,6 +32,15 @@ import type {
 import chatgptAvatar from "@/resources/chatgpt.png";
 
 type ComposerMode = "message" | "question" | "poll" | "challenge";
+const PRIMARY_COMPOSER_MODES: ComposerMode[] = ["message"];
+const SECONDARY_COMPOSER_MODES: ComposerMode[] = ["question", "poll", "challenge"];
+
+const COMPOSER_MODE_LABEL: Record<ComposerMode, string> = {
+  message: "Nachricht",
+  question: "Frage",
+  poll: "Umfrage",
+  challenge: "Aufgabe",
+};
 
 interface UploadResponse {
   url: string;
@@ -68,7 +77,7 @@ function DraftImagePreview({
         type="button"
         onClick={onRemove}
         className="absolute right-1 top-1 hidden h-5 w-5 items-center justify-center rounded-full bg-slate-900/80 text-xs text-white group-hover:flex"
-        aria-label="Remove uploaded image"
+        aria-label="Hochgeladenes Bild entfernen"
       >
         ×
       </button>
@@ -92,6 +101,10 @@ const MEDIA_CACHE_KEY = "chatppc.media.cache.v1";
 const MEDIA_CACHE_TTL_MS = 5 * 60 * 1_000;
 
 type NotificationState = NotificationPermission | "unsupported";
+
+function hasChatGptMention(message: string): boolean {
+  return /(^|\s)@chatgpt\b/i.test(message);
+}
 
 function mergeUser(users: UserPresenceDTO[], next: UserPresenceDTO): UserPresenceDTO[] {
   const index = users.findIndex((user) => user.clientId === next.clientId);
@@ -229,13 +242,19 @@ interface LightboxState {
   alt: string;
 }
 
+interface ReplyTargetState {
+  id: string;
+  username: string;
+  message: string;
+}
+
 async function uploadProfileImage(file: File): Promise<string> {
   const formData = new FormData();
   formData.set("file", file);
   const response = await fetch("/api/uploads/profile", { method: "POST", body: formData });
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error || "Upload failed");
+    throw new Error(payload?.error || "Upload fehlgeschlagen");
   }
   const payload = (await response.json()) as UploadResponse;
   return payload.url;
@@ -255,12 +274,12 @@ function statusForComposer(input: {
   pollQuestion: string;
   pollOptions: string[];
 }): string {
-  if (input.mode === "message" && (input.messageDraft.trim() || input.hasUploadedImages)) return "typing…";
-  if (input.mode === "question" && input.questionDraft.trim()) return "asking a question…";
-  if (input.mode === "challenge" && input.challengeDraft.trim()) return "creating a challenge…";
+  if (input.mode === "message" && (input.messageDraft.trim() || input.hasUploadedImages)) return "schreibt…";
+  if (input.mode === "question" && input.questionDraft.trim()) return "stellt eine Frage…";
+  if (input.mode === "challenge" && input.challengeDraft.trim()) return "erstellt eine Aufgabe…";
   if (input.mode === "poll") {
     const hasPollContent = input.pollQuestion.trim() || input.pollOptions.some((option) => option.trim());
-    if (hasPollContent) return "creating a poll…";
+    if (hasPollContent) return "erstellt eine Umfrage…";
   }
   return "";
 }
@@ -272,13 +291,19 @@ const LAST_SEEN_TIME_OPTIONS: Intl.DateTimeFormatOptions = {
 
 function formatLastSeenStatus(timestamp: string | Date): string {
   const date = timestamp instanceof Date ? timestamp : new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return "last seen recently";
-  return `last seen ${date.toLocaleTimeString([], LAST_SEEN_TIME_OPTIONS)}`;
+  if (Number.isNaN(date.getTime())) return "zuletzt kürzlich aktiv";
+  return `zuletzt aktiv ${date.toLocaleTimeString("de-DE", LAST_SEEN_TIME_OPTIONS)}`;
 }
 
 function formatPresenceStatus(user: UserPresenceDTO): string {
-  const explicitStatus = user.status.trim();
-  if (explicitStatus) return explicitStatus;
+  const explicitStatusRaw = user.status.trim();
+  const explicitStatus = explicitStatusRaw.toLowerCase();
+  if (explicitStatus === "online") return "online";
+  if (explicitStatus === "typing…") return "schreibt…";
+  if (explicitStatus === "thinking…") return "denkt nach…";
+  if (explicitStatus === "creating image…") return "erstellt Bild…";
+  if (explicitStatus === "writing…") return "schreibt…";
+  if (explicitStatusRaw) return explicitStatusRaw;
   if (user.isOnline) return "online";
   if (user.lastSeenAt) return formatLastSeenStatus(user.lastSeenAt);
   return "online";
@@ -286,22 +311,33 @@ function formatPresenceStatus(user: UserPresenceDTO): string {
 
 function describeNotificationState(state: NotificationState): string {
   if (state === "denied") {
-    return "Notifications are blocked. Allow them in browser site settings, then click enable again.";
+    return "Benachrichtigungen sind blockiert. Aktiviere sie in den Browser-Einstellungen und versuche es erneut.";
   }
   if (state === "unsupported") {
-    return "This browser does not support desktop notifications.";
+    return "Dieser Browser unterstützt keine Desktop-Benachrichtigungen.";
   }
   if (state === "granted") {
-    return "Desktop notifications are enabled.";
+    return "Desktop-Benachrichtigungen für neue Nachrichten und Beitritte sind aktiviert.";
   }
-  return "Enable desktop notifications to see new messages instantly.";
+  return "Aktiviere Desktop-Benachrichtigungen für neue Nachrichten und wenn jemand dem Chat beitritt.";
 }
 
 function notificationButtonLabel(state: NotificationState): string {
-  if (state === "granted") return "Notifications Enabled";
-  if (state === "denied") return "Enable Notifications";
-  if (state === "unsupported") return "Not Supported";
-  return "Enable Notifications";
+  if (state === "granted") return "Benachrichtigungen aktiv";
+  if (state === "denied") return "Benachrichtigungen aktivieren";
+  if (state === "unsupported") return "Nicht unterstützt";
+  return "Benachrichtigungen aktivieren";
+}
+
+function isJoinSystemMessage(message: MessageDTO): boolean {
+  if (message.type !== "message" || message.username !== "System") return false;
+  const content = message.message.trim().toLowerCase();
+  return content.endsWith("joined the chat") || content.endsWith("ist dem chat beigetreten");
+}
+
+function shouldNotifyMessage(message: MessageDTO): boolean {
+  if (isJoinSystemMessage(message)) return true;
+  return message.type === "message" && message.username !== "System";
 }
 
 function buildDownloadFileName(alt: string): string {
@@ -310,7 +346,7 @@ function buildDownloadFileName(alt: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  if (!sanitized) return "chatppc-image.png";
+  if (!sanitized) return "chatppc-bild.png";
   return `${sanitized.slice(0, 48)}.png`;
 }
 
@@ -321,9 +357,9 @@ function isAbortError(error: unknown): boolean {
 function aiProgressForStatus(status: string): number {
   const normalized = status.trim().toLowerCase();
   if (!normalized || normalized === "online") return 0;
-  if (normalized.includes("thinking")) return 34;
-  if (normalized.includes("creating image")) return 70;
-  if (normalized.includes("writing")) return 90;
+  if (normalized.includes("thinking") || normalized.includes("denkt")) return 34;
+  if (normalized.includes("creating image") || normalized.includes("erstellt bild")) return 70;
+  if (normalized.includes("writing") || normalized.includes("schreibt")) return 90;
   return 55;
 }
 
@@ -341,6 +377,7 @@ interface MessageListProps {
   onSubmitAnswer: (messageId: string) => void;
   onVote: (messageId: string, optionIds: string[]) => void;
   onDeleteMessage: (messageId: string) => void;
+  onStartReply: (message: MessageDTO) => void;
   onOpenLightbox: (url: string, alt?: string) => void;
   onRemixImage: (url: string, alt?: string) => void;
 }
@@ -355,6 +392,7 @@ const MessageList = memo(function MessageList({
   onSubmitAnswer,
   onVote,
   onDeleteMessage,
+  onStartReply,
   onOpenLightbox,
   onRemixImage,
 }: MessageListProps) {
@@ -376,6 +414,7 @@ const MessageList = memo(function MessageList({
           onSubmitAnswer={onSubmitAnswer}
           onVote={onVote}
           onDeleteMessage={onDeleteMessage}
+          onStartReply={onStartReply}
           onOpenLightbox={onOpenLightbox}
           onRemixImage={onRemixImage}
         />
@@ -387,20 +426,28 @@ const MessageList = memo(function MessageList({
 interface OnlineUsersListProps {
   users: UserPresenceDTO[];
   avatarSizeClassName: string;
+  onOpenLightbox: (url: string, alt?: string) => void;
 }
 
-const OnlineUsersList = memo(function OnlineUsersList({ users, avatarSizeClassName }: OnlineUsersListProps) {
+const OnlineUsersList = memo(function OnlineUsersList({ users, avatarSizeClassName, onOpenLightbox }: OnlineUsersListProps) {
   return (
     <>
       {users.map((user) => (
         <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
-          <img
-            src={user.profilePicture}
-            alt={`${user.username} avatar`}
-            className={`${avatarSizeClassName} rounded-full border border-slate-200 object-cover`}
-            loading="lazy"
-            decoding="async"
-          />
+          <button
+            type="button"
+            onClick={() => onOpenLightbox(user.profilePicture, `Profilbild von ${user.username}`)}
+            className={`${avatarSizeClassName} shrink-0 cursor-zoom-in overflow-hidden rounded-full border border-slate-200 object-cover transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300`}
+            aria-label={`Profilbild von ${user.username} öffnen`}
+          >
+            <img
+              src={user.profilePicture}
+              alt={`${user.username} Profilbild`}
+              className="h-full w-full object-cover"
+              loading="lazy"
+              decoding="async"
+            />
+          </button>
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
             <p className="truncate text-xs text-slate-500">{formatPresenceStatus(user)}</p>
@@ -483,6 +530,7 @@ export function ChatApp() {
   const [adminTargetMessageId, setAdminTargetMessageId] = useState("");
   const [pendingDeliveries, setPendingDeliveries] = useState<Record<string, true>>({});
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
+  const [replyTarget, setReplyTarget] = useState<ReplyTargetState | null>(null);
 
   const [messageDraft, setMessageDraft] = useState("");
   const [uploadedDraftImages, setUploadedDraftImages] = useState<UploadedDraftImage[]>([]);
@@ -652,7 +700,7 @@ export function ChatApp() {
     setComposerMode("message");
     setComposerOpen(true);
     setMessageDraft((current) => {
-      if (/(^|\s)@chatgpt\b/i.test(current)) return current;
+      if (hasChatGptMention(current)) return current;
       const trimmed = current.trim();
       if (!trimmed) return "@chatgpt ";
       return `@chatgpt ${current}`;
@@ -683,9 +731,14 @@ export function ChatApp() {
         const isOwnByClientId = Boolean(session?.clientId) && payload.authorId === session?.clientId;
         const isOwnByUsername = currentUsername.length > 0 && payload.username.trim().toLowerCase() === currentUsername;
         if (isOwnByClientId || isOwnByUsername) continue;
+        if (!shouldNotifyMessage(payload)) continue;
 
         const compactMessage = payload.message.replace(/\s+/g, " ").trim();
-        new Notification(`${payload.username}: ${compactMessage}`, {
+        const title = isJoinSystemMessage(payload)
+          ? "Neue Anmeldung"
+          : `${payload.username}: ${compactMessage || "Neue Nachricht"}`;
+        new Notification(title, {
+          body: isJoinSystemMessage(payload) ? compactMessage : undefined,
           icon: payload.profilePicture,
         });
       }
@@ -811,7 +864,7 @@ export function ChatApp() {
         });
       } catch (mediaError) {
         if (!options?.silent || append || mediaItemsRef.current.length === 0) {
-          setError(mediaError instanceof Error ? mediaError.message : "Could not load media.");
+          setError(mediaError instanceof Error ? mediaError.message : "Medien konnten nicht geladen werden.");
         }
       } finally {
         if (append) {
@@ -919,7 +972,7 @@ export function ChatApp() {
       },
     ) => {
       if (!session?.clientId || !session.devAuthToken) {
-        setError("Developer mode is not active.");
+        setError("Entwicklermodus ist nicht aktiv.");
         return;
       }
 
@@ -945,7 +998,7 @@ export function ChatApp() {
         await syncChatState();
         requestAnimationFrame(() => scrollToBottom("auto"));
       } catch (actionError) {
-        setError(actionError instanceof Error ? actionError.message : "Admin action failed.");
+        setError(actionError instanceof Error ? actionError.message : "Admin-Aktion fehlgeschlagen.");
       } finally {
         setAdminBusy(false);
       }
@@ -1033,7 +1086,7 @@ export function ChatApp() {
       applyIncomingMessages(page.messages, { notify: false });
       setHasMoreOlder(page.hasMore && messages.length < MAX_VISIBLE_MESSAGES);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Could not load older messages.");
+      setError(loadError instanceof Error ? loadError.message : "Aeltere Nachrichten konnten nicht geladen werden.");
     } finally {
       setLoadingOlder(false);
     }
@@ -1135,7 +1188,7 @@ export function ChatApp() {
         setShowOnboarding(!onboardingDone);
       } catch (loadError) {
         if (cancelled) return;
-        setError(loadError instanceof Error ? loadError.message : "Could not load chat.");
+        setError(loadError instanceof Error ? loadError.message : "Chat konnte nicht geladen werden.");
       }
     }
 
@@ -1204,7 +1257,7 @@ export function ChatApp() {
         await fetchAdminOverview();
       } catch (overviewError) {
         if (!cancelled) {
-          setError(overviewError instanceof Error ? overviewError.message : "Could not load developer tools.");
+          setError(overviewError instanceof Error ? overviewError.message : "Entwicklerwerkzeuge konnten nicht geladen werden.");
         }
       }
     };
@@ -1233,7 +1286,7 @@ export function ChatApp() {
       const parsed = parseEvent<SnapshotDTO>(event as MessageEvent<string>);
       if (!parsed) return;
       applySnapshot(parsed);
-      setError((current) => (current === "Realtime disconnected. Reconnecting…" ? null : current));
+      setError((current) => (current === "Echtzeitverbindung getrennt. Verbinde neu…" ? null : current));
     };
 
     const onPresenceUpdated = (event: Event) => {
@@ -1282,7 +1335,7 @@ export function ChatApp() {
     stream.addEventListener("chat.background.updated", onBackgroundUpdated);
     stream.onerror = () => {
       if (isLeavingRef.current) return;
-      setError((current) => current || "Realtime disconnected. Reconnecting…");
+      setError((current) => current || "Echtzeitverbindung getrennt. Verbinde neu…");
     };
 
     return () => {
@@ -1298,10 +1351,10 @@ export function ChatApp() {
       try {
         await syncChatState();
         if (!cancelled) {
-          setError((current) => (current === "Realtime disconnected. Reconnecting…" ? null : current));
+          setError((current) => (current === "Echtzeitverbindung getrennt. Verbinde neu…" ? null : current));
         }
       } catch {
-        if (!cancelled) setError("State reconciliation failed. Retrying…");
+        if (!cancelled) setError("Status-Abgleich fehlgeschlagen. Neuer Versuch…");
       }
     };
 
@@ -1326,7 +1379,7 @@ export function ChatApp() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ clientId: session.clientId }),
       }).catch(() => {
-        setError("Presence heartbeat failed. Retrying…");
+        setError("Präsenz-Heartbeat fehlgeschlagen. Neuer Versuch…");
       });
     };
 
@@ -1453,6 +1506,23 @@ export function ChatApp() {
     });
   }, []);
 
+  const kickOffAiWorker = useCallback(() => {
+    void fetch("/api/ai/worker", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ maxJobs: 2 }),
+      cache: "no-store",
+      keepalive: true,
+    }).catch(() => {
+      // AI worker trigger is best-effort.
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!session) return;
+    kickOffAiWorker();
+  }, [kickOffAiWorker, session]);
+
   const updatePollOptionValue = useCallback((index: number, value: string) => {
     setPollOptions((current) => {
       const next = current.map((option, optionIndex) => (optionIndex === index ? value : option));
@@ -1478,6 +1548,7 @@ export function ChatApp() {
           .join("\n");
         const combinedMessage = [content, uploadedImageMarkdown].filter(Boolean).join("\n\n");
         if (!combinedMessage) return;
+        const shouldTriggerAiWorker = hasChatGptMention(combinedMessage);
 
         tempMessageId = createTempMessageId();
         appendOptimisticMessage({
@@ -1488,6 +1559,9 @@ export function ChatApp() {
           username: session.username,
           profilePicture: session.profilePicture,
           createdAt: new Date().toISOString(),
+          questionId: replyTarget?.id,
+          oldusername: replyTarget?.username,
+          oldmessage: replyTarget?.message,
         });
         startPendingDelivery(tempMessageId);
 
@@ -1500,10 +1574,15 @@ export function ChatApp() {
           clientId: session.clientId,
           type: "message",
           message: combinedMessage,
+          questionId: replyTarget?.id,
         });
         clearPendingDelivery(tempMessageId);
         removeOptimisticMessage(tempMessageId);
         applyIncomingMessages([created], { notify: false });
+        if (shouldTriggerAiWorker) {
+          kickOffAiWorker();
+        }
+        setReplyTarget(null);
       } else if (composerMode === "question") {
         const content = questionDraft.trim();
         if (!content) return;
@@ -1528,7 +1607,7 @@ export function ChatApp() {
       } else if (composerMode === "challenge") {
         const content = challengeDraft.trim();
         if (!content) return;
-        const challengeMessage = `ChatPPC Challenge: ${content}`;
+        const challengeMessage = `ChatPPC Aufgabe: ${content}`;
 
         tempMessageId = createTempMessageId();
         appendOptimisticMessage({
@@ -1555,15 +1634,15 @@ export function ChatApp() {
         const question = pollQuestion.trim();
         const options = pollOptions.map((option) => option.trim()).filter(Boolean);
         if (!question) {
-          setError("Poll question is required.");
+          setError("Eine Umfragefrage ist erforderlich.");
           return;
         }
         if (options.length < 2) {
-          setError("At least two poll options are required.");
+          setError("Mindestens zwei Umfrageoptionen sind erforderlich.");
           return;
         }
         if (options.length > 15) {
-          setError("Poll supports up to 15 options.");
+          setError("Umfragen unterstützen bis zu 15 Optionen.");
           return;
         }
 
@@ -1615,7 +1694,7 @@ export function ChatApp() {
         clearPendingDelivery(tempMessageId);
         removeOptimisticMessage(tempMessageId);
       }
-      setError(submitError instanceof Error ? submitError.message : "Could not send message.");
+      setError(submitError instanceof Error ? submitError.message : "Nachricht konnte nicht gesendet werden.");
     }
   }, [
     appendOptimisticMessage,
@@ -1630,6 +1709,8 @@ export function ChatApp() {
     pollQuestion,
     questionDraft,
     removeOptimisticMessage,
+    replyTarget,
+    kickOffAiWorker,
     sendMessage,
     session,
     startPendingDelivery,
@@ -1673,7 +1754,7 @@ export function ChatApp() {
         clearPendingDelivery(tempMessageId);
         removeOptimisticMessage(tempMessageId);
         setAnswerDrafts((current) => ({ ...current, [questionMessageId]: draft }));
-        setError(submitError instanceof Error ? submitError.message : "Could not send answer.");
+        setError(submitError instanceof Error ? submitError.message : "Antwort konnte nicht gesendet werden.");
       }
     },
     [
@@ -1728,7 +1809,7 @@ export function ChatApp() {
           setMessages(limitVisibleMessages(rollback));
         }
         optimisticVoteRollbackRef.current = null;
-        setError(voteError instanceof Error ? voteError.message : "Could not register vote.");
+        setError(voteError instanceof Error ? voteError.message : "Stimme konnte nicht gespeichert werden.");
       }
     },
     [applyIncomingMessages, session],
@@ -1737,7 +1818,7 @@ export function ChatApp() {
   const handleDeleteMessage = useCallback(
     async (messageId: string) => {
       if (!isDeveloperMode) return;
-      if (!window.confirm("Delete this message?")) return;
+      if (!window.confirm("Diese Nachricht löschen?")) return;
       await runAdminAction("delete_message", { targetMessageId: messageId });
     },
     [isDeveloperMode, runAdminAction],
@@ -1747,9 +1828,22 @@ export function ChatApp() {
     setAnswerDrafts((current) => ({ ...current, [messageId]: value }));
   }, []);
 
+  const handleStartReply = useCallback((message: MessageDTO) => {
+    setReplyTarget({
+      id: message.id,
+      username: message.username,
+      message: message.message,
+    });
+    setComposerMode("message");
+    setComposerOpen(true);
+    requestAnimationFrame(() => {
+      messageInputRef.current?.focus();
+    });
+  }, []);
+
   const handleOpenLightbox = useCallback((url: string, alt?: string) => {
     window.requestAnimationFrame(() => {
-      setLightbox({ url, alt: alt || "Image preview" });
+      setLightbox({ url, alt: alt || "Bildvorschau" });
     });
   }, []);
 
@@ -1769,16 +1863,16 @@ export function ChatApp() {
           {
             id: `remix-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             url,
-            label: (alt && alt.trim()) || "remix image",
+            label: (alt && alt.trim()) || "Remix-Bild",
           },
         ];
       });
       setMessageDraft((current) => {
-        if (/(^|\s)@chatgpt\b/i.test(current)) {
-          return current.trim() ? current : "@chatgpt remix this image: ";
+        if (hasChatGptMention(current)) {
+          return current.trim() ? current : "@chatgpt remixe dieses Bild: ";
         }
         if (!current.trim()) {
-          return "@chatgpt remix this image: ";
+          return "@chatgpt remixe dieses Bild: ";
         }
         return `@chatgpt ${current}`;
       });
@@ -1841,11 +1935,19 @@ export function ChatApp() {
     }
   }, [lightbox]);
 
+  const copyLightboxImage = useCallback(async () => {
+    if (!lightbox) return;
+    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) return;
+    await navigator.clipboard.writeText(lightbox.url).catch(() => {
+      // Ignore clipboard failures.
+    });
+  }, [lightbox]);
+
   async function saveProfile() {
     const username = usernameDraft.trim();
     const profilePicture = profilePictureDraft.trim() || getDefaultProfilePicture();
     if (username.length < 3) {
-      setError("Username must be at least 3 characters.");
+      setError("Der Benutzername muss mindestens 3 Zeichen lang sein.");
       return;
     }
     await updateUser({ newUsername: username, profilePicture });
@@ -1867,7 +1969,7 @@ export function ChatApp() {
       setProfilePictureDraft(url);
       setProfileCropFile(null);
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Could not upload image.");
+      setError(uploadError instanceof Error ? uploadError.message : "Bild konnte nicht hochgeladen werden.");
     } finally {
       setUploadingProfile(false);
     }
@@ -1878,12 +1980,12 @@ export function ChatApp() {
     setUploadingChat(true);
     try {
       if (!SUPPORTED_CHAT_UPLOAD_MIME_TYPES.has(file.type)) {
-        throw new Error("Only jpg, png, webp, or gif images are supported.");
+        throw new Error("Nur jpg, png, webp oder gif werden unterstützt.");
       }
       const formData = new FormData();
       formData.set("file", file);
       const response = await fetch("/api/uploads/chat", { method: "POST", body: formData });
-      if (!response.ok) throw new Error(await readApiError(response, "Upload failed"));
+      if (!response.ok) throw new Error(await readApiError(response, "Upload fehlgeschlagen"));
       const { url } = (await response.json()) as { url: string };
       setComposerMode("message");
       setComposerOpen(true);
@@ -1892,12 +1994,12 @@ export function ChatApp() {
         {
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           url,
-          label: file.name || "image",
+          label: file.name || "Bild",
         },
       ]);
       setError(null);
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Could not upload image.");
+      setError(uploadError instanceof Error ? uploadError.message : "Bild konnte nicht hochgeladen werden.");
     } finally {
       setUploadingChat(false);
       if (chatUploadRef.current) chatUploadRef.current.value = "";
@@ -1910,32 +2012,31 @@ export function ChatApp() {
 
     const imageFiles = allFiles.filter((file) => SUPPORTED_CHAT_UPLOAD_MIME_TYPES.has(file.type));
     if (imageFiles.length === 0) {
-      setError("Only jpg, png, webp, or gif images are supported.");
+      setError("Nur jpg, png, webp oder gif werden unterstützt.");
       return;
     }
 
     setUploadingChat(true);
     try {
-      const uploadedItems: UploadedDraftImage[] = [];
-      for (const file of imageFiles) {
+      const uploadedItems = await Promise.all(imageFiles.map(async (file) => {
         const formData = new FormData();
         formData.set("file", file);
         const response = await fetch("/api/uploads/chat", { method: "POST", body: formData });
-        if (!response.ok) throw new Error(await readApiError(response, "Upload failed"));
+        if (!response.ok) throw new Error(await readApiError(response, "Upload fehlgeschlagen"));
         const { url } = (await response.json()) as { url: string };
-        uploadedItems.push({
+        return {
           id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
           url,
-          label: file.name || "image",
-        });
-      }
+          label: file.name || "Bild",
+        };
+      }));
 
       setComposerMode("message");
       setComposerOpen(true);
       setUploadedDraftImages((current) => [...current, ...uploadedItems]);
       setError(null);
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Could not upload image.");
+      setError(uploadError instanceof Error ? uploadError.message : "Bild konnte nicht hochgeladen werden.");
     } finally {
       setUploadingChat(false);
     }
@@ -1973,12 +2074,12 @@ export function ChatApp() {
       const formData = new FormData();
       formData.set("file", file);
       const response = await fetch("/api/uploads/chat", { method: "POST", body: formData });
-      if (!response.ok) throw new Error(await readApiError(response, "Upload failed"));
+      if (!response.ok) throw new Error(await readApiError(response, "Upload fehlgeschlagen"));
       const payload = (await response.json()) as UploadResponse;
       await saveChatBackground(payload.url);
       setError(null);
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Could not update chat background.");
+      setError(uploadError instanceof Error ? uploadError.message : "Chat-Hintergrund konnte nicht aktualisiert werden.");
     } finally {
       setUploadingBackground(false);
       if (backgroundUploadRef.current) backgroundUploadRef.current.value = "";
@@ -2022,7 +2123,7 @@ export function ChatApp() {
     await requestNotificationPermission();
   }
 
-  if (!session) return <div className="p-6 text-sm text-slate-500">Loading…</div>;
+  if (!session) return <div className="p-6 text-sm text-slate-500">Wird geladen…</div>;
 
   return (
     <main
@@ -2039,8 +2140,8 @@ export function ChatApp() {
                 profileUploadRef.current?.click();
               }}
               className="rounded-full transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-              title="Change profile picture"
-              aria-label="Change profile picture"
+              title="Profilbild ändern"
+              aria-label="Profilbild ändern"
             >
               <img
                 src={session.profilePicture}
@@ -2053,7 +2154,7 @@ export function ChatApp() {
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold text-slate-900">{session.username}</p>
               <p className={`text-xs font-medium ${isDeveloperMode ? "text-amber-600" : "text-sky-500"}`}>
-                {isDeveloperMode ? "developer mode" : "online"}
+                {isDeveloperMode ? "Entwicklermodus" : "online"}
               </p>
             </div>
           </div>
@@ -2061,7 +2162,7 @@ export function ChatApp() {
             className="mt-3 h-10 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-700"
             onClick={() => setEditingProfile((value) => !value)}
           >
-            {editingProfile ? "Close Profile" : "Edit Profile"}
+            {editingProfile ? "Profil schließen" : "Profil bearbeiten"}
           </button>
           <input
             ref={profileUploadRef}
@@ -2075,18 +2176,18 @@ export function ChatApp() {
               <input
                 value={usernameDraft}
                 onChange={(event) => setUsernameDraft(event.target.value)}
-                placeholder="Username…"
+                placeholder="Benutzername…"
                 className="h-10 w-full rounded-lg border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
               />
               <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-white p-2">
                 <img
                   src={profilePictureDraft || getDefaultProfilePicture()}
-                  alt="Profile preview"
+                  alt="Profilbild-Vorschau"
                   className="h-12 w-12 rounded-full border border-slate-200 object-cover"
                   loading="lazy"
                   decoding="async"
                 />
-                <p className="text-xs text-slate-500">Upload and crop your profile picture before saving.</p>
+                <p className="text-xs text-slate-500">Vor dem Speichern Profilbild hochladen und zuschneiden.</p>
               </div>
               <div className="flex gap-2">
                 <button
@@ -2094,7 +2195,7 @@ export function ChatApp() {
                   onClick={() => profileUploadRef.current?.click()}
                   className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
                 >
-                  {uploadingProfile ? "Uploading…" : "Upload"}
+                  {uploadingProfile ? "Wird hochgeladen…" : "Hochladen"}
                 </button>
                 <button
                   type="button"
@@ -2102,14 +2203,14 @@ export function ChatApp() {
                   className="h-9 rounded-lg bg-slate-900 px-3 text-xs font-semibold text-white disabled:opacity-60"
                   disabled={uploadingProfile}
                 >
-                  Save
+                  Speichern
                 </button>
               </div>
             </div>
           ) : null}
 
           <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Shared Chat Background</p>
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Geteilter Chat-Hintergrund</p>
             <div className="mt-2 flex flex-wrap gap-2">
               <button
                 type="button"
@@ -2117,18 +2218,18 @@ export function ChatApp() {
                 className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
                 disabled={uploadingBackground}
               >
-                {uploadingBackground ? "Uploading…" : "Upload Background"}
+                {uploadingBackground ? "Wird hochgeladen…" : "Hintergrund hochladen"}
               </button>
               <button
                 type="button"
                 onClick={() => {
                   void saveChatBackground(null).catch(() => {
-                    setError("Could not reset chat background.");
+                    setError("Chat-Hintergrund konnte nicht zurückgesetzt werden.");
                   });
                 }}
                 className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
               >
-                Reset
+                Zurücksetzen
               </button>
             </div>
           </div>
@@ -2136,13 +2237,13 @@ export function ChatApp() {
           {isDeveloperMode ? (
             <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3">
               <div className="flex items-center justify-between gap-2">
-                <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Developer Tools</p>
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Entwicklerwerkzeuge</p>
                 <button
                   type="button"
                   onClick={() => setShowAdminPanel((value) => !value)}
                   className="h-7 rounded-lg border border-amber-300 bg-white px-2 text-[11px] font-semibold text-amber-900"
                 >
-                  {showAdminPanel ? "Hide" : "Open"}
+                  {showAdminPanel ? "Ausblenden" : "Öffnen"}
                 </button>
               </div>
 
@@ -2150,16 +2251,16 @@ export function ChatApp() {
                 <div className="mt-2 space-y-2">
                   <div className="grid grid-cols-2 gap-2 text-[11px] text-amber-900">
                     <div className="rounded-lg bg-white px-2 py-1">
-                      Users: <span className="font-semibold">{adminOverview?.usersTotal ?? "-"}</span>
+                      Nutzer: <span className="font-semibold">{adminOverview?.usersTotal ?? "-"}</span>
                     </div>
                     <div className="rounded-lg bg-white px-2 py-1">
                       Online: <span className="font-semibold">{adminOverview?.usersOnline ?? "-"}</span>
                     </div>
                     <div className="rounded-lg bg-white px-2 py-1">
-                      Messages: <span className="font-semibold">{adminOverview?.messagesTotal ?? "-"}</span>
+                      Nachrichten: <span className="font-semibold">{adminOverview?.messagesTotal ?? "-"}</span>
                     </div>
                     <div className="rounded-lg bg-white px-2 py-1">
-                      Blacklist: <span className="font-semibold">{adminOverview?.blacklistTotal ?? "-"}</span>
+                      Sperrliste: <span className="font-semibold">{adminOverview?.blacklistTotal ?? "-"}</span>
                     </div>
                   </div>
 
@@ -2170,51 +2271,51 @@ export function ChatApp() {
                       disabled={adminBusy}
                       className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
                     >
-                      Refresh
+                      Aktualisieren
                     </button>
                     <button
                       type="button"
                       onClick={() => {
-                        if (!window.confirm("Delete all chat messages and polls?")) return;
+                        if (!window.confirm("Alle Chat-Nachrichten und Umfragen löschen?")) return;
                         void runAdminAction("delete_all_messages");
                       }}
                       disabled={adminBusy}
                       className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
                     >
-                      Delete Messages
+                      Nachrichten löschen
                     </button>
                     <button
                       type="button"
                       onClick={() => {
-                        if (!window.confirm("Logout all users except you?")) return;
+                        if (!window.confirm("Alle Nutzer außer dir abmelden?")) return;
                         void runAdminAction("logout_all_users");
                       }}
                       disabled={adminBusy}
                       className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
                     >
-                      Logout Users
+                      Nutzer abmelden
                     </button>
                     <button
                       type="button"
                       onClick={() => {
-                        if (!window.confirm("Clear the username blacklist?")) return;
+                        if (!window.confirm("Sperrliste für Benutzernamen leeren?")) return;
                         void runAdminAction("clear_blacklist");
                       }}
                       disabled={adminBusy}
                       className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
                     >
-                      Clear Blacklist
+                      Sperrliste leeren
                     </button>
                     <button
                       type="button"
                       onClick={() => {
-                        if (!window.confirm("Reset everything? This deletes messages, users, and blacklist.")) return;
+                        if (!window.confirm("Alles zurücksetzen? Nachrichten, Nutzer und Sperrliste werden gelöscht.")) return;
                         void runAdminAction("reset_all");
                       }}
                       disabled={adminBusy}
                       className="h-8 rounded-lg bg-amber-600 px-3 text-[11px] font-semibold text-white disabled:opacity-60"
                     >
-                      Reset All
+                      Alles zurücksetzen
                     </button>
                   </div>
 
@@ -2223,7 +2324,7 @@ export function ChatApp() {
                       <input
                         value={adminTargetUsername}
                         onChange={(event) => setAdminTargetUsername(event.target.value)}
-                        placeholder="Username to delete…"
+                        placeholder="Benutzername zum Löschen…"
                         className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
                       />
                       <button
@@ -2231,13 +2332,13 @@ export function ChatApp() {
                         onClick={() => {
                           const target = adminTargetUsername.trim();
                           if (!target) return;
-                          if (!window.confirm(`Delete user ${target}?`)) return;
+                          if (!window.confirm(`Nutzer ${target} löschen?`)) return;
                           void runAdminAction("delete_user", { targetUsername: target });
                         }}
                         disabled={adminBusy}
                         className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
                       >
-                        Delete User
+                        Nutzer löschen
                       </button>
                     </div>
 
@@ -2245,7 +2346,7 @@ export function ChatApp() {
                       <input
                         value={adminTargetMessageId}
                         onChange={(event) => setAdminTargetMessageId(event.target.value)}
-                        placeholder="Message ID to delete…"
+                        placeholder="Nachrichten-ID zum Löschen…"
                         className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
                       />
                       <button
@@ -2253,13 +2354,13 @@ export function ChatApp() {
                         onClick={() => {
                           const target = adminTargetMessageId.trim();
                           if (!target) return;
-                          if (!window.confirm(`Delete message ${target}?`)) return;
+                          if (!window.confirm(`Nachricht ${target} löschen?`)) return;
                           void runAdminAction("delete_message", { targetMessageId: target });
                         }}
                         disabled={adminBusy}
                         className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
                       >
-                        Delete Message
+                        Nachricht löschen
                       </button>
                     </div>
                   </div>
@@ -2272,7 +2373,7 @@ export function ChatApp() {
 
           {notificationState !== "granted" ? (
             <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Notifications</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Benachrichtigungen</p>
               <p className="mt-1 text-xs text-slate-600">{describeNotificationState(notificationState)}</p>
               <button
                 type="button"
@@ -2288,11 +2389,11 @@ export function ChatApp() {
 	          <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
 	            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">ChatPPC Online</p>
 	            <div className="space-y-2">
-	              <OnlineUsersList users={onlineUsers} avatarSizeClassName="h-11 w-11" />
+              <OnlineUsersList users={onlineUsers} avatarSizeClassName="h-11 w-11" onOpenLightbox={handleOpenLightbox} />
 	            </div>
 	          </div>
           <button onClick={() => void logout()} className="mt-4 h-10 rounded-xl bg-rose-600 text-sm font-semibold text-white">
-            Leave Chat
+            Chat verlassen
           </button>
         </aside>
 
@@ -2327,7 +2428,7 @@ export function ChatApp() {
           {isDraggingUpload ? (
             <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-sky-500/12 backdrop-blur-[1px]">
               <div className="rounded-2xl border-2 border-dashed border-sky-400 bg-white/95 px-6 py-5 text-center shadow-lg">
-                <p className="text-sm font-semibold text-slate-900">Drop image to upload</p>
+                <p className="text-sm font-semibold text-slate-900">Bild zum Hochladen ablegen</p>
                 <p className="mt-1 text-xs text-slate-500">PNG, JPG, WEBP, GIF</p>
               </div>
             </div>
@@ -2341,8 +2442,8 @@ export function ChatApp() {
                   profileUploadRef.current?.click();
                 }}
                 className="rounded-full transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 md:hidden"
-                title="Change profile picture"
-                aria-label="Change profile picture"
+                title="Profilbild ändern"
+                aria-label="Profilbild ändern"
               >
                 <img
                   src={session.profilePicture}
@@ -2361,7 +2462,7 @@ export function ChatApp() {
                     </span>
                   ) : null}
                 </div>
-                <p className="text-xs text-slate-500">Chat with your group. Mention @chatgpt for AI replies.</p>
+                <p className="text-xs text-slate-500">Chatte mit deiner Gruppe. Erwähne @chatgpt für KI-Antworten.</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -2369,13 +2470,13 @@ export function ChatApp() {
                 className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 md:hidden"
                 onClick={() => setMobileSidebarOpen(true)}
               >
-                People
+                Personen
               </button>
               <button
                 className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700"
                 onClick={() => setShowMedia(true)}
               >
-                Media
+                Medien
               </button>
             </div>
           </header>
@@ -2385,7 +2486,7 @@ export function ChatApp() {
             className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 pb-40 sm:p-4 sm:pb-44"
           >
             {loadingOlder ? (
-              <p className="text-center text-xs text-slate-500">Loading older messages…</p>
+              <p className="text-center text-xs text-slate-500">Aeltere Nachrichten werden geladen…</p>
             ) : null}
 
             <MessageList
@@ -2398,6 +2499,7 @@ export function ChatApp() {
               onSubmitAnswer={submitAnswer}
               onVote={handleVote}
               onDeleteMessage={handleDeleteMessage}
+              onStartReply={handleStartReply}
               onOpenLightbox={handleOpenLightbox}
               onRemixImage={handleRemixImage}
             />
@@ -2415,7 +2517,7 @@ export function ChatApp() {
                   scrollToBottom("smooth");
                 }}
               >
-                Jump to latest
+                Zu neuesten springen
               </button>
             </div>
           ) : null}
@@ -2427,46 +2529,49 @@ export function ChatApp() {
               }`}
             >
               <div className="mb-2 flex flex-wrap items-center gap-2">
-                {(["message"] as ComposerMode[]).map((mode) => (
+                {PRIMARY_COMPOSER_MODES.map((mode) => (
                   <button
+                    type="button"
                     key={mode}
                     onClick={() => {
                       setComposerMode(mode);
                       setComposerOpen(true);
                     }}
-                    className={`h-7 rounded-full px-3 text-xs font-semibold capitalize transition ${
+                    className={`h-7 rounded-full px-3 text-xs font-semibold transition ${
                       composerMode === mode
                         ? "bg-slate-900 text-white"
                         : "bg-slate-100 text-slate-700 hover:bg-slate-200"
                     }`}
                   >
-                    {mode}
+                    {COMPOSER_MODE_LABEL[mode]}
                   </button>
                 ))}
                 <button
+                  type="button"
                   onClick={activateAskChatGpt}
                   className={`h-7 rounded-full px-3 text-xs font-semibold transition ${
-                    composerMode === "message" && /(^|\s)@chatgpt\b/i.test(messageDraft)
+                    composerMode === "message" && hasChatGptMention(messageDraft)
                       ? "bg-sky-600 text-white"
                       : "bg-sky-100 text-sky-700 hover:bg-sky-200"
                   }`}
                 >
-                  Ask ChatGPT
+                  ChatGPT fragen
                 </button>
-                {(["question", "poll", "challenge"] as ComposerMode[]).map((mode) => (
+                {SECONDARY_COMPOSER_MODES.map((mode) => (
                   <button
+                    type="button"
                     key={mode}
                     onClick={() => {
                       setComposerMode(mode);
                       setComposerOpen(true);
                     }}
-                    className={`h-7 rounded-full px-3 text-xs font-semibold capitalize transition ${
+                    className={`h-7 rounded-full px-3 text-xs font-semibold transition ${
                       composerMode === mode
                         ? "bg-slate-900 text-white"
                         : "bg-slate-100 text-slate-700 hover:bg-slate-200"
                     }`}
                   >
-                    {mode}
+                    {COMPOSER_MODE_LABEL[mode]}
                   </button>
                 ))}
                 <div className="ml-auto flex items-center gap-2">
@@ -2475,7 +2580,8 @@ export function ChatApp() {
                     onClick={() => chatUploadRef.current?.click()}
                     disabled={uploadingChat}
                     className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-100 text-slate-600 transition hover:bg-slate-200 disabled:opacity-50"
-                    title="Upload image"
+                    title="Bild hochladen"
+                    aria-label="Bild hochladen"
                   >
                     {uploadingChat ? (
                       <div className="h-3 w-3 animate-spin rounded-full border-2 border-slate-400 border-t-transparent" />
@@ -2491,16 +2597,35 @@ export function ChatApp() {
                     onChange={(event) => void onChatImageUpload(event.target.files?.[0])}
                   />
                   <button
+                    type="button"
                     onClick={() => void submitComposer()}
                     className="h-7 rounded-lg bg-slate-900 px-4 text-xs font-semibold text-white transition hover:bg-slate-800"
                   >
-                    Send
+                    Senden
                   </button>
                 </div>
               </div>
 
               {composerMode === "message" ? (
                 <div className="space-y-2">
+                  {replyTarget ? (
+                    <div className="flex items-start justify-between gap-3 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2">
+                      <div className="min-w-0">
+                        <p className="text-[11px] font-semibold uppercase tracking-wide text-sky-700">Antwort auf</p>
+                        <p className="truncate text-xs text-slate-700">
+                          {replyTarget.username}: {replyTarget.message}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setReplyTarget(null)}
+                        className="shrink-0 rounded-lg border border-sky-200 bg-white px-2 py-1 text-[11px] font-semibold text-sky-700"
+                      >
+                        Entfernen
+                      </button>
+                    </div>
+                  ) : null}
+
                   {uploadedDraftImages.length > 0 ? (
                     <div className="flex flex-wrap gap-2">
                       {uploadedDraftImages.map((image) => (
@@ -2594,7 +2719,7 @@ export function ChatApp() {
                         void submitComposer();
                       }
                     }}
-                    placeholder="Type a message…"
+                    placeholder="Nachricht schreiben…"
                     rows={1}
                     className="w-full resize-none rounded-xl border border-slate-200 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
                   />
@@ -2605,6 +2730,7 @@ export function ChatApp() {
                 <div className="absolute bottom-full left-4 mb-2 max-h-40 w-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
                   {filteredMentionUsers.map((user, index) => (
                     <button
+                      type="button"
                       key={user.clientId}
                       onClick={() => {
                         const selectionStart = messageInputRef.current?.selectionStart || 0;
@@ -2644,7 +2770,7 @@ export function ChatApp() {
                       void submitComposer();
                     }
                   }}
-                  placeholder="Ask your class a question…"
+                  placeholder="Stelle deiner Gruppe eine Frage…"
                   className="h-9 w-full rounded-xl border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
                 />
               ) : null}
@@ -2660,7 +2786,7 @@ export function ChatApp() {
                       void submitComposer();
                     }
                   }}
-                  placeholder="Post a class challenge…"
+                  placeholder="Teile eine Aufgabe…"
                   className="h-9 w-full rounded-xl border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-300"
                 />
               ) : null}
@@ -2671,7 +2797,7 @@ export function ChatApp() {
                     value={pollQuestion}
                     onFocus={() => setComposerOpen(true)}
                     onChange={(event) => setPollQuestion(event.target.value)}
-                    placeholder="Poll question…"
+                    placeholder="Umfragefrage…"
                     className="h-9 w-full rounded-xl border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
                   />
                   <div className="grid gap-2 sm:grid-cols-2">
@@ -2693,7 +2819,7 @@ export function ChatApp() {
                       }
                       className="h-7 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
                     >
-                      Remove Option
+                      Option entfernen
                     </button>
                     <label className="ml-2 inline-flex items-center gap-2 text-xs text-slate-600">
                       <input
@@ -2701,10 +2827,10 @@ export function ChatApp() {
                         checked={pollMultiSelect}
                         onChange={(event) => setPollMultiSelect(event.target.checked)}
                       />
-                      Multi select
+                      Mehrfachauswahl
                     </label>
                     <p className="text-xs text-slate-500">
-                      Votes update immediately on click and can always be changed.
+                      Stimmen werden beim Klick sofort aktualisiert und können jederzeit geändert werden.
                     </p>
                   </div>
                 </div>
@@ -2728,21 +2854,21 @@ export function ChatApp() {
           <button
             className="absolute inset-0 bg-slate-900/40"
             onClick={() => setMobileSidebarOpen(false)}
-            aria-label="Close panel"
+            aria-label="Panel schließen"
           />
           <div className="absolute right-0 top-0 h-full w-[90vw] max-w-sm overflow-y-auto bg-white p-4 [overscroll-behavior:contain]">
             <button
               className="mb-3 h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700"
               onClick={() => setMobileSidebarOpen(false)}
             >
-              Close
+              Schließen
             </button>
             <div className="space-y-2">
-              <OnlineUsersList users={onlineUsers} avatarSizeClassName="h-9 w-9" />
+              <OnlineUsersList users={onlineUsers} avatarSizeClassName="h-9 w-9" onOpenLightbox={handleOpenLightbox} />
             </div>
             {notificationState !== "granted" ? (
               <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Notifications</p>
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Benachrichtigungen</p>
                 <p className="mt-1 text-xs text-slate-600">{describeNotificationState(notificationState)}</p>
                 <button
                   type="button"
@@ -2755,7 +2881,7 @@ export function ChatApp() {
               </div>
             ) : null}
             <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 p-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Shared Chat Background</p>
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Geteilter Chat-Hintergrund</p>
               <div className="mt-2 flex flex-wrap gap-2">
                 <button
                   type="button"
@@ -2763,26 +2889,26 @@ export function ChatApp() {
                   className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
                   disabled={uploadingBackground}
                 >
-                  {uploadingBackground ? "Uploading…" : "Upload Background"}
+                  {uploadingBackground ? "Wird hochgeladen…" : "Hintergrund hochladen"}
                 </button>
                 <button
                   type="button"
                   onClick={() => {
                     void saveChatBackground(null).catch(() => {
-                      setError("Could not reset chat background.");
+                      setError("Chat-Hintergrund konnte nicht zurückgesetzt werden.");
                     });
                   }}
                   className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
                 >
-                  Reset
+                  Zurücksetzen
                 </button>
               </div>
             </div>
             {isDeveloperMode ? (
               <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Developer Tools</p>
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Entwicklerwerkzeuge</p>
                 <p className="mt-1 text-[11px] text-amber-900">
-                  Open desktop sidebar to access reset/delete/moderation controls.
+                  Öffne die Desktop-Seitenleiste für Zurücksetzen/Löschen/Moderation.
                 </p>
                 <button
                   type="button"
@@ -2790,7 +2916,7 @@ export function ChatApp() {
                   disabled={adminBusy}
                   className="mt-2 h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
                 >
-                  Refresh Stats
+                  Aktualisieren Stats
                 </button>
               </div>
             ) : null}
@@ -2798,7 +2924,7 @@ export function ChatApp() {
               onClick={() => void logout()}
               className="mt-4 h-10 w-full rounded-xl bg-rose-600 text-sm font-semibold text-white"
             >
-              Leave Chat
+              Chat verlassen
             </button>
           </div>
         </div>
@@ -2830,6 +2956,9 @@ export function ChatApp() {
           <div
             className="relative max-h-[92vh] max-w-[92vw]"
             onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Bildansicht"
           >
             <div className="absolute right-2 top-2 z-10 flex items-center gap-2">
               <button
@@ -2837,21 +2966,28 @@ export function ChatApp() {
                 onClick={() => void shareLightboxImage()}
                 className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
               >
-                Share
+                Teilen
+              </button>
+              <button
+                type="button"
+                onClick={() => void copyLightboxImage()}
+                className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
+              >
+                Kopieren
               </button>
               <button
                 type="button"
                 onClick={downloadLightboxImage}
                 className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
               >
-                Download
+                Herunterladen
               </button>
               <button
                 type="button"
                 onClick={() => setLightbox(null)}
                 className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
               >
-                Close
+                Schließen
               </button>
             </div>
             <img
@@ -2866,24 +3002,30 @@ export function ChatApp() {
 
       {showOnboarding ? (
         <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-900/55 p-4">
-          <div className="w-full max-w-xl rounded-3xl border border-white/70 bg-white p-6 shadow-2xl">
+          <div
+            className="w-full max-w-xl rounded-3xl border border-white/70 bg-white p-6 shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Schnellstart"
+          >
             <p className="inline-flex rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700">
-              Welcome to ChatPPC
+              Willkommen bei ChatPPC
             </p>
-            <h2 className="mt-3 text-2xl font-bold text-slate-900">Quick Start in 30 Seconds</h2>
+            <h2 className="mt-3 text-2xl font-bold text-slate-900">Schnellstart in 30 Sekunden</h2>
             <div className="mt-4 space-y-2 text-sm text-slate-700">
-              <p>1. Post messages, questions, and challenges in the composer.</p>
-              <p>2. Create polls with multiple options and instant vote updates.</p>
-              <p>3. Share images and GIFs with drag-and-drop uploads.</p>
-              <p>4. Mention <span className="font-semibold text-slate-900">@chatgpt</span> when you want AI replies.</p>
+              <p>1. Schreibe Nachrichten, Fragen und Aufgaben im Composer.</p>
+              <p>2. Erstelle Umfragen mit mehreren Optionen und sofortigen Updates.</p>
+              <p>3. Teile Bilder und GIFs per Drag-and-drop.</p>
+              <p>4. Erwähne <span className="font-semibold text-slate-900">@chatgpt</span>, wenn du KI-Antworten möchtest.</p>
             </div>
             <div className="mt-5 rounded-2xl border border-sky-100 bg-sky-50 p-3 text-sm text-sky-900">
-              Next step: enable notifications so you never miss new messages.
+              Nächster Schritt: Benachrichtigungen aktivieren, damit du nichts verpasst.
             </div>
             <div className="mt-5 flex flex-wrap gap-2">
               <button
                 type="button"
                 onClick={() => void enableNotificationsFromOnboarding()}
+                disabled={notificationState === "unsupported"}
                 className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
               >
                 {notificationButtonLabel(notificationState)}
@@ -2893,7 +3035,7 @@ export function ChatApp() {
                 onClick={finishOnboarding}
                 className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
               >
-                Continue for now
+                Jetzt ohne Benachrichtigungen fortfahren
               </button>
             </div>
             <p className="mt-3 text-xs text-slate-500">{describeNotificationState(notificationState)}</p>
@@ -2909,31 +3051,34 @@ export function ChatApp() {
           <div
             className="w-full max-w-5xl rounded-2xl bg-white p-5 shadow-2xl"
             onClick={(event) => event.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-label="Medienansicht"
           >
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>
-                <h2 className="text-lg font-semibold text-slate-900">Media</h2>
+                <h2 className="text-lg font-semibold text-slate-900">Medien</h2>
                 <p className="text-sm text-slate-500">
                   {loadingMedia && mediaItems.length === 0
-                    ? "Loading full media history…"
-                    : `${mediaTotalCount} image${mediaTotalCount === 1 ? "" : "s"} in database`}
+                    ? "Vollständige Medienhistorie wird geladen…"
+                    : `${mediaTotalCount} Bild${mediaTotalCount === 1 ? "" : "er"} in der Datenbank`}
                 </p>
               </div>
               <button
                 className="h-9 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700"
                 onClick={() => setShowMedia(false)}
               >
-                Close
+                Schließen
               </button>
             </div>
 
             {loadingMedia && mediaItems.length === 0 ? (
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
-                Loading media…
+                Medien werden geladen…
               </div>
             ) : mediaItems.length === 0 ? (
               <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
-                No images shared yet.
+                Noch keine Bilder geteilt.
               </div>
             ) : (
               <div ref={mediaScrollRef} className="max-h-[70vh] overflow-y-auto pr-1">
@@ -2942,14 +3087,14 @@ export function ChatApp() {
                     <button
                       key={item.id}
                       type="button"
-                      onClick={() => setLightbox({ url: item.url, alt: `Shared by ${item.username}` })}
+                      onClick={() => setLightbox({ url: item.url, alt: `Geteilt von ${item.username}` })}
                       className="group overflow-hidden rounded-xl border border-slate-200 bg-slate-50 text-left"
-                      title={`Shared by ${item.username}`}
+                      title={`Geteilt von ${item.username}`}
                     >
                       <div className="relative aspect-square w-full bg-slate-100">
                         <img
                           src={item.url}
-                          alt="Shared media"
+                          alt="Geteiltes Medium"
                           className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.03]"
                           loading="lazy"
                           decoding="async"
@@ -2957,7 +3102,7 @@ export function ChatApp() {
                       </div>
                       <div className="px-2 py-1.5">
                         <p className="truncate text-[11px] font-medium text-slate-700">{item.username}</p>
-                        <p className="text-[10px] text-slate-500">{new Date(item.createdAt).toLocaleString()}</p>
+                        <p className="text-[10px] text-slate-500">{new Date(item.createdAt).toLocaleString("de-DE")}</p>
                       </div>
                     </button>
                   ))}
@@ -2965,7 +3110,7 @@ export function ChatApp() {
                 {mediaHasMore || loadingMediaMore ? (
                   <div className="mt-3 flex justify-center">
                     <p className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-600">
-                      {loadingMediaMore ? "Loading more…" : "Scroll to load more automatically"}
+                      {loadingMediaMore ? "Weitere werden geladen…" : "Zum automatischen Nachladen scrollen"}
                     </p>
                   </div>
                 ) : null}

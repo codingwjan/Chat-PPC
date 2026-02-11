@@ -13,7 +13,7 @@ export async function apiJson<TResponse>(
   });
 
   if (!response.ok) {
-    let message = `Request failed (${response.status})`;
+    let message = `Anfrage fehlgeschlagen (${response.status})`;
 
     try {
       const json = (await response.json()) as ApiErrorPayload;

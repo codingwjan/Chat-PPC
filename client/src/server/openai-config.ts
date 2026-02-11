@@ -9,6 +9,7 @@ export interface ChatOpenAiConfig {
   promptId: string;
   promptVersion: string;
   fallbackModel: string;
+  lowLatencyMode: boolean;
   store: boolean;
   includeEncryptedReasoning: boolean;
   includeWebSources: boolean;
@@ -35,6 +36,7 @@ const DEFAULTS = {
   promptId: "pmpt_698b4aee21308196b860d14abc12b51d0f2e06f804bcc0ca",
   promptVersion: "4",
   fallbackModel: "gpt-4o-mini",
+  lowLatencyMode: true,
   store: true,
   includeEncryptedReasoning: true,
   includeWebSources: true,
@@ -98,6 +100,7 @@ export function getChatOpenAiConfig(): ChatOpenAiConfig {
     promptId,
     promptVersion: getEnv("OPENAI_PROMPT_VERSION") ?? DEFAULTS.promptVersion,
     fallbackModel: getEnv("OPENAI_MODEL") ?? DEFAULTS.fallbackModel,
+    lowLatencyMode: parseBoolean("OPENAI_LOW_LATENCY_MODE", DEFAULTS.lowLatencyMode),
     store: parseBoolean("OPENAI_STORE_RESPONSES", DEFAULTS.store),
     includeEncryptedReasoning: parseBoolean(
       "OPENAI_INCLUDE_REASONING_ENCRYPTED",

@@ -29,6 +29,7 @@ const prismaMock = vi.hoisted(() => ({
     count: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
+    updateMany: vi.fn(),
   },
   $queryRaw: vi.fn(),
   $queryRawUnsafe: vi.fn(),
@@ -125,6 +126,7 @@ describe("chat service", () => {
     prismaMock.aiJob.count.mockResolvedValue(0);
     prismaMock.aiJob.create.mockResolvedValue({ id: "job-1" });
     prismaMock.aiJob.update.mockResolvedValue({ id: "job-1" });
+    prismaMock.aiJob.updateMany.mockResolvedValue({ count: 0 });
     prismaMock.$queryRaw.mockResolvedValue([{ locked: true }]);
     prismaMock.$queryRawUnsafe.mockResolvedValue([]);
     openAiCreateMock.mockResolvedValue({ output_text: "", output: [] });
@@ -137,11 +139,11 @@ describe("chat service", () => {
     });
 
     await expect(loginUser({ username: "badname", clientId: "client-1" })).rejects.toThrow(
-      "Username is not allowed",
+      "Dieser Benutzername ist nicht erlaubt",
     );
   });
 
-  it('posts "joined the chat" system message on login', async () => {
+  it('posts "ist dem Chat beigetreten" system message on login', async () => {
     prismaMock.user.findUnique.mockResolvedValueOnce(null);
     prismaMock.user.upsert.mockResolvedValue({
       id: "user-id",
@@ -155,7 +157,7 @@ describe("chat service", () => {
     prismaMock.message.create.mockResolvedValueOnce(
       baseMessage({
         id: "sys-join",
-        content: "tester joined the chat",
+        content: "tester ist dem Chat beigetreten",
         authorName: "System",
       }),
     );
@@ -165,7 +167,7 @@ describe("chat service", () => {
     expect(prismaMock.message.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          content: "tester joined the chat",
+          content: "tester ist dem Chat beigetreten",
           authorName: "System",
         }),
       }),
@@ -224,7 +226,7 @@ describe("chat service", () => {
     });
 
     await expect(loginUser({ username: "tester", clientId: "client-2" })).rejects.toThrow(
-      "Username is already in use",
+      "Dieser Benutzername ist bereits vergeben",
     );
   });
 
@@ -376,7 +378,7 @@ describe("chat service", () => {
     );
   });
 
-  it('posts "old_name is now new_name" system message on rename', async () => {
+  it('posts "old_name heißt jetzt new_name" system message on rename', async () => {
     prismaMock.user.update.mockResolvedValueOnce({
       id: "user-id",
       clientId: "client-1",
@@ -389,7 +391,7 @@ describe("chat service", () => {
     prismaMock.message.create.mockResolvedValueOnce(
       baseMessage({
         id: "sys-rename",
-        content: "tester is now newname",
+        content: "tester heißt jetzt newname",
         authorName: "System",
       }),
     );
@@ -399,7 +401,7 @@ describe("chat service", () => {
     expect(prismaMock.message.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          content: "tester is now newname",
+          content: "tester heißt jetzt newname",
           authorName: "System",
         }),
       }),
@@ -498,6 +500,14 @@ describe("chat service", () => {
       expect(result.processed).toBe(1);
       expect(result.lockSkipped).toBe(false);
       expect(openAiCreateMock).toHaveBeenCalledTimes(1);
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            authorName: "ChatGPT",
+            questionMessageId: "msg-user",
+          }),
+        }),
+      );
       expect(prismaMock.aiJob.update).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { id: "job-1" },
@@ -511,17 +521,17 @@ describe("chat service", () => {
     }
   });
 
-  it("skips processing when AI queue advisory lock is already held", async () => {
+  it("returns without processing when no AI jobs are pending", async () => {
     const previousOpenAiKey = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "test-key";
-
-    prismaMock.$queryRaw.mockResolvedValueOnce([{ locked: false }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([]);
+    prismaMock.aiJob.updateMany.mockResolvedValueOnce({ count: 0 });
 
     try {
       const result = await processAiQueue({ maxJobs: 1 });
       expect(result.processed).toBe(0);
-      expect(result.lockSkipped).toBe(true);
-      expect(prismaMock.$queryRawUnsafe).not.toHaveBeenCalled();
+      expect(result.lockSkipped).toBe(false);
+      expect(prismaMock.$queryRawUnsafe).toHaveBeenCalled();
     } finally {
       process.env.OPENAI_API_KEY = previousOpenAiKey;
     }
@@ -544,6 +554,49 @@ describe("chat service", () => {
     } finally {
       process.env.OPENAI_API_KEY = previousOpenAiKey;
     }
+  });
+
+  it("creates message replies with questionId linkage", async () => {
+    prismaMock.message.findUnique.mockResolvedValueOnce(
+      baseMessage({
+        id: "parent-1",
+        type: MessageType.MESSAGE,
+        content: "Original prompt",
+        authorName: "alice",
+      }),
+    );
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({
+        id: "reply-1",
+        type: MessageType.MESSAGE,
+        content: "Meine Antwort",
+        questionMessageId: "parent-1",
+        questionMessage: baseMessage({
+          id: "parent-1",
+          type: MessageType.MESSAGE,
+          content: "Original prompt",
+          authorName: "alice",
+        }),
+      }),
+    );
+
+    const created = await createMessage({
+      clientId: "client-1",
+      type: "message",
+      message: "Meine Antwort",
+      questionId: "parent-1",
+    });
+
+    expect(prismaMock.message.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          questionMessageId: "parent-1",
+        }),
+      }),
+    );
+    expect(created.questionId).toBe("parent-1");
+    expect(created.oldusername).toBe("alice");
+    expect(created.oldmessage).toBe("Original prompt");
   });
 
   it("retries OpenAI once with reduced context when context window is exceeded", async () => {
@@ -634,7 +687,7 @@ describe("chat service", () => {
     expect(prismaMock.pollChoiceVote.deleteMany).toHaveBeenCalled();
   });
 
-  it('emits "left the chat" when stale users are cleaned', async () => {
+  it('emits "hat den Chat verlassen" when stale users are cleaned', async () => {
     prismaMock.user.update.mockResolvedValue({
       id: "user-id",
       clientId: "client-1",
@@ -657,7 +710,7 @@ describe("chat service", () => {
     ]);
     prismaMock.user.updateMany.mockResolvedValueOnce({ count: 1 });
     prismaMock.message.create.mockResolvedValueOnce(
-      baseMessage({ id: "sys-left", content: "alice left the chat", authorName: "System" }),
+      baseMessage({ id: "sys-left", content: "alice hat den Chat verlassen", authorName: "System" }),
     );
 
     await pingPresence({ clientId: "client-1" });
@@ -665,7 +718,7 @@ describe("chat service", () => {
     expect(prismaMock.message.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          content: "alice left the chat",
+          content: "alice hat den Chat verlassen",
           authorName: "System",
         }),
       }),
@@ -693,7 +746,7 @@ describe("chat service", () => {
     });
     prismaMock.user.delete.mockRejectedValueOnce(new Error("foreign key constraint"));
     prismaMock.message.create.mockResolvedValueOnce(
-      baseMessage({ id: "sys-left-explicit", content: "tester left the chat", authorName: "System" }),
+      baseMessage({ id: "sys-left-explicit", content: "tester hat den Chat verlassen", authorName: "System" }),
     );
 
     const result = await markUserOffline({ clientId: "client-1" });
@@ -708,7 +761,7 @@ describe("chat service", () => {
     expect(prismaMock.message.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          content: "tester left the chat",
+          content: "tester hat den Chat verlassen",
           authorName: "System",
         }),
       }),

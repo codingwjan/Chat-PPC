@@ -28,7 +28,7 @@ function isAuthorized(request: Request): boolean {
 export async function GET(request: Request): Promise<NextResponse> {
   try {
     if (!isAuthorized(request)) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json({ error: "Nicht autorisiert" }, { status: 401 });
     }
 
     const { searchParams } = new URL(request.url);
@@ -45,7 +45,7 @@ export async function GET(request: Request): Promise<NextResponse> {
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     if (!isAuthorized(request)) {
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      return NextResponse.json({ error: "Nicht autorisiert" }, { status: 401 });
     }
 
     const payload = (await request.json().catch(() => null)) as { maxJobs?: number } | null;

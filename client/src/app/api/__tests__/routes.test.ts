@@ -184,7 +184,7 @@ describe("api routes", () => {
   it("runs admin action for developer mode", async () => {
     serviceMock.runAdminAction.mockResolvedValue({
       ok: true,
-      message: "Everything was reset.",
+      message: "Alles wurde zurückgesetzt.",
       overview: {
         usersTotal: 1,
         usersOnline: 1,

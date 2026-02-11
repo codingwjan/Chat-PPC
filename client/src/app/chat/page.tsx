@@ -6,7 +6,7 @@ const ChatApp = dynamic(() => import("../../components/chat-app").then((module) 
   ssr: false,
   loading: () => (
     <div className="min-h-screen bg-slate-50 p-8 text-sm text-slate-500">
-      Loading session…
+      Sitzung wird geladen…
     </div>
   ),
 });

@@ -4,7 +4,7 @@ import "./globals.css";
 
 const APP_NAME = "Chat-PPC";
 const APP_DESCRIPTION =
-  "Real-time community chat with polls, threaded conversations, and AI-assisted replies.";
+  "Echtzeit-Gruppenchat mit Umfragen, Threads und KI-gestützten Antworten.";
 
 function resolveMetadataBase() {
   const raw =
@@ -32,10 +32,10 @@ export const metadata: Metadata = {
   description: APP_DESCRIPTION,
   keywords: [
     "chat",
-    "community",
-    "real-time messaging",
-    "polls",
-    "AI chat",
+    "gruppenchat",
+    "echtzeit nachrichten",
+    "umfragen",
+    "ki chat",
     "Chat-PPC",
   ],
   applicationName: APP_NAME,
@@ -70,7 +70,7 @@ export const metadata: Metadata = {
         url: "/social-image.png",
         width: 1200,
         height: 630,
-        alt: `${APP_NAME} social preview`,
+        alt: `${APP_NAME} Vorschau`,
       },
     ],
   },
@@ -88,7 +88,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="de">
       <body className="antialiased">
         {children}
         <Analytics />

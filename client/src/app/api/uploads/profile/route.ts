@@ -34,25 +34,25 @@ export async function POST(request: Request): Promise<NextResponse> {
     const file = formData.get("file");
 
     if (!(file instanceof File)) {
-      throw new AppError("Image file is required", 400);
+      throw new AppError("Eine Bilddatei ist erforderlich", 400);
     }
 
     if (!ALLOWED_MIME_TYPES.has(file.type)) {
-      throw new AppError("Only jpg, png, webp, or gif images are supported", 400);
+      throw new AppError("Nur jpg, png, webp oder gif werden unterstützt", 400);
     }
 
     if (file.size > MAX_FILE_SIZE_BYTES) {
-      throw new AppError("Image must be 6MB or smaller", 400);
+      throw new AppError("Das Bild darf maximal 6 MB groß sein", 400);
     }
 
     if (!blobToken) {
       if (!shouldAllowInlineUploads()) {
-        throw new AppError("Blob storage is not configured on this deployment.", 503);
+        throw new AppError("Blob-Speicher ist in dieser Bereitstellung nicht konfiguriert.", 503);
       }
 
       if (file.size > MAX_INLINE_DATA_URL_BYTES) {
         throw new AppError(
-          "Blob storage is not configured. Upload an image up to 6MB or set BLOB_READ_WRITE_TOKEN.",
+          "Blob-Speicher ist nicht konfiguriert. Lade ein Bild bis 6 MB hoch oder setze BLOB_READ_WRITE_TOKEN.",
           400,
         );
       }

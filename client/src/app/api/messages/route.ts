@@ -28,7 +28,7 @@ export async function GET(request: Request): Promise<NextResponse> {
     const before = parseDate(searchParams.get("before"));
     const after = parseDate(searchParams.get("after"));
     if (before && after) {
-      throw new AppError("Use either before or after, not both", 400);
+      throw new AppError("Verwende entweder before oder after, nicht beides", 400);
     }
 
     const messages = await getMessages({ limit, before, after });
