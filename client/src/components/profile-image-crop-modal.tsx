@@ -101,7 +101,7 @@ export function ProfileImageCropModal({
       if (cancelled) return;
       const result = typeof reader.result === "string" ? reader.result : "";
       if (!result) {
-        setError("Could not read selected image.");
+        setError("Das ausgewählte Bild konnte nicht gelesen werden.");
         setImageLoading(false);
         return;
       }
@@ -110,7 +110,7 @@ export function ProfileImageCropModal({
 
     reader.onerror = () => {
       if (cancelled) return;
-      setError("Could not load selected image.");
+      setError("Das ausgewählte Bild konnte nicht geladen werden.");
       setImageLoading(false);
     };
 
@@ -218,13 +218,13 @@ export function ProfileImageCropModal({
 
   async function confirmCrop() {
     if (!imageElement) {
-      setError("Image not ready yet.");
+      setError("Das Bild ist noch nicht bereit.");
       return;
     }
 
     const canvas = canvasRef.current;
     if (!canvas) {
-      setError("Cropper is not ready.");
+      setError("Der Zuschnitt ist noch nicht bereit.");
       return;
     }
 
@@ -242,7 +242,7 @@ export function ProfileImageCropModal({
 
     const context = canvas.getContext("2d");
     if (!context) {
-      setError("Canvas context is unavailable.");
+      setError("Canvas-Kontext ist nicht verfügbar.");
       return;
     }
 
@@ -264,7 +264,7 @@ export function ProfileImageCropModal({
     });
 
     if (!blob) {
-      setError("Could not create cropped image.");
+      setError("Das zugeschnittene Bild konnte nicht erstellt werden.");
       return;
     }
 
@@ -274,7 +274,7 @@ export function ProfileImageCropModal({
     try {
       await onConfirm(croppedFile);
     } catch (confirmError) {
-      setError(confirmError instanceof Error ? confirmError.message : "Could not upload cropped image.");
+      setError(confirmError instanceof Error ? confirmError.message : "Das zugeschnittene Bild konnte nicht hochgeladen werden.");
     }
   }
 
@@ -283,10 +283,13 @@ export function ProfileImageCropModal({
       <div
         className="w-full max-w-xl rounded-3xl border border-white/70 bg-white p-5 shadow-2xl"
         onClick={(event) => event.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Profilbild zuschneiden"
       >
         <div className="mb-4">
-          <h3 className="text-lg font-bold text-slate-900">Crop Profile Picture</h3>
-          <p className="text-sm text-slate-500">Drag to move. Use two fingers to zoom. Then upload.</p>
+          <h3 className="text-lg font-bold text-slate-900">Profilbild zuschneiden</h3>
+          <p className="text-sm text-slate-500">Zum Verschieben ziehen, mit zwei Fingern zoomen, dann hochladen.</p>
         </div>
 
         <div className="mx-auto w-[300px]">
@@ -304,7 +307,7 @@ export function ProfileImageCropModal({
             {imageSrc ? (
               <img
                 src={imageSrc}
-                alt="Crop preview"
+                alt="Zuschnitt-Vorschau"
                 className="absolute max-w-none select-none"
                 draggable={false}
                 style={{
@@ -318,7 +321,7 @@ export function ProfileImageCropModal({
                   setImageLoading(false);
                 }}
                 onError={() => {
-                  setError("Selected image format could not be rendered in the cropper.");
+                  setError("Das Bildformat kann im Zuschnitt nicht dargestellt werden.");
                   setImageLoading(false);
                 }}
               />
@@ -354,7 +357,7 @@ export function ProfileImageCropModal({
           </label>
 
           <label className="block text-xs font-medium text-slate-600">
-            Vertical
+            Vertikal
             <input
               type="range"
               min={-1}
@@ -380,7 +383,7 @@ export function ProfileImageCropModal({
             className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700"
             disabled={busy}
           >
-            Cancel
+            Abbrechen
           </button>
           <button
             type="button"
@@ -388,7 +391,7 @@ export function ProfileImageCropModal({
             className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white disabled:opacity-60"
             disabled={busy}
           >
-            {busy ? "Uploading…" : "Crop & Upload"}
+            {busy ? "Wird hochgeladen…" : "Zuschneiden & hochladen"}
           </button>
         </div>
       </div>

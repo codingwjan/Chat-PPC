@@ -8,27 +8,33 @@ export default function HomePage() {
 
       <section className="relative z-10 w-full max-w-3xl rounded-3xl border border-white/70 bg-white/80 p-8 shadow-2xl backdrop-blur sm:p-12">
         <p className="inline-flex rounded-full bg-slate-900 px-3 py-1 text-xs font-semibold tracking-wide text-white">
-          2026 ChatPPC
+          ChatPPC 2026
         </p>
         <h1 className="mt-4 text-4xl font-bold leading-tight text-slate-900 text-balance sm:text-5xl">
-          ChatPPC for Real-Time Group Chat
+          Der Gruppenchat für schnelle Abstimmungen und Antworten
         </h1>
         <p className="mt-4 max-w-2xl text-sm text-slate-600 sm:text-base">
-          ChatPPC combines realtime chat, `@chatgpt` help, polls (up to 15 options), questions, and
-          challenge posts in one fast app.
+          ChatPPC vereint Echtzeit-Chat, Hilfe mit <span className="font-semibold">@chatgpt</span>, Fragen,
+          Umfragen mit bis zu 15 Optionen und Bildfreigaben in einer App.
         </p>
+        <div className="mt-4 flex flex-wrap gap-2 text-xs font-medium text-slate-600">
+          <span className="rounded-full bg-slate-100 px-3 py-1">Echtzeit</span>
+          <span className="rounded-full bg-slate-100 px-3 py-1">Umfragen</span>
+          <span className="rounded-full bg-slate-100 px-3 py-1">KI-Unterstützung</span>
+          <span className="rounded-full bg-slate-100 px-3 py-1">Bilder & GIFs</span>
+        </div>
         <div className="mt-8 flex flex-wrap items-center gap-3">
           <Link
             href="/login"
             className="inline-flex h-11 items-center rounded-xl bg-slate-900 px-5 text-sm font-semibold text-white transition hover:bg-slate-700"
           >
-            Start Chatting
+            Jetzt einloggen
           </Link>
           <Link
             href="/chat"
             className="inline-flex h-11 items-center rounded-xl border border-slate-200 bg-white px-5 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
           >
-            Rejoin Session
+            Zur Sitzung
           </Link>
         </div>
       </section>

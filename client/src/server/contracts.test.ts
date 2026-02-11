@@ -5,6 +5,7 @@ import {
   parseCreateMessageRequest,
   parseLoginRequest,
   parseRenameUserRequest,
+  parseUpdateChatBackgroundRequest,
   parseVotePollRequest,
 } from "@/server/contracts";
 
@@ -19,13 +20,23 @@ describe("contracts", () => {
     expect(parsed.clientId).toBe("client-123");
   });
 
+  it("parses login request with app-relative profile picture", () => {
+    const parsed = parseLoginRequest({
+      username: "cancelcloud",
+      clientId: "client-123",
+      profilePicture: "/default-avatar.svg",
+    });
+
+    expect(parsed.profilePicture).toBe("/default-avatar.svg");
+  });
+
   it("rejects too short usernames", () => {
     expect(() =>
       parseLoginRequest({
         username: "ab",
         clientId: "c-1",
       }),
-    ).toThrow("username must be at least 3 characters");
+    ).toThrow("username muss mindestens 3 Zeichen lang sein");
   });
 
   it("parses valid rename request", () => {
@@ -47,12 +58,40 @@ describe("contracts", () => {
     expect(parsed.newUsername).toBeUndefined();
   });
 
+  it("parses profile-picture-only rename payload with app-relative path", () => {
+    const parsed = parseRenameUserRequest({
+      clientId: "client-123",
+      profilePicture: "/default-avatar.svg",
+    });
+
+    expect(parsed.profilePicture).toBe("/default-avatar.svg");
+    expect(parsed.newUsername).toBeUndefined();
+  });
+
   it("rejects rename payload without username or profile picture", () => {
     expect(() =>
       parseRenameUserRequest({
         clientId: "client-123",
       }),
-    ).toThrow("Either newUsername or profilePicture is required");
+    ).toThrow("Entweder newUsername oder profilePicture ist erforderlich");
+  });
+
+  it("rejects data URLs for profilePicture updates", () => {
+    expect(() =>
+      parseRenameUserRequest({
+        clientId: "client-123",
+        profilePicture: "data:image/png;base64,abcd",
+      }),
+    ).toThrow("profilePicture darf keine data-URL sein");
+  });
+
+  it("rejects data URLs for chat background updates", () => {
+    expect(() =>
+      parseUpdateChatBackgroundRequest({
+        clientId: "client-123",
+        url: "data:image/png;base64,abcd",
+      }),
+    ).toThrow("url darf keine data-URL sein");
   });
 
   it("requires questionId for answers", () => {
@@ -62,7 +101,7 @@ describe("contracts", () => {
         type: "answer",
         message: "Hello",
       }),
-    ).toThrow("questionId is required for answer");
+    ).toThrow("questionId ist für Antworten erforderlich");
   });
 
   it("parses vote request", () => {
@@ -91,6 +130,6 @@ describe("contracts", () => {
         devAuthToken: "dev-token",
         action: "delete_user",
       }),
-    ).toThrow("targetUsername is required for delete_user");
+    ).toThrow("targetUsername ist für delete_user erforderlich");
   });
 });

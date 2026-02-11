@@ -14,14 +14,49 @@ import { AppError } from "@/server/errors";
 
 const text = (field: string) =>
   z
-    .string({ error: `${field} is required` })
+    .string({ error: `${field} ist erforderlich` })
     .trim()
-    .min(1, `${field} is required`);
+    .min(1, `${field} ist erforderlich`);
+
+function isAbsoluteUrl(value: string): boolean {
+  try {
+    new URL(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isAppRelativePath(value: string): boolean {
+  return value.startsWith("/") && !value.startsWith("//");
+}
+
+function profilePictureUrl(field: string) {
+  return z
+    .string()
+    .trim()
+    .refine((value) => !value.toLowerCase().startsWith("data:"), {
+      message: `${field} darf keine data-URL sein`,
+    })
+    .refine((value) => isAbsoluteUrl(value) || isAppRelativePath(value), {
+      message: `${field} muss eine gültige URL sein`,
+    });
+}
+
+function externalUrl(field: string) {
+  return z
+    .string()
+    .trim()
+    .url(`${field} muss eine gültige URL sein`)
+    .refine((value) => !value.toLowerCase().startsWith("data:"), {
+      message: `${field} darf keine data-URL sein`,
+    });
+}
 
 const loginSchema = z.object({
-  username: text("username").min(3, "username must be at least 3 characters"),
+  username: text("username").min(3, "username muss mindestens 3 Zeichen lang sein"),
   clientId: text("clientId"),
-  profilePicture: z.string().url().optional(),
+  profilePicture: profilePictureUrl("profilePicture").optional(),
 });
 
 const renameSchema = z.object({
@@ -29,14 +64,14 @@ const renameSchema = z.object({
   newUsername: z
     .string()
     .trim()
-    .min(3, "newUsername must be at least 3 characters")
+    .min(3, "newUsername muss mindestens 3 Zeichen lang sein")
     .optional(),
-  profilePicture: z.string().url("profilePicture must be a valid URL").optional(),
+  profilePicture: profilePictureUrl("profilePicture").optional(),
 }).superRefine((value, ctx) => {
   if (!value.newUsername && !value.profilePicture) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "Either newUsername or profilePicture is required",
+      message: "Entweder newUsername oder profilePicture ist erforderlich",
       path: ["newUsername"],
     });
   }
@@ -54,7 +89,7 @@ const typingSchema = z.object({
 const chatBackgroundSchema = z.object({
   clientId: text("clientId"),
   url: z
-    .union([z.string().trim().url("url must be a valid URL"), z.literal(""), z.null()])
+    .union([externalUrl("url"), z.literal(""), z.null()])
     .optional(),
 });
 
@@ -74,7 +109,7 @@ const createMessageSchema = z
     if (!value.message) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "message is required",
+        message: "message ist erforderlich",
         path: ["message"],
       });
     }
@@ -85,7 +120,7 @@ const createMessageSchema = z
       if (options.length > 15) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "pollOptions supports a maximum of 15 options",
+          message: "pollOptions unterstützt maximal 15 Optionen",
           path: ["pollOptions"],
         });
       }
@@ -93,7 +128,7 @@ const createMessageSchema = z
       if (options.length < 2 && !value.optionOne) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "At least two poll options are required",
+          message: "Mindestens zwei Umfrageoptionen sind erforderlich",
           path: ["optionOne"],
         });
       }
@@ -101,7 +136,7 @@ const createMessageSchema = z
       if (options.length < 2 && !value.optionTwo) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "At least two poll options are required",
+          message: "Mindestens zwei Umfrageoptionen sind erforderlich",
           path: ["optionTwo"],
         });
       }
@@ -110,7 +145,7 @@ const createMessageSchema = z
     if (value.type === "answer" && !value.questionId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "questionId is required for answer",
+        message: "questionId ist für Antworten erforderlich",
         path: ["questionId"],
       });
     }
@@ -125,7 +160,7 @@ const votePollSchema = z.object({
   if (!value.side && (!value.optionIds || value.optionIds.length === 0)) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "Either side or optionIds is required",
+      message: "Entweder side oder optionIds ist erforderlich",
       path: ["optionIds"],
     });
   }
@@ -153,7 +188,7 @@ const adminActionSchema = adminOverviewSchema
     if (value.action === "delete_user" && !value.targetUsername) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "targetUsername is required for delete_user",
+        message: "targetUsername ist für delete_user erforderlich",
         path: ["targetUsername"],
       });
     }
@@ -161,7 +196,7 @@ const adminActionSchema = adminOverviewSchema
     if (value.action === "delete_message" && !value.targetMessageId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "targetMessageId is required for delete_message",
+        message: "targetMessageId ist für delete_message erforderlich",
         path: ["targetMessageId"],
       });
     }
@@ -170,7 +205,7 @@ const adminActionSchema = adminOverviewSchema
 function parseOrThrow<T>(schema: z.ZodType<T>, payload: unknown): T {
   const parsed = schema.safeParse(payload);
   if (!parsed.success) {
-    throw new AppError(parsed.error.issues[0]?.message ?? "Invalid request", 400);
+    throw new AppError(parsed.error.issues[0]?.message ?? "Ungültige Anfrage", 400);
   }
 
   return parsed.data;

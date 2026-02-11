@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { apiJson } from "@/lib/http";
@@ -12,11 +12,7 @@ interface UploadResponse {
   url: string;
 }
 
-const USERNAME_PLACEHOLDERS = [
-  "Lorenz A3",
-  "Jonnys Brotdose",
-  "Hilpischs 10-Finger Kurs",
-];
+const USERNAME_PLACEHOLDER = "Dein Benutzername";
 
 function createClientId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -37,7 +33,7 @@ async function uploadProfileImage(file: File): Promise<string> {
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error || "Upload failed");
+    throw new Error(payload?.error || "Upload fehlgeschlagen");
   }
 
   const payload = (await response.json()) as UploadResponse;
@@ -48,30 +44,20 @@ export function LoginForm() {
   const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [username, setUsername] = useState("");
   const [profilePicture, setProfilePicture] = useState("");
   const [cropFile, setCropFile] = useState<File | null>(null);
-  const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      setPlaceholderIndex((current) => (current + 1) % USERNAME_PLACEHOLDERS.length);
-    }, 3_000);
-
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, []);
-
-  async function onSubmit(event: FormEvent) {
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    const trimmed = username.trim();
+    const formData = new FormData(event.currentTarget);
+    const submittedUsername = formData.get("username");
+    const trimmed = typeof submittedUsername === "string" ? submittedUsername.trim() : "";
     if (trimmed.length < 3) {
-      setError("Username must be at least 3 characters.");
+      setError("Der Benutzername muss mindestens 3 Zeichen lang sein.");
       return;
     }
 
@@ -100,7 +86,7 @@ export function LoginForm() {
 
       router.push("/chat");
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Login failed");
+      setError(submitError instanceof Error ? submitError.message : "Anmeldung fehlgeschlagen");
     } finally {
       setLoading(false);
     }
@@ -124,10 +110,17 @@ export function LoginForm() {
       setProfilePicture(url);
       setCropFile(null);
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Upload failed");
+      setError(uploadError instanceof Error ? uploadError.message : "Upload fehlgeschlagen");
     } finally {
       setUploading(false);
     }
+  }
+
+  function onUsernameKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    if (loading || uploading) return;
+    event.currentTarget.form?.requestSubmit();
   }
 
   return (
@@ -138,31 +131,32 @@ export function LoginForm() {
             <p className="mb-3 inline-flex rounded-full bg-white/10 px-3 py-1 text-xs font-semibold tracking-wide">
               ChatPPC
             </p>
-            <h1 className="text-3xl font-bold leading-tight">Jump into your group chat in seconds.</h1>
+            <h1 className="text-3xl font-bold leading-tight">In wenigen Sekunden im Gruppenchat.</h1>
             <p className="mt-4 text-sm text-slate-200">
-              Fast realtime chat, polls, questions, and fun social vibes built for small groups.
+              Schneller Echtzeit-Chat mit Umfragen, Fragen und Bildfreigaben für kleine Teams und Klassen.
             </p>
             <div className="mt-8 rounded-2xl border border-white/15 bg-white/5 p-4 text-xs text-slate-200">
-              Tip: Upload an avatar and crop it before joining.
+              Tipp: Lade vor dem Beitritt ein Profilbild hoch und schneide es direkt zu.
             </div>
           </div>
 
           <div className="p-6 sm:p-8 md:p-10">
-            <h2 className="text-2xl font-bold text-slate-900 text-balance">Sign in</h2>
-            <p className="mt-1 text-sm text-slate-500">Pick a name and start chatting.</p>
+            <h2 className="text-2xl font-bold text-slate-900 text-balance">Anmelden</h2>
+            <p className="mt-1 text-sm text-slate-500">Wähle einen Namen und starte den Chat.</p>
 
             <form className="mt-6 space-y-4" onSubmit={onSubmit}>
               <label className="block text-sm font-medium text-slate-700">
-                Username
+                Benutzername
                 <input
                   className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm transition focus:border-sky-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
                   type="text"
-                  placeholder={USERNAME_PLACEHOLDERS[placeholderIndex]}
+                  placeholder={USERNAME_PLACEHOLDER}
                   name="username"
                   autoComplete="username"
                   spellCheck={false}
-                  value={username}
-                  onChange={(event) => setUsername(event.target.value)}
+                  minLength={3}
+                  required
+                  onKeyDown={onUsernameKeyDown}
                 />
               </label>
               <div className="flex items-center gap-3">
@@ -172,7 +166,7 @@ export function LoginForm() {
                   onClick={() => fileInputRef.current?.click()}
                   disabled={uploading}
                 >
-                  {uploading ? "Uploading…" : "Upload Image"}
+                  {uploading ? "Wird hochgeladen…" : "Bild hochladen"}
                 </button>
                 <input
                   ref={fileInputRef}
@@ -181,19 +175,19 @@ export function LoginForm() {
                   accept="image/png,image/jpeg,image/webp,image/gif"
                   onChange={(event) => void onUploadChange(event.target.files?.[0])}
                 />
-                <div className="text-xs text-slate-500">Max 6MB</div>
+                <div className="text-xs text-slate-500">Max. 6 MB</div>
               </div>
 
               <div className="flex items-center gap-3">
                 <img
                   src={profilePicture || getDefaultProfilePicture()}
-                  alt="Avatar preview"
+                  alt="Vorschau Profilbild"
                   className="h-12 w-12 rounded-full border border-slate-200 object-cover"
                   width={48}
                   height={48}
                   loading="lazy"
                 />
-                <p className="text-xs text-slate-500">Avatar preview</p>
+                <p className="text-xs text-slate-500">Profilbild-Vorschau</p>
               </div>
 
               {error ? (
@@ -207,7 +201,7 @@ export function LoginForm() {
                 type="submit"
                 disabled={loading || uploading}
               >
-                {loading ? "Joining…" : "Enter Chat"}
+                {loading ? "Beitritt läuft…" : "Chat betreten"}
               </button>
             </form>
           </div>

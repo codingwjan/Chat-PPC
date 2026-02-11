@@ -184,7 +184,7 @@ describe("api routes", () => {
   it("runs admin action for developer mode", async () => {
     serviceMock.runAdminAction.mockResolvedValue({
       ok: true,
-      message: "Everything was reset.",
+      message: "Alles wurde zurückgesetzt.",
       overview: {
         usersTotal: 1,
         usersOnline: 1,
@@ -231,5 +231,69 @@ describe("api routes", () => {
     expect(response.status).toBe(200);
     const payload = await response.json();
     expect(payload.items[0]?.url).toBe("https://example.com/image.jpg");
+  });
+
+  it("returns 503 for profile upload without blob token", async () => {
+    const prevBlob = process.env.BLOB_READ_WRITE_TOKEN;
+    const prevBlobAlias = process.env.BLOB;
+    const prevInline = process.env.ALLOW_INLINE_UPLOADS;
+    delete process.env.BLOB_READ_WRITE_TOKEN;
+    delete process.env.BLOB;
+    delete process.env.ALLOW_INLINE_UPLOADS;
+
+    try {
+      const { POST } = await import("@/app/api/uploads/profile/route");
+      const formData = new FormData();
+      formData.set("file", new File([new Uint8Array([1, 2, 3])], "avatar.png", { type: "image/png" }));
+
+      const response = await POST(
+        new Request("http://localhost/api/uploads/profile", {
+          method: "POST",
+          body: formData,
+        }),
+      );
+
+      expect(response.status).toBe(503);
+    } finally {
+      if (prevBlob) process.env.BLOB_READ_WRITE_TOKEN = prevBlob;
+      else delete process.env.BLOB_READ_WRITE_TOKEN;
+      if (prevBlobAlias) process.env.BLOB = prevBlobAlias;
+      else delete process.env.BLOB;
+
+      if (prevInline) process.env.ALLOW_INLINE_UPLOADS = prevInline;
+      else delete process.env.ALLOW_INLINE_UPLOADS;
+    }
+  });
+
+  it("returns 503 for chat upload without blob token", async () => {
+    const prevBlob = process.env.BLOB_READ_WRITE_TOKEN;
+    const prevBlobAlias = process.env.BLOB;
+    const prevInline = process.env.ALLOW_INLINE_UPLOADS;
+    delete process.env.BLOB_READ_WRITE_TOKEN;
+    delete process.env.BLOB;
+    delete process.env.ALLOW_INLINE_UPLOADS;
+
+    try {
+      const { POST } = await import("@/app/api/uploads/chat/route");
+      const formData = new FormData();
+      formData.set("file", new File([new Uint8Array([1, 2, 3])], "chat.png", { type: "image/png" }));
+
+      const response = await POST(
+        new Request("http://localhost/api/uploads/chat", {
+          method: "POST",
+          body: formData,
+        }),
+      );
+
+      expect(response.status).toBe(503);
+    } finally {
+      if (prevBlob) process.env.BLOB_READ_WRITE_TOKEN = prevBlob;
+      else delete process.env.BLOB_READ_WRITE_TOKEN;
+      if (prevBlobAlias) process.env.BLOB = prevBlobAlias;
+      else delete process.env.BLOB;
+
+      if (prevInline) process.env.ALLOW_INLINE_UPLOADS = prevInline;
+      else delete process.env.ALLOW_INLINE_UPLOADS;
+    }
   });
 });
