@@ -1,0 +1,115 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum MessageType {
+  MESSAGE
+  VOTING_POLL
+  QUESTION
+  ANSWER
+}
+
+enum VoteSide {
+  LEFT
+  RIGHT
+}
+
+model User {
+  id             String     @id @default(cuid())
+  clientId       String     @unique
+  username       String
+  profilePicture String
+  status         String     @default("")
+  isOnline       Boolean    @default(false)
+  lastSeenAt     DateTime?
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  messages       Message[]
+  pollVotes      PollVote[]
+  pollChoiceVotes PollChoiceVote[]
+
+  @@index([isOnline])
+  @@index([lastSeenAt])
+  @@index([username])
+}
+
+model BlacklistEntry {
+  id        String   @id @default(cuid())
+  username  String   @unique
+  createdAt DateTime @default(now())
+}
+
+model Message {
+  id                   String      @id @default(cuid())
+  legacyKey            String?     @unique
+  type                 MessageType
+  content              String
+  authorId             String?
+  authorName           String
+  authorProfilePicture String
+  optionOne            String?
+  optionTwo            String?
+  pollLeftCount        Int         @default(0)
+  pollRightCount       Int         @default(0)
+  pollMultiSelect      Boolean     @default(false)
+  pollAllowVoteChange  Boolean     @default(false)
+  questionMessageId    String?
+  createdAt            DateTime    @default(now())
+  updatedAt            DateTime    @updatedAt
+  author               User?       @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  questionMessage      Message?    @relation("MessageAnswers", fields: [questionMessageId], references: [id], onDelete: SetNull)
+  answers              Message[]   @relation("MessageAnswers")
+  pollVotes            PollVote[]
+  pollOptions          PollOption[]
+  pollChoiceVotes      PollChoiceVote[]
+
+  @@index([type])
+  @@index([createdAt])
+  @@index([questionMessageId])
+}
+
+model PollVote {
+  id            String   @id @default(cuid())
+  pollMessageId String
+  userId        String
+  side          VoteSide
+  createdAt     DateTime @default(now())
+  pollMessage   Message  @relation(fields: [pollMessageId], references: [id], onDelete: Cascade)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([pollMessageId, userId])
+  @@index([pollMessageId])
+}
+
+model PollOption {
+  id            String           @id @default(cuid())
+  pollMessageId String
+  label         String
+  sortOrder     Int
+  createdAt     DateTime         @default(now())
+  pollMessage   Message          @relation(fields: [pollMessageId], references: [id], onDelete: Cascade)
+  votes         PollChoiceVote[]
+
+  @@index([pollMessageId])
+  @@unique([pollMessageId, sortOrder])
+}
+
+model PollChoiceVote {
+  id            String     @id @default(cuid())
+  pollMessageId String
+  pollOptionId  String
+  userId        String
+  createdAt     DateTime   @default(now())
+  pollMessage   Message    @relation(fields: [pollMessageId], references: [id], onDelete: Cascade)
+  pollOption    PollOption @relation(fields: [pollOptionId], references: [id], onDelete: Cascade)
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([pollMessageId])
+  @@index([pollOptionId])
+  @@index([userId])
+  @@unique([pollMessageId, userId, pollOptionId])
+}

@@ -1,0 +1,15 @@
+{
+  "name": "chat-ppc-workspace",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "pnpm@10.28.0",
+  "scripts": {
+    "dev": "pnpm -C client dev",
+    "build": "pnpm -C client build",
+    "start": "pnpm -C client start",
+    "lint": "pnpm -C client lint",
+    "typecheck": "pnpm -C client typecheck",
+    "test": "pnpm -C client test",
+    "import:legacy": "pnpm -C client import:legacy"
+  }
+}

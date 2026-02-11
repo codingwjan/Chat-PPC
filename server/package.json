@@ -1,11 +1,10 @@
 {
-  "name": "server",
+  "name": "server-legacy-archive",
   "version": "1.0.0",
-  "description": "",
+  "private": true,
+  "description": "Legacy Chat-PPC server archive. Runtime moved to ../client.",
   "main": "server.js",
-  "scripts": {
-    "devstart": "nodemon server.js"
-  },
+  "scripts": {},
   "author": "",
   "license": "ISC",
   "dependencies": {
