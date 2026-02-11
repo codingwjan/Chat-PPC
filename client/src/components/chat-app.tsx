@@ -21,6 +21,7 @@ import type {
   UserPresenceDTO,
   VotePollRequest,
 } from "@/lib/types";
+import chatgptAvatar from "@/resources/chatgpt.png";
 
 type ComposerMode = "message" | "question" | "poll" | "challenge";
 
@@ -80,12 +81,15 @@ export function ChatApp() {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
   const profileUploadRef = useRef<HTMLInputElement>(null);
+  const chatUploadRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
 
   const [session, setSession] = useState<SessionState | null>(() => loadSession());
   const [users, setUsers] = useState<UserPresenceDTO[]>([]);
   const [messages, setMessages] = useState<MessageDTO[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [aiStatus, setAiStatus] = useState("online");
+  const [uploadingChat, setUploadingChat] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [composerOpen, setComposerOpen] = useState(false);
@@ -108,9 +112,29 @@ export function ChatApp() {
   );
 
   const onlineUsers = useMemo(
-    () => users.filter((user) => user.isOnline).sort((a, b) => a.username.localeCompare(b.username)),
-    [users],
+    () => [
+      {
+        id: "chatgpt",
+        clientId: "chatgpt",
+        username: "ChatGPT",
+        profilePicture: chatgptAvatar.src,
+        status: aiStatus,
+        isOnline: true,
+        lastSeenAt: new Date().toISOString(),
+      },
+      ...users.filter((user) => user.isOnline).sort((a, b) => a.username.localeCompare(b.username)),
+    ],
+    [users, aiStatus],
   );
+
+  const [showMentionSuggestions, setShowMentionSuggestions] = useState(false);
+  const [mentionFilter, setMentionFilter] = useState("");
+  const [mentionIndex, setMentionIndex] = useState(0);
+
+  const filteredMentionUsers = useMemo(() => {
+    if (!mentionFilter) return onlineUsers;
+    return onlineUsers.filter((u) => u.username.toLowerCase().includes(mentionFilter.toLowerCase()));
+  }, [onlineUsers, mentionFilter]);
 
   useEffect(() => {
     if (!session) router.replace("/login");
@@ -153,6 +177,19 @@ export function ChatApp() {
     const onMessage = (event: MessageEvent<string>) => {
       const payload = JSON.parse(event.data) as SseEventPayloadMap["message.created"];
       setMessages((current) => mergeMessage(current, payload));
+
+      // Desktop Notification
+      if (
+        payload.authorId !== session?.clientId &&
+        payload.username !== "System" &&
+        Notification.permission === "granted" &&
+        document.visibilityState !== "visible"
+      ) {
+        new Notification(`New message from ${payload.username}`, {
+          body: payload.message,
+          icon: payload.profilePicture,
+        });
+      }
     };
 
     const onPoll = (event: MessageEvent<string>) => {
@@ -160,39 +197,25 @@ export function ChatApp() {
       setMessages((current) => mergeMessage(current, payload));
     };
 
+    const onAiStatus = (event: MessageEvent<string>) => {
+      const payload = JSON.parse(event.data) as SseEventPayloadMap["ai.status"];
+      setAiStatus(payload.status);
+    };
+
     source.addEventListener("snapshot", onSnapshot as EventListener);
     source.addEventListener("presence.updated", onPresence as EventListener);
     source.addEventListener("user.updated", onUser as EventListener);
     source.addEventListener("message.created", onMessage as EventListener);
     source.addEventListener("poll.updated", onPoll as EventListener);
+    source.addEventListener("ai.status", onAiStatus as EventListener);
     source.onerror = () => setError("Realtime connection lost. Retrying…");
 
+    // Request Notification permission
+    if (Notification.permission === "default") {
+      void Notification.requestPermission();
+    }
+
     return () => source.close();
-  }, [session]);
-
-  useEffect(() => {
-    if (!session) return;
-    const ping = () => {
-      apiJson<UserPresenceDTO>("/api/presence/ping", {
-        method: "POST",
-        body: JSON.stringify({ clientId: session.clientId }),
-      }).catch(() => setError("Could not update online presence."));
-    };
-    ping();
-    const interval = setInterval(ping, 5_000);
-    return () => clearInterval(interval);
-  }, [session]);
-
-  useEffect(() => {
-    if (!session) return;
-    const onPageHide = () => {
-      navigator.sendBeacon(
-        "/api/presence/logout",
-        new Blob([JSON.stringify({ clientId: session.clientId })], { type: "application/json" }),
-      );
-    };
-    window.addEventListener("pagehide", onPageHide);
-    return () => window.removeEventListener("pagehide", onPageHide);
   }, [session]);
 
   useEffect(() => {
@@ -215,12 +238,6 @@ export function ChatApp() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
-
-  useEffect(() => {
-    const container = scrollRef.current;
-    if (!container) return;
-    container.scrollTop = container.scrollHeight;
-  }, [messages]);
 
   const updateUser = useCallback(
     async (payload: Omit<RenameUserRequest, "clientId">) => {
@@ -385,6 +402,24 @@ export function ChatApp() {
     }
   }
 
+  async function onChatImageUpload(file: File | undefined) {
+    if (!file) return;
+    setUploadingChat(true);
+    try {
+      const formData = new FormData();
+      formData.set("file", file);
+      const response = await fetch("/api/uploads/chat", { method: "POST", body: formData });
+      if (!response.ok) throw new Error("Upload failed");
+      const { url } = (await response.json()) as { url: string };
+      setMessageDraft((current) => (current ? `${current}\n![image](${url})` : `![image](${url})`));
+    } catch (err) {
+      setError("Could not upload image.");
+    } finally {
+      setUploadingChat(false);
+      if (chatUploadRef.current) chatUploadRef.current.value = "";
+    }
+  }
+
   async function logout() {
     if (session) {
       await fetch("/api/presence/logout", {
@@ -392,7 +427,7 @@ export function ChatApp() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ clientId: session.clientId }),
         keepalive: true,
-      }).catch(() => {});
+      }).catch(() => { });
     }
     clearSession();
     router.replace("/login");
@@ -405,10 +440,10 @@ export function ChatApp() {
       <div className="grid h-full w-full md:grid-cols-[300px_1fr]">
         <aside className="hidden h-full border-r border-slate-200 bg-white/90 p-4 backdrop-blur md:flex md:flex-col">
           <div className="flex items-center gap-3 rounded-2xl border border-slate-100 bg-slate-50 p-3">
-            <img src={session.profilePicture} alt={`${session.username} avatar`} className="h-11 w-11 rounded-full border border-slate-200 object-cover" />
+            <img src={session.profilePicture} alt={`${session.username} avatar`} className="h-12 w-12 rounded-full border border-slate-200 object-cover" />
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold text-slate-900">{session.username}</p>
-              <p className="text-xs text-slate-500">Online</p>
+              <p className="text-xs text-slate-500 text-sky-500 font-medium">online</p>
             </div>
           </div>
           <button
@@ -461,7 +496,7 @@ export function ChatApp() {
             <div className="space-y-2">
               {onlineUsers.map((user) => (
                 <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
-                  <img src={user.profilePicture} alt={`${user.username} avatar`} className="h-8 w-8 rounded-full border border-slate-200 object-cover" />
+                  <img src={user.profilePicture} alt={`${user.username} avatar`} className="h-10 w-10 rounded-full border border-slate-200 object-cover" />
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
                     <p className="truncate text-xs text-slate-500">{user.status || "online"}</p>
@@ -479,7 +514,7 @@ export function ChatApp() {
           <header className="flex items-center justify-between border-b border-slate-200 bg-white/85 px-4 py-3 backdrop-blur">
             <div>
               <h1 className="text-xl font-bold text-slate-900">Class Chat Bot</h1>
-              <p className="text-xs text-slate-500">Use /ai, /roll, /coin, /help</p>
+              <p className="text-xs text-slate-500">AI-powered classroom assistant</p>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -511,15 +546,15 @@ export function ChatApp() {
                 }
                 onSubmitAnswer={submitAnswer}
                 onVote={handleVote}
+                currentClientId={session.clientId}
               />
             ))}
           </div>
 
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center pb-[calc(env(safe-area-inset-bottom)+0.75rem)]">
             <div
-              className={`pointer-events-auto w-[min(940px,94vw)] rounded-[2rem] border border-white/70 bg-white/90 p-3 shadow-[0_18px_50px_rgba(15,23,42,0.18)] backdrop-blur transition-all duration-300 ${
-                composerOpen ? "scale-100" : "scale-[0.98]"
-              }`}
+              className={`pointer-events-auto w-[min(940px,94vw)] rounded-[2rem] border border-white/70 bg-white/90 p-3 shadow-[0_18px_50px_rgba(15,23,42,0.18)] backdrop-blur transition-all duration-300 ${composerOpen ? "scale-100" : "scale-[0.98]"
+                }`}
             >
               <div className="mb-2 flex flex-wrap items-center gap-2">
                 {(["message", "question", "poll", "challenge"] as ComposerMode[]).map((mode) => (
@@ -529,15 +564,42 @@ export function ChatApp() {
                       setComposerMode(mode);
                       setComposerOpen(true);
                     }}
-                    className={`h-8 rounded-full px-3 text-xs font-semibold capitalize transition ${
-                      composerMode === mode
-                        ? "bg-slate-900 text-white"
-                        : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                    }`}
+                    className={`h-7 rounded-full px-3 text-xs font-semibold capitalize transition ${composerMode === mode
+                      ? "bg-slate-900 text-white"
+                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                      }`}
                   >
                     {mode}
                   </button>
                 ))}
+                <div className="ml-auto flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => chatUploadRef.current?.click()}
+                    disabled={uploadingChat}
+                    className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-100 text-slate-600 transition hover:bg-slate-200 disabled:opacity-50"
+                    title="Upload image"
+                  >
+                    {uploadingChat ? (
+                      <div className="h-3 w-3 animate-spin rounded-full border-2 border-slate-400 border-t-transparent" />
+                    ) : (
+                      <span className="text-sm">📎</span>
+                    )}
+                  </button>
+                  <input
+                    ref={chatUploadRef}
+                    type="file"
+                    className="hidden"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    onChange={(event) => void onChatImageUpload(event.target.files?.[0])}
+                  />
+                  <button
+                    onClick={() => void submitComposer()}
+                    className="h-7 rounded-lg bg-slate-900 px-4 text-xs font-semibold text-white transition hover:bg-slate-800"
+                  >
+                    Send
+                  </button>
+                </div>
               </div>
 
               {composerMode === "message" ? (
@@ -545,17 +607,81 @@ export function ChatApp() {
                   ref={messageInputRef}
                   value={messageDraft}
                   onFocus={() => setComposerOpen(true)}
-                  onChange={(event) => setMessageDraft(event.target.value)}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    setMessageDraft(value);
+
+                    // Check for @mention
+                    const cursor = event.target.selectionStart;
+                    const textBefore = value.slice(0, cursor);
+                    const match = textBefore.match(/@(\w*)$/);
+                    if (match) {
+                      setShowMentionSuggestions(true);
+                      setMentionFilter(match[1]);
+                      setMentionIndex(0);
+                    } else {
+                      setShowMentionSuggestions(false);
+                    }
+                  }}
                   onKeyDown={(event) => {
+                    if (showMentionSuggestions && filteredMentionUsers.length > 0) {
+                      if (event.key === "ArrowDown") {
+                        event.preventDefault();
+                        setMentionIndex((i) => (i + 1) % filteredMentionUsers.length);
+                        return;
+                      }
+                      if (event.key === "ArrowUp") {
+                        event.preventDefault();
+                        setMentionIndex((i) => (i - 1 + filteredMentionUsers.length) % filteredMentionUsers.length);
+                        return;
+                      }
+                      if (event.key === "Enter" || event.key === "Tab") {
+                        event.preventDefault();
+                        const user = filteredMentionUsers[mentionIndex];
+                        const textBefore = messageDraft.slice(0, messageInputRef.current?.selectionStart || 0);
+                        const textAfter = messageDraft.slice(messageInputRef.current?.selectionStart || 0);
+                        const newTextBefore = textBefore.replace(/@(\w*)$/, `@${user.username} `);
+                        setMessageDraft(newTextBefore + textAfter);
+                        setShowMentionSuggestions(false);
+                        return;
+                      }
+                      if (event.key === "Escape") {
+                        setShowMentionSuggestions(false);
+                        return;
+                      }
+                    }
+
                     if (event.key === "Enter" && !event.shiftKey) {
                       event.preventDefault();
                       void submitComposer();
                     }
                   }}
-                  placeholder="Type a message… Try /ai explain photosynthesis"
-                  rows={composerOpen ? 3 : 1}
-                  className="w-full resize-none rounded-2xl border border-slate-200 px-4 py-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  placeholder="Type a message… Ask anything!"
+                  rows={1}
+                  className="w-full resize-none rounded-xl border border-slate-200 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
                 />
+              ) : null}
+
+              {showMentionSuggestions && filteredMentionUsers.length > 0 && composerMode === "message" ? (
+                <div className="absolute bottom-full left-4 mb-2 max-h-40 w-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
+                  {filteredMentionUsers.map((user, i) => (
+                    <button
+                      key={user.clientId}
+                      onClick={() => {
+                        const textBefore = messageDraft.slice(0, messageInputRef.current?.selectionStart || 0);
+                        const textAfter = messageDraft.slice(messageInputRef.current?.selectionStart || 0);
+                        const newTextBefore = textBefore.replace(/@(\w*)$/, `@${user.username} `);
+                        setMessageDraft(newTextBefore + textAfter);
+                        setShowMentionSuggestions(false);
+                      }}
+                      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition ${i === mentionIndex ? "bg-sky-100 text-sky-900" : "hover:bg-slate-50 text-slate-700"
+                        }`}
+                    >
+                      <img src={user.profilePicture} className="h-5 w-5 rounded-full object-cover" alt="" />
+                      <span className="truncate">{user.username}</span>
+                    </button>
+                  ))}
+                </div>
               ) : null}
 
               {composerMode === "question" ? (
@@ -570,7 +696,7 @@ export function ChatApp() {
                     }
                   }}
                   placeholder="Ask your class a question…"
-                  className="h-11 w-full rounded-2xl border border-slate-200 px-4 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+                  className="h-9 w-full rounded-xl border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
                 />
               ) : null}
 
@@ -586,7 +712,7 @@ export function ChatApp() {
                     }
                   }}
                   placeholder="Post a class challenge…"
-                  className="h-11 w-full rounded-2xl border border-slate-200 px-4 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-300"
+                  className="h-9 w-full rounded-xl border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-300"
                 />
               ) : null}
 
@@ -597,7 +723,7 @@ export function ChatApp() {
                     onFocus={() => setComposerOpen(true)}
                     onChange={(event) => setPollQuestion(event.target.value)}
                     placeholder="Poll question…"
-                    className="h-11 w-full rounded-2xl border border-slate-200 px-4 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                    className="h-9 w-full rounded-xl border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
                   />
                   <div className="grid gap-2 sm:grid-cols-2">
                     {pollOptions.map((option, index) => (
@@ -610,7 +736,7 @@ export function ChatApp() {
                           )
                         }
                         placeholder={`Option ${index + 1}…`}
-                        className="h-10 rounded-xl border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                        className="h-8 rounded-lg border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
                       />
                     ))}
                   </div>
@@ -620,7 +746,7 @@ export function ChatApp() {
                       onClick={() =>
                         setPollOptions((current) => (current.length >= 15 ? current : [...current, ""]))
                       }
-                      className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
+                      className="h-7 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
                     >
                       Add Option
                     </button>
@@ -629,7 +755,7 @@ export function ChatApp() {
                       onClick={() =>
                         setPollOptions((current) => (current.length <= 2 ? current : current.slice(0, -1)))
                       }
-                      className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
+                      className="h-7 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
                     >
                       Remove Option
                     </button>
@@ -652,15 +778,6 @@ export function ChatApp() {
                   </div>
                 </div>
               ) : null}
-
-              <div className="mt-2 flex justify-end">
-                <button
-                  onClick={() => void submitComposer()}
-                  className="h-10 rounded-xl bg-slate-900 px-5 text-sm font-semibold text-white"
-                >
-                  Send
-                </button>
-              </div>
             </div>
           </div>
 
@@ -707,9 +824,8 @@ export function ChatApp() {
       {showShortcuts ? (
         <div className="fixed inset-0 z-50 grid place-items-center bg-slate-900/40 p-4" onClick={() => setShowShortcuts(false)}>
           <div className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl" onClick={(event) => event.stopPropagation()}>
-            <h2 className="text-lg font-bold text-slate-900">Shortcuts</h2>
             <p className="mt-2 text-sm text-slate-600">Cmd/Ctrl + K opens the message bubble quickly.</p>
-            <p className="text-sm text-slate-600">Type /ai, /roll, /coin, or /help in message mode.</p>
+            <p className="text-sm text-slate-600">The AI reads all messages and will respond automatically.</p>
             <button className="mt-4 h-10 w-full rounded-xl bg-slate-900 text-sm font-semibold text-white" onClick={() => setShowShortcuts(false)}>
               Close
             </button>

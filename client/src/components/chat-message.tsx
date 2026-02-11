@@ -10,6 +10,7 @@ interface ChatMessageProps {
   onAnswerDraftChange: (messageId: string, value: string) => void;
   onSubmitAnswer: (messageId: string) => void;
   onVote: (messageId: string, optionIds: string[]) => void;
+  currentClientId?: string;
 }
 
 function formatTime(isoDate: string): string {
@@ -32,6 +33,7 @@ export function ChatMessage({
   onAnswerDraftChange,
   onSubmitAnswer,
   onVote,
+  currentClientId,
 }: ChatMessageProps) {
   const [selectedOptions, setSelectedOptions] = useState<string[]>([]);
   const pollSettings = message.poll?.settings;
@@ -79,11 +81,10 @@ export function ChatMessage({
               <button
                 key={option.id}
                 type="button"
-                className={`w-full rounded-xl border p-3 text-left transition ${
-                  checked
-                    ? "border-sky-400 bg-sky-50"
-                    : "border-slate-200 bg-slate-50 hover:border-sky-300 hover:bg-sky-50"
-                }`}
+                className={`w-full rounded-xl border p-3 text-left transition ${checked
+                  ? "border-sky-400 bg-sky-50"
+                  : "border-slate-200 bg-slate-50 hover:border-sky-300 hover:bg-sky-50"
+                  }`}
                 onClick={() => {
                   if (pollSettings?.multiSelect) {
                     setSelectedOptions((current) =>
@@ -165,11 +166,11 @@ export function ChatMessage({
     <article className="rounded-2xl border border-slate-100 bg-white p-4 shadow-sm">
       <div className="flex items-start gap-3">
         <img
-          className="h-10 w-10 rounded-full border border-slate-200 object-cover"
+          className="h-12 w-12 rounded-full border border-slate-200 object-cover"
           src={message.profilePicture}
           alt={`${message.username} avatar`}
-          width={40}
-          height={40}
+          width={48}
+          height={48}
           loading="lazy"
         />
         <div className="min-w-0 flex-1">
@@ -182,7 +183,79 @@ export function ChatMessage({
               In reply to &quot;{message.oldmessage}&quot; by {message.oldusername}
             </p>
           ) : null}
-          <p className="whitespace-pre-wrap break-words text-sm text-slate-700">{message.message}</p>
+          {message.message.split("\n").map((line, i) => {
+            // Check for markdown image syntax first (e.g. from AI)
+            const imgMatch = line.match(/^!\[(.*?)\]\((.*?)\)$/);
+            if (imgMatch) {
+              return (
+                <img
+                  key={i}
+                  src={imgMatch[2]}
+                  alt={imgMatch[1]}
+                  className="my-3 max-h-80 rounded-2xl border border-slate-200 shadow-sm transition hover:shadow-md"
+                />
+              );
+            }
+
+            // Split line by URLs, @mentions, and text
+            const parts = line.split(/(\s+)/);
+            const content = parts.map((part, j) => {
+              // URL detection
+              const urlMatch = part.match(/^(https?:\/\/[^\s$.?#].[^\s]*)$/i);
+              if (urlMatch) {
+                const url = urlMatch[1];
+                // Check if it's an image/GIF
+                if (url.match(/\.(jpeg|jpg|gif|png|webp|svg)(\?.*)?$/i)) {
+                  return (
+                    <img
+                      key={`${i}-${j}`}
+                      src={url}
+                      alt="Shared content"
+                      className="my-3 block max-h-80 rounded-2xl border border-slate-200 shadow-sm transition hover:shadow-md"
+                    />
+                  );
+                }
+                return (
+                  <a
+                    key={`${i}-${j}`}
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="font-medium text-sky-600 underline decoration-sky-300 decoration-2 underline-offset-2 transition hover:text-sky-700 hover:decoration-sky-400"
+                  >
+                    {url}
+                  </a>
+                );
+              }
+
+              // @username detection
+              const mentionMatch = part.match(/^@(\w+)$/);
+              if (mentionMatch) {
+                const username = mentionMatch[1];
+                const isMe = currentClientId && username.toLowerCase() === "me"; // Basic 'me' check or we'd need a list of users
+                // Actually better to check if username matches session one.
+                return (
+                  <span
+                    key={`${i}-${j}`}
+                    className={`inline-block rounded-md px-1.5 py-0.5 text-sm font-bold ring-1 ${username.toLowerCase() === "everyone" || username.toLowerCase() === "me"
+                      ? "bg-amber-100 text-amber-700 ring-amber-200"
+                      : "bg-sky-100 text-sky-700 ring-sky-200"
+                      }`}
+                  >
+                    @{username}
+                  </span>
+                );
+              }
+
+              return part;
+            });
+
+            return (
+              <p key={i} className="whitespace-pre-wrap break-words text-sm leading-relaxed text-slate-700">
+                {content}
+              </p>
+            );
+          })}
         </div>
       </div>
     </article>
