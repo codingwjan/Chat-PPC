@@ -11,5 +11,11 @@
     "typecheck": "pnpm -C client typecheck",
     "test": "pnpm -C client test",
     "import:legacy": "pnpm -C client import:legacy"
+  },
+  "pnpm": {
+    "ignoredBuiltDependencies": [
+      "sharp",
+      "unrs-resolver"
+    ]
   }
 }

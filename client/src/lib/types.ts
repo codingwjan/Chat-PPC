@@ -5,7 +5,8 @@ export type SseEventName =
   | "presence.updated"
   | "message.created"
   | "poll.updated"
-  | "user.updated";
+  | "user.updated"
+  | "ai.status";
 
 export interface LoginRequest {
   username: string;
@@ -96,6 +97,7 @@ export interface SseEventPayloadMap {
   "message.created": MessageDTO;
   "poll.updated": MessageDTO;
   "user.updated": UserPresenceDTO;
+  "ai.status": { status: string };
 }
 
 export interface SseEnvelope<TEvent extends SseEventName = SseEventName> {

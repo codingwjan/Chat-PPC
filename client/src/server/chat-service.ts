@@ -59,28 +59,28 @@ function mapMessage(message: MessageRow): MessageDTO {
   const modernPollOptions =
     message.pollOptions?.length > 0
       ? message.pollOptions
-          .sort((a, b) => a.sortOrder - b.sortOrder)
-          .map((option) => ({
-            id: option.id,
-            label: option.label,
-            votes: option.votes.length,
-          }))
+        .sort((a, b) => a.sortOrder - b.sortOrder)
+        .map((option) => ({
+          id: option.id,
+          label: option.label,
+          votes: option.votes.length,
+        }))
       : [];
 
   const legacyPollOptions =
     message.type === MessageType.VOTING_POLL && modernPollOptions.length === 0
       ? [
-          {
-            id: `${message.id}-legacy-left`,
-            label: message.optionOne || "Option 1",
-            votes: message.pollLeftCount,
-          },
-          {
-            id: `${message.id}-legacy-right`,
-            label: message.optionTwo || "Option 2",
-            votes: message.pollRightCount,
-          },
-        ]
+        {
+          id: `${message.id}-legacy-left`,
+          label: message.optionOne || "Option 1",
+          votes: message.pollLeftCount,
+        },
+        {
+          id: `${message.id}-legacy-right`,
+          label: message.optionTwo || "Option 2",
+          votes: message.pollRightCount,
+        },
+      ]
       : [];
 
   return {
@@ -101,12 +101,12 @@ function mapMessage(message: MessageRow): MessageDTO {
     poll:
       message.type === MessageType.VOTING_POLL
         ? {
-            options: modernPollOptions.length > 0 ? modernPollOptions : legacyPollOptions,
-            settings: {
-              multiSelect: message.pollMultiSelect,
-              allowVoteChange: message.pollAllowVoteChange,
-            },
-          }
+          options: modernPollOptions.length > 0 ? modernPollOptions : legacyPollOptions,
+          settings: {
+            multiSelect: message.pollMultiSelect,
+            allowVoteChange: message.pollAllowVoteChange,
+          },
+        }
         : undefined,
   };
 }
@@ -176,6 +176,10 @@ async function cleanupOfflineUsers(): Promise<void> {
       status: "",
     });
     publish("presence.updated", dto);
+
+    // Delete user to free username
+    await prisma.user.delete({ where: { id: user.id } });
+
     await emitSystemMessage(`${user.username} left the chat`);
   }
 }
@@ -198,35 +202,136 @@ async function getMessageRows(): Promise<MessageRow[]> {
   });
 }
 
-async function emitAiResponse(prompt: string): Promise<void> {
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  const profilePicture = getDefaultProfilePicture();
-  let text = "No OPENAI_API_KEY configured, so this is a local fallback response.";
+function publishAiStatus(status: string): void {
+  publish("ai.status", { status });
+}
 
-  if (process.env.OPENAI_API_KEY) {
-    try {
-      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const response = await client.responses.create({
-        model,
-        input: `Classroom prompt: ${prompt}\nRespond with one concise helpful message.`,
-      });
-      text = response.output_text?.trim() || "I could not generate a response.";
-    } catch (error) {
-      text = error instanceof Error ? `OpenAI request failed: ${error.message}` : "OpenAI request failed.";
-    }
-  }
-
-  const created = await prisma.message.create({
-    data: {
-      type: MessageType.MESSAGE,
-      content: text,
-      authorName: "ChatGPT",
-      authorProfilePicture: chatgptProfilePicture.src,
-    },
+async function getRecentMessages(limit = 15): Promise<MessageRow[]> {
+  return prisma.message.findMany({
     include: { questionMessage: true, author: true, pollOptions: { include: { votes: true } } },
+    orderBy: [{ createdAt: "desc" }],
+    take: limit,
   });
+}
 
-  publish("message.created", mapMessage(created));
+function formatMessagesForAi(messages: MessageRow[]): Array<{ role: string; content: string }> {
+  return [...messages].reverse().map((msg) => ({
+    role: msg.authorName === "ChatGPT" ? "assistant" : "user",
+    content: `[${msg.authorName}]: ${msg.content}`,
+  }));
+}
+
+async function emitAiResponse(contextMessages: MessageRow[]): Promise<void> {
+  if (!process.env.OPENAI_API_KEY) return;
+
+  publishAiStatus("Thinking…");
+
+  try {
+    const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const chatHistory = formatMessagesForAi(contextMessages);
+
+    const response = await (client.responses as any).create({
+      prompt: {
+        id: "pmpt_698b4aee21308196b860d14abc12b51d0f2e06f804bcc0ca",
+        version: "4",
+      },
+      input: [],
+      text: { format: { type: "text" } },
+      reasoning: {},
+      tools: [
+        {
+          "type": "web_search",
+          "user_location": {
+            "type": "approximate",
+            "country": "DE",
+            "region": "Hessen",
+            "city": "Limburg"
+          },
+          "search_context_size": "low"
+        },
+        {
+          "type": "image_generation",
+          "background": "auto",
+          "model": "gpt-image-1-mini",
+          "moderation": "low",
+          "output_compression": 100,
+          "output_format": "png",
+          "quality": "auto",
+          "size": "auto"
+        }
+      ],
+      store: true,
+      include: [
+        "reasoning.encrypted_content",
+        "web_search_call.action.sources"
+      ]
+    });
+
+    // Build message content from response
+    let outputContent = "";
+
+    if (response.output_text) {
+      outputContent += response.output_text;
+    }
+
+    // Check for generated images in output array
+    let hasImage = false;
+    if (Array.isArray(response.output)) {
+      for (const item of response.output) {
+        if (item.type === "image_generation_call" && item.result) {
+          hasImage = true;
+          publishAiStatus("Generating image…");
+          const imageUrl = item.result.url || (item.result.image ? `data:image/png;base64,${item.result.image}` : null);
+          if (imageUrl) {
+            outputContent += `\n![Generated Image](${imageUrl})`;
+          }
+        }
+      }
+    }
+
+    const text = outputContent.trim();
+
+    // If AI decided not to respond, silently go back to online
+    if (!text || text === "[NO_RESPONSE]") {
+      publishAiStatus("Online");
+      return;
+    }
+
+    publishAiStatus(hasImage ? "Sending image…" : "Typing…");
+
+    const created = await prisma.message.create({
+      data: {
+        type: MessageType.MESSAGE,
+        content: text,
+        authorName: "ChatGPT",
+        authorProfilePicture: chatgptProfilePicture.src,
+      },
+      include: { questionMessage: true, author: true, pollOptions: { include: { votes: true } } },
+    });
+
+    publish("message.created", mapMessage(created));
+  } catch (error) {
+    console.error("OpenAI error:", error);
+    // Optionally post an error message
+    const errorText = error instanceof Error ? `OpenAI request failed: ${error.message}` : "OpenAI request failed.";
+    const created = await prisma.message.create({
+      data: {
+        type: MessageType.MESSAGE,
+        content: errorText,
+        authorName: "ChatGPT",
+        authorProfilePicture: chatgptProfilePicture.src,
+      },
+      include: { questionMessage: true, author: true, pollOptions: { include: { votes: true } } },
+    });
+    publish("message.created", mapMessage(created));
+  } finally {
+    publishAiStatus("Online");
+  }
+}
+
+async function maybeRespondAsAi(): Promise<void> {
+  const recentMessages = await getRecentMessages(15);
+  await emitAiResponse(recentMessages);
 }
 
 async function getUserByClientId(clientId: string) {
@@ -344,12 +449,12 @@ export async function setTypingStatus(input: { clientId: string; status: string 
 }
 
 export async function markUserOffline(input: { clientId: string }): Promise<UserPresenceDTO> {
-  const user = await prisma.user.update({
-    where: { clientId: input.clientId },
-    data: { isOnline: false, status: "", lastSeenAt: new Date() },
-  });
+  const user = await prisma.user.findUnique({ where: { clientId: input.clientId } });
+  if (!user) return {} as any;
 
-  const dto = mapUser(user);
+  await prisma.user.delete({ where: { clientId: input.clientId } });
+
+  const dto = mapUser({ ...user, isOnline: false, status: "" });
   publish("presence.updated", dto);
   await emitSystemMessage(`${user.username} left the chat`);
   return dto;
@@ -412,13 +517,13 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
       pollRightCount: 0,
       ...(type === MessageType.VOTING_POLL
         ? {
-            pollOptions: {
-              create: pollOptions.map((label, sortOrder) => ({
-                label,
-                sortOrder,
-              })),
-            },
-          }
+          pollOptions: {
+            create: pollOptions.map((label, sortOrder) => ({
+              label,
+              sortOrder,
+            })),
+          },
+        }
         : {}),
     },
     include: { questionMessage: true, author: true, pollOptions: { include: { votes: true } } },
@@ -427,11 +532,11 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
   const dto = mapMessage(created);
   publish("message.created", dto);
 
-  if (type === MessageType.MESSAGE && message.startsWith("/ai")) {
-    const prompt = message.replace(/^\/ai\s*/i, "").trim() || "Give one concise study tip.";
-    void emitAiResponse(prompt).catch((error) => {
-      const fallback = error instanceof Error ? error.message : "Unknown AI processing error";
-      console.error("Failed to generate AI response:", fallback);
+  // Auto-trigger AI evaluation for user messages (skip system commands and polls)
+  const isSlashCommand = message.startsWith("/roll") || message.startsWith("/coin") || message.startsWith("/help");
+  if (!isSlashCommand && type !== MessageType.VOTING_POLL) {
+    void maybeRespondAsAi().catch((error) => {
+      console.error("AI auto-response error:", error instanceof Error ? error.message : error);
     });
   }
 
