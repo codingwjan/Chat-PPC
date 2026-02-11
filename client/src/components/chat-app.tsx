@@ -488,6 +488,7 @@ export function ChatApp() {
   const dragDepthRef = useRef(0);
   const messageInputLineHeightRef = useRef<number | null>(null);
   const messageInputResizeFrameRef = useRef<number | null>(null);
+  const lightboxCopyResetTimeoutRef = useRef<number | null>(null);
 
   const [session, setSession] = useState<SessionState | null>(() => loadSession());
   const [users, setUsers] = useState<UserPresenceDTO[]>([]);
@@ -530,6 +531,7 @@ export function ChatApp() {
   const [adminTargetMessageId, setAdminTargetMessageId] = useState("");
   const [pendingDeliveries, setPendingDeliveries] = useState<Record<string, true>>({});
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
+  const [lightboxCopyState, setLightboxCopyState] = useState<"idle" | "success" | "error">("idle");
   const [replyTarget, setReplyTarget] = useState<ReplyTargetState | null>(null);
 
   const [messageDraft, setMessageDraft] = useState("");
@@ -1935,13 +1937,68 @@ export function ChatApp() {
     }
   }, [lightbox]);
 
+  const showLightboxCopyFeedback = useCallback((state: "success" | "error") => {
+    setLightboxCopyState(state);
+    if (lightboxCopyResetTimeoutRef.current !== null) {
+      window.clearTimeout(lightboxCopyResetTimeoutRef.current);
+    }
+    lightboxCopyResetTimeoutRef.current = window.setTimeout(() => {
+      setLightboxCopyState("idle");
+      lightboxCopyResetTimeoutRef.current = null;
+    }, 3_000);
+  }, []);
+
   const copyLightboxImage = useCallback(async () => {
     if (!lightbox) return;
-    if (typeof navigator === "undefined" || !navigator.clipboard?.writeText) return;
-    await navigator.clipboard.writeText(lightbox.url).catch(() => {
-      // Ignore clipboard failures.
-    });
-  }, [lightbox]);
+    if (
+      typeof window === "undefined" ||
+      typeof navigator === "undefined" ||
+      !navigator.clipboard?.write ||
+      typeof ClipboardItem === "undefined"
+    ) {
+      showLightboxCopyFeedback("error");
+      return;
+    }
+
+    try {
+      const response = await fetch(lightbox.url, { cache: "no-store" });
+      if (!response.ok) {
+        throw new Error("Bild konnte nicht geladen werden.");
+      }
+
+      const originalBlob = await response.blob();
+      const blobType = originalBlob.type.startsWith("image/") ? originalBlob.type : "image/png";
+      const imageBlob = originalBlob.type === blobType
+        ? originalBlob
+        : new Blob([originalBlob], { type: blobType });
+
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          [blobType]: imageBlob,
+        }),
+      ]);
+      showLightboxCopyFeedback("success");
+    } catch {
+      showLightboxCopyFeedback("error");
+    }
+  }, [lightbox, showLightboxCopyFeedback]);
+
+  useEffect(() => {
+    return () => {
+      if (lightboxCopyResetTimeoutRef.current !== null) {
+        window.clearTimeout(lightboxCopyResetTimeoutRef.current);
+        lightboxCopyResetTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    setLightboxCopyState("idle");
+    if (lightboxCopyResetTimeoutRef.current !== null) {
+      window.clearTimeout(lightboxCopyResetTimeoutRef.current);
+      lightboxCopyResetTimeoutRef.current = null;
+    }
+  }, [lightbox?.url]);
 
   async function saveProfile() {
     const username = usernameDraft.trim();
@@ -2971,9 +3028,19 @@ export function ChatApp() {
               <button
                 type="button"
                 onClick={() => void copyLightboxImage()}
-                className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
+                className={`h-9 rounded-full px-3 text-xs font-semibold text-white ${
+                  lightboxCopyState === "success"
+                    ? "bg-emerald-600/90"
+                    : lightboxCopyState === "error"
+                      ? "bg-rose-600/90"
+                      : "bg-black/65"
+                }`}
               >
-                Kopieren
+                {lightboxCopyState === "success"
+                  ? "Bild kopiert"
+                  : lightboxCopyState === "error"
+                    ? "Kopieren nicht möglich"
+                    : "Bild kopieren"}
               </button>
               <button
                 type="button"
