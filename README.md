@@ -74,6 +74,10 @@ Deploy command:
 pnpm -C client deploy:vercel
 ```
 
+## Documentation
+
+- [Push Notifications Implementation Guide](PUSH_NOTIFICATIONS_INFO.md) - Detailed explanation of how desktop notifications work in this project
+
 ## Folder Roles
 
 - `client/` active app and API runtime
