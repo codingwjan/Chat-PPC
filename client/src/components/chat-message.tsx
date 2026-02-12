@@ -16,7 +16,7 @@ interface ChatMessageProps {
   onDeleteMessage?: (messageId: string) => void;
   onStartReply?: (message: MessageDTO) => void;
   onOpenLightbox?: (url: string, alt?: string) => void;
-  onRemixImage?: (url: string, alt?: string, provider?: "chatgpt" | "grok") => void;
+  onRemixImage?: (url: string, alt?: string) => void;
 }
 
 const IMAGE_URL_REGEX = /\.(jpeg|jpg|gif|png|webp|svg)(\?.*)?$/i;
@@ -504,17 +504,10 @@ function ChatMessageComponent({
                       <span className="mt-1 inline-flex flex-wrap gap-1">
                         <button
                           type="button"
-                          onClick={() => onRemixImage(imageUrl, imageAlt, "chatgpt")}
+                          onClick={() => onRemixImage(imageUrl, imageAlt)}
                           className="rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-100"
                         >
                           Mit @chatgpt remixen
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => onRemixImage(imageUrl, imageAlt, "grok")}
-                          className="rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-100"
-                        >
-                          Mit @grok remixen
                         </button>
                       </span>
                     ) : null}
@@ -549,17 +542,10 @@ function ChatMessageComponent({
                           <span className="mt-1 inline-flex flex-wrap gap-1">
                             <button
                               type="button"
-                              onClick={() => onRemixImage(url, "Geteilter Inhalt", "chatgpt")}
+                              onClick={() => onRemixImage(url, "Geteilter Inhalt")}
                               className="rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-100"
                             >
                               Mit @chatgpt remixen
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onRemixImage(url, "Geteilter Inhalt", "grok")}
-                              className="rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-100"
-                            >
-                              Mit @grok remixen
                             </button>
                           </span>
                         ) : null}
