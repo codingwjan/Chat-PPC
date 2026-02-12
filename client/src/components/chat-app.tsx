@@ -96,7 +96,7 @@ const AUTO_SCROLL_ON_SEND_MAX_DISTANCE_PX = 420;
 const TOP_LOAD_TRIGGER_PX = 120;
 const ONBOARDING_KEY = "chatppc.onboarding.v1";
 const MAX_MESSAGE_INPUT_LINES = 10;
-const MAX_VISIBLE_MESSAGES = 120;
+const MAX_VISIBLE_MESSAGES = Number.POSITIVE_INFINITY;
 const MESSAGE_RENDER_WINDOW = 40;
 const MESSAGE_RENDER_CHUNK = 20;
 const SUPPORTED_CHAT_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
@@ -518,6 +518,7 @@ export function ChatApp() {
   const lightboxCopyResetTimeoutRef = useRef<number | null>(null);
   const bottomStickFrameRef = useRef<number | null>(null);
   const previousScrollTopRef = useRef(0);
+  const lastKnownScrollHeightRef = useRef(0);
 
   const [session, setSession] = useState<SessionState | null>(() => loadSession());
   const [users, setUsers] = useState<UserPresenceDTO[]>([]);
@@ -1250,7 +1251,7 @@ export function ChatApp() {
       applyIncomingMessages(page.messages, { notify: false });
       setHasMoreOlder(page.hasMore && messages.length < MAX_VISIBLE_MESSAGES);
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "Aeltere Nachrichten konnten nicht geladen werden.");
+      setError(loadError instanceof Error ? loadError.message : "Ältere Nachrichten konnten nicht geladen werden.");
     } finally {
       setLoadingOlder(false);
     }
@@ -1627,12 +1628,51 @@ export function ChatApp() {
   useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
+    lastKnownScrollHeightRef.current = element.scrollHeight;
+    let frame: number | null = null;
+    let pendingAnchorPreservation = false;
+    let pendingBottomStick = false;
 
-    const onLoadCapture = () => {
-      scheduleBottomStick();
+    const flushHeightDelta = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        const previousHeight = lastKnownScrollHeightRef.current || element.scrollHeight;
+        const nextHeight = element.scrollHeight;
+        const delta = nextHeight - previousHeight;
+
+        if (pendingAnchorPreservation && delta !== 0) {
+          element.scrollTop += delta;
+        } else if (pendingBottomStick) {
+          scheduleBottomStick();
+        }
+
+        pendingAnchorPreservation = false;
+        pendingBottomStick = false;
+        lastKnownScrollHeightRef.current = nextHeight;
+      });
+    };
+
+    const onLoadCapture = (event: Event) => {
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      const wasAtBottom = isAtBottomRef.current;
+      const containerRect = element.getBoundingClientRect();
+      const targetRect = target?.getBoundingClientRect();
+      const canAffectViewport = targetRect
+        ? targetRect.top < containerRect.bottom
+        : false;
+
+      if (!wasAtBottom && canAffectViewport) {
+        pendingAnchorPreservation = true;
+      }
+      if (wasAtBottom) {
+        pendingBottomStick = true;
+      }
+      flushHeightDelta();
     };
 
     const observer = new MutationObserver(() => {
+      lastKnownScrollHeightRef.current = element.scrollHeight;
       scheduleBottomStick();
     });
 
@@ -1640,6 +1680,9 @@ export function ChatApp() {
     observer.observe(element, { childList: true, subtree: true });
 
     return () => {
+      if (frame !== null) {
+        window.cancelAnimationFrame(frame);
+      }
       element.removeEventListener("load", onLoadCapture, true);
       observer.disconnect();
     };
@@ -1648,12 +1691,14 @@ export function ChatApp() {
   useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
+    lastKnownScrollHeightRef.current = element.scrollHeight;
     previousScrollTopRef.current = element.scrollTop;
 
     const onScroll = () => {
       const currentScrollTop = element.scrollTop;
       const previousScrollTop = previousScrollTopRef.current;
       previousScrollTopRef.current = currentScrollTop;
+      lastKnownScrollHeightRef.current = element.scrollHeight;
 
       const distanceFromBottom = element.scrollHeight - (currentScrollTop + element.clientHeight);
       const atBottom = distanceFromBottom <= NEAR_BOTTOM_PX;
@@ -1673,7 +1718,6 @@ export function ChatApp() {
         }
 
         if (hasMoreOlder) {
-          if (messages.length >= MAX_VISIBLE_MESSAGES) return;
           void loadOlderMessages();
         }
       }
@@ -2770,7 +2814,7 @@ export function ChatApp() {
             className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 pb-40 sm:p-4 sm:pb-44"
           >
             {loadingOlder ? (
-              <p className="text-center text-xs text-slate-500">Aeltere Nachrichten werden geladen…</p>
+              <p className="text-center text-xs text-slate-500">Ältere Nachrichten werden geladen…</p>
             ) : null}
 
             <MessageList

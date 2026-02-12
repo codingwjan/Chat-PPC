@@ -1,7 +1,17 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
-import { memo, useEffect, useMemo, useRef, useState, type ImgHTMLAttributes } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ImgHTMLAttributes,
+  type SyntheticEvent,
+} from "react";
 import type { LinkPreviewDTO, MessageDTO } from "@/lib/types";
 
 interface ChatMessageProps {
@@ -20,8 +30,11 @@ interface ChatMessageProps {
 }
 
 const IMAGE_URL_REGEX = /\.(jpeg|jpg|gif|png|webp|svg)(\?.*)?$/i;
+const DEFAULT_INLINE_IMAGE_ASPECT_RATIO = 4 / 3;
+const MIN_IMAGE_SKELETON_MS = 140;
 const previewCache = new Map<string, LinkPreviewDTO | null>();
 const pendingPreviewRequests = new Map<string, Promise<LinkPreviewDTO | null>>();
+const imageAspectRatioCache = new Map<string, number>();
 
 function formatTime(isoDate: string): string {
   return new Date(isoDate).toLocaleTimeString("de-DE", {
@@ -103,6 +116,7 @@ interface LazyImageProps extends Omit<ImgHTMLAttributes<HTMLImageElement>, "clas
   frameClassName: string;
   imageClassName: string;
   pulseClassName?: string;
+  frameStyle?: CSSProperties;
 }
 
 function LazyImage({
@@ -110,6 +124,7 @@ function LazyImage({
   frameClassName,
   imageClassName,
   pulseClassName,
+  frameStyle,
   onLoad,
   onError,
   loading,
@@ -117,9 +132,44 @@ function LazyImage({
   ...imgProps
 }: LazyImageProps) {
   const [loaded, setLoaded] = useState(false);
+  const mountTimestampRef = useRef<number>(Date.now());
+  const revealTimeoutRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setLoaded(false);
+    mountTimestampRef.current = Date.now();
+    if (revealTimeoutRef.current !== null) {
+      window.clearTimeout(revealTimeoutRef.current);
+      revealTimeoutRef.current = null;
+    }
+  }, [imgProps.src]);
+
+  useEffect(() => {
+    return () => {
+      if (revealTimeoutRef.current !== null) {
+        window.clearTimeout(revealTimeoutRef.current);
+        revealTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  const revealImage = useCallback(() => {
+    if (loaded) return;
+    const elapsed = Date.now() - mountTimestampRef.current;
+    const delay = Math.max(0, MIN_IMAGE_SKELETON_MS - elapsed);
+    if (delay === 0) {
+      setLoaded(true);
+      return;
+    }
+
+    revealTimeoutRef.current = window.setTimeout(() => {
+      revealTimeoutRef.current = null;
+      setLoaded(true);
+    }, delay);
+  }, [loaded]);
 
   return (
-    <div className={`relative overflow-hidden ${frameClassName}`}>
+    <div className={`relative overflow-hidden ${frameClassName}`} style={frameStyle}>
       {!loaded ? (
         <div
           className={`absolute inset-0 animate-pulse ${pulseClassName || "bg-slate-200/80"}`}
@@ -132,16 +182,75 @@ function LazyImage({
         loading={loading ?? "lazy"}
         decoding={decoding ?? "async"}
         onLoad={(event) => {
-          setLoaded(true);
           onLoad?.(event);
+          revealImage();
         }}
         onError={(event) => {
-          setLoaded(true);
           onError?.(event);
+          revealImage();
         }}
         className={`${imageClassName} transition-opacity duration-200 ${loaded ? "opacity-100" : "opacity-0"}`}
       />
     </div>
+  );
+}
+
+interface InlineSharedImageProps {
+  src: string;
+  alt: string;
+  onOpenLightbox?: (url: string, alt?: string) => void;
+  onRemixImage?: (url: string, alt?: string) => void;
+}
+
+function InlineSharedImage({ src, alt, onOpenLightbox, onRemixImage }: InlineSharedImageProps) {
+  const [aspectRatio, setAspectRatio] = useState<number>(() => {
+    const cached = imageAspectRatioCache.get(src);
+    return cached && Number.isFinite(cached) && cached > 0 ? cached : DEFAULT_INLINE_IMAGE_ASPECT_RATIO;
+  });
+
+  useEffect(() => {
+    const cached = imageAspectRatioCache.get(src);
+    setAspectRatio(cached && Number.isFinite(cached) && cached > 0 ? cached : DEFAULT_INLINE_IMAGE_ASPECT_RATIO);
+  }, [src]);
+
+  const handleImageLoad = useCallback((event: SyntheticEvent<HTMLImageElement>) => {
+    const element = event.currentTarget;
+    if (!element.naturalWidth || !element.naturalHeight) return;
+    const measuredRatio = element.naturalWidth / element.naturalHeight;
+    if (!Number.isFinite(measuredRatio) || measuredRatio <= 0) return;
+    imageAspectRatioCache.set(src, measuredRatio);
+    setAspectRatio((current) => (Math.abs(current - measuredRatio) < 0.01 ? current : measuredRatio));
+  }, [src]);
+
+  return (
+    <span className="my-3 inline-flex w-full max-w-full flex-col items-start gap-1">
+      <button
+        type="button"
+        className="inline-block w-full max-w-[min(78vw,24rem)] cursor-zoom-in"
+        onClick={() => onOpenLightbox?.(src, alt)}
+      >
+        <LazyImage
+          src={src}
+          alt={alt}
+          frameClassName="w-full rounded-2xl border border-slate-200 bg-slate-200/70 shadow-sm"
+          frameStyle={{ aspectRatio }}
+          imageClassName="h-full w-full rounded-2xl object-cover transition hover:shadow-md"
+          pulseClassName="bg-slate-300/80"
+          onLoad={handleImageLoad}
+        />
+      </button>
+      {onRemixImage ? (
+        <span className="mt-1 inline-flex flex-wrap gap-1">
+          <button
+            type="button"
+            onClick={() => onRemixImage(src, alt)}
+            className="rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-100"
+          >
+            Mit @chatgpt remixen
+          </button>
+        </span>
+      ) : null}
+    </span>
   );
 }
 
@@ -486,33 +595,7 @@ function ChatMessageComponent({
               if (imgMatch) {
                 const imageAlt = imgMatch[1] || "Geteiltes Bild";
                 const imageUrl = imgMatch[2];
-                return (
-                  <span key={i} className="my-3 inline-flex flex-col items-start gap-1">
-                    <button
-                      type="button"
-                      className="inline-block cursor-zoom-in"
-                      onClick={() => onOpenLightbox?.(imageUrl, imageAlt)}
-                    >
-                      <LazyImage
-                        src={imageUrl}
-                        alt={imageAlt}
-                        frameClassName="min-h-24 max-w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
-                        imageClassName="block max-h-80 max-w-full rounded-2xl object-contain transition hover:shadow-md"
-                      />
-                    </button>
-                    {onRemixImage ? (
-                      <span className="mt-1 inline-flex flex-wrap gap-1">
-                        <button
-                          type="button"
-                          onClick={() => onRemixImage(imageUrl, imageAlt)}
-                          className="rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-100"
-                        >
-                          Mit @chatgpt remixen
-                        </button>
-                      </span>
-                    ) : null}
-                  </span>
-                );
+                return <InlineSharedImage key={i} src={imageUrl} alt={imageAlt} onOpenLightbox={onOpenLightbox} onRemixImage={onRemixImage} />;
               }
 
               // Split line by URLs, @mentions, and text
@@ -525,31 +608,13 @@ function ChatMessageComponent({
                   // Check if it's an image/GIF
                   if (isImageUrl(url)) {
                     return (
-                      <span key={`${i}-${j}`} className="my-3 inline-flex flex-col items-start gap-1">
-                        <button
-                          type="button"
-                          className="inline-block cursor-zoom-in"
-                          onClick={() => onOpenLightbox?.(url, "Geteilter Inhalt")}
-                        >
-                          <LazyImage
-                            src={url}
-                            alt="Geteilter Inhalt"
-                            frameClassName="min-h-24 max-w-full rounded-2xl border border-slate-200 bg-slate-100 shadow-sm"
-                            imageClassName="block max-h-80 max-w-full rounded-2xl object-contain transition hover:shadow-md"
-                          />
-                        </button>
-                        {onRemixImage ? (
-                          <span className="mt-1 inline-flex flex-wrap gap-1">
-                            <button
-                              type="button"
-                              onClick={() => onRemixImage(url, "Geteilter Inhalt")}
-                              className="rounded-lg border border-sky-200 bg-sky-50 px-2 py-1 text-[11px] font-semibold text-sky-700 transition hover:bg-sky-100"
-                            >
-                              Mit @chatgpt remixen
-                            </button>
-                          </span>
-                        ) : null}
-                      </span>
+                      <InlineSharedImage
+                        key={`${i}-${j}`}
+                        src={url}
+                        alt="Geteilter Inhalt"
+                        onOpenLightbox={onOpenLightbox}
+                        onRemixImage={onRemixImage}
+                      />
                     );
                   }
                   return (
