@@ -32,29 +32,28 @@ OpenAI runtime configuration (all optional, defaults can be kept as shown in you
 - `OPENAI_MODEL` fallback model when no prompt id is used
 - `OPENAI_PROMPT_ID` reusable prompt id for `responses.create`
 - `OPENAI_PROMPT_VERSION` prompt version (update this when you publish a new prompt version)
-- `OPENAI_LOW_LATENCY_MODE` `true|false` (default `true`, enables faster tool selection for normal chat)
+- `OPENAI_LOW_LATENCY_MODE` `true|false` (default `false`; if set to `true`, tools/includes are selected more aggressively for speed)
 - `OPENAI_STORE_RESPONSES` `true|false`
 - `OPENAI_INCLUDE_REASONING_ENCRYPTED` `true|false`
 - `OPENAI_INCLUDE_WEB_SOURCES` `true|false`
 - `OPENAI_ENABLE_WEB_SEARCH` `true|false`
-- `OPENAI_WEB_SEARCH_COUNTRY`, `OPENAI_WEB_SEARCH_REGION`, `OPENAI_WEB_SEARCH_CITY`
+- `OPENAI_WEB_SEARCH_COUNTRY`, `OPENAI_WEB_SEARCH_REGION`, `OPENAI_WEB_SEARCH_CITY`, `OPENAI_WEB_SEARCH_TIMEZONE` (empty means `null`)
 - `OPENAI_WEB_SEARCH_CONTEXT_SIZE` `low|medium|high`
 - `OPENAI_ENABLE_IMAGE_GENERATION` `true|false`
-- `OPENAI_IMAGE_MODEL` (example: `gpt-image-1-mini`)
+- `OPENAI_IMAGE_MODEL` (example/default: `gpt-image-1.5`)
 - `OPENAI_IMAGE_BACKGROUND` `auto|opaque|transparent`
 - `OPENAI_IMAGE_MODERATION` `low|auto`
-- `OPENAI_IMAGE_OUTPUT_COMPRESSION` `0-100`
+- `OPENAI_IMAGE_OUTPUT_COMPRESSION` optional `0-100` (empty omits `output_compression`)
 - `OPENAI_IMAGE_OUTPUT_FORMAT` `png|jpeg|webp`
 - `OPENAI_IMAGE_QUALITY` `auto|low|medium|high`
 - `OPENAI_IMAGE_SIZE` `auto|1024x1024|1024x1536|1536x1024`
+- `OPENAI_IMAGE_PARTIAL_IMAGES` integer >= `0` (nur relevant bei Streaming-Responses; im aktuellen non-streaming Runtime wird es nicht an die API gesendet)
 
 Grok runtime configuration (all optional except `GROK_API_KEY` if you use `@grok`):
 
 - `GROK_BASE_URL` default `https://api.x.ai/v1`
 - `GROK_MODEL` default `grok-4-1-fast-non-reasoning`
-- `GROK_ENABLE_IMAGE_GENERATION` `true|false` (default `true`)
-- `GROK_IMAGE_MODEL` default `grok-imagine-image`
-- `GROK_IMAGE_RESPONSE_FORMAT` `b64_json|url` (default `b64_json`)
+- `@grok` supports text responses only in this app runtime (no image generation/remix)
 - Grok runs with an always-on bold/unhinged style prompt in this app runtime.
 - Grok avatar path in UI: `client/src/resources/grokAvatar.png`
 

@@ -62,7 +62,7 @@ Set these project environment variables in Vercel:
 - `OPENAI_PROMPT_ID` and `OPENAI_PROMPT_VERSION` (for pinned prompt releases)
 - `OPENAI_ENABLE_WEB_SEARCH`, `OPENAI_WEB_SEARCH_*` (optional)
 - `OPENAI_ENABLE_IMAGE_GENERATION`, `OPENAI_IMAGE_*` (optional)
-- `GROK_BASE_URL`, `GROK_MODEL`, `GROK_ENABLE_IMAGE_GENERATION`, `GROK_IMAGE_*` (optional)
+- `GROK_BASE_URL`, `GROK_MODEL` (optional, text only)
 - `OPENAI_STORE_RESPONSES`, `OPENAI_INCLUDE_REASONING_ENCRYPTED`, `OPENAI_INCLUDE_WEB_SOURCES` (optional)
 - `CHAT_DEV_UNLOCK_CODE` 16-digit username unlock for developer mode (optional)
 - `CHAT_DEV_TOKEN_SECRET` signing secret for dev-mode admin token (optional, recommended)

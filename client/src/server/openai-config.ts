@@ -18,6 +18,7 @@ export interface ChatOpenAiConfig {
     country: string;
     region: string;
     city: string;
+    timezone: string | null;
     contextSize: WebSearchContextSize;
   };
   imageGeneration: {
@@ -25,18 +26,19 @@ export interface ChatOpenAiConfig {
     model: string;
     background: ImageBackground;
     moderation: ImageModeration;
-    outputCompression: number;
+    outputCompression?: number;
     outputFormat: ImageOutputFormat;
     quality: ImageQuality;
     size: ImageSize;
+    partialImages: number;
   };
 }
 
 const DEFAULTS = {
   promptId: "pmpt_698b4aee21308196b860d14abc12b51d0f2e06f804bcc0ca",
-  promptVersion: "4",
+  promptVersion: "5",
   fallbackModel: "gpt-4o-mini",
-  lowLatencyMode: true,
+  lowLatencyMode: false,
   store: true,
   includeEncryptedReasoning: true,
   includeWebSources: true,
@@ -45,17 +47,19 @@ const DEFAULTS = {
     country: "DE",
     region: "Hessen",
     city: "Limburg",
+    timezone: null as string | null,
     contextSize: "low" as WebSearchContextSize,
   },
   imageGeneration: {
-    enabled: false,
-    model: "gpt-image-1-mini",
+    enabled: true,
+    model: "gpt-image-1.5",
     background: "auto" as ImageBackground,
     moderation: "low" as ImageModeration,
-    outputCompression: 100,
+    outputCompression: undefined as number | undefined,
     outputFormat: "png" as ImageOutputFormat,
     quality: "auto" as ImageQuality,
     size: "auto" as ImageSize,
+    partialImages: 1,
   },
 };
 
@@ -75,6 +79,14 @@ function parseBoolean(key: string, fallback: boolean): boolean {
 }
 
 function parseNumber(key: string, fallback: number): number {
+  const value = getEnv(key);
+  if (!value) return fallback;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return parsed;
+}
+
+function parseOptionalNumber(key: string, fallback?: number): number | undefined {
   const value = getEnv(key);
   if (!value) return fallback;
   const parsed = Number.parseInt(value, 10);
@@ -112,6 +124,7 @@ export function getChatOpenAiConfig(): ChatOpenAiConfig {
       country: getEnv("OPENAI_WEB_SEARCH_COUNTRY") ?? DEFAULTS.webSearch.country,
       region: getEnv("OPENAI_WEB_SEARCH_REGION") ?? DEFAULTS.webSearch.region,
       city: getEnv("OPENAI_WEB_SEARCH_CITY") ?? DEFAULTS.webSearch.city,
+      timezone: getEnv("OPENAI_WEB_SEARCH_TIMEZONE") ?? DEFAULTS.webSearch.timezone,
       contextSize: parseEnum(
         "OPENAI_WEB_SEARCH_CONTEXT_SIZE",
         ["low", "medium", "high"] as const,
@@ -131,10 +144,11 @@ export function getChatOpenAiConfig(): ChatOpenAiConfig {
         ["low", "auto"] as const,
         DEFAULTS.imageGeneration.moderation,
       ),
-      outputCompression: Math.min(
-        100,
-        Math.max(0, parseNumber("OPENAI_IMAGE_OUTPUT_COMPRESSION", DEFAULTS.imageGeneration.outputCompression)),
-      ),
+      outputCompression: (() => {
+        const value = parseOptionalNumber("OPENAI_IMAGE_OUTPUT_COMPRESSION", DEFAULTS.imageGeneration.outputCompression);
+        if (value === undefined) return undefined;
+        return Math.min(100, Math.max(0, value));
+      })(),
       outputFormat: parseEnum(
         "OPENAI_IMAGE_OUTPUT_FORMAT",
         ["png", "jpeg", "webp"] as const,
@@ -150,6 +164,7 @@ export function getChatOpenAiConfig(): ChatOpenAiConfig {
         ["auto", "1024x1024", "1024x1536", "1536x1024"] as const,
         DEFAULTS.imageGeneration.size,
       ),
+      partialImages: Math.max(0, parseNumber("OPENAI_IMAGE_PARTIAL_IMAGES", DEFAULTS.imageGeneration.partialImages)),
     },
   };
 }
