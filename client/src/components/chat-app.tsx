@@ -30,6 +30,7 @@ import type {
   VotePollRequest,
 } from "@/lib/types";
 import chatgptAvatar from "@/resources/chatgpt.png";
+import grokAvatar from "@/resources/grokAvatar.png";
 
 type ComposerMode = "message" | "question" | "poll" | "challenge";
 const PRIMARY_COMPOSER_MODES: ComposerMode[] = ["message"];
@@ -99,11 +100,24 @@ const SUPPORTED_CHAT_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "im
 const MEDIA_PAGE_SIZE = 3;
 const MEDIA_CACHE_KEY = "chatppc.media.cache.v1";
 const MEDIA_CACHE_TTL_MS = 5 * 60 * 1_000;
-
 type NotificationState = NotificationPermission | "unsupported";
 
 function hasChatGptMention(message: string): boolean {
   return /(^|\s)@chatgpt\b/i.test(message);
+}
+
+function hasGrokMention(message: string): boolean {
+  return /(^|\s)@grok\b/i.test(message);
+}
+
+function hasAiMention(message: string): boolean {
+  return hasChatGptMention(message) || hasGrokMention(message);
+}
+
+function prependMention(current: string, mention: "@chatgpt" | "@grok"): string {
+  const trimmed = current.trim();
+  if (!trimmed) return `${mention} `;
+  return `${mention} ${current}`;
 }
 
 function mergeUser(users: UserPresenceDTO[], next: UserPresenceDTO): UserPresenceDTO[] {
@@ -364,7 +378,15 @@ function aiProgressForStatus(status: string): number {
 }
 
 function shouldShowAiProgress(user: UserPresenceDTO): boolean {
-  return user.clientId === "chatgpt" && aiProgressForStatus(user.status) > 0;
+  return (user.clientId === "chatgpt" || user.clientId === "grok") && aiProgressForStatus(user.status) > 0;
+}
+
+function createDefaultAiStatus(): AiStatusDTO {
+  return {
+    chatgpt: "online",
+    grok: "online",
+    updatedAt: new Date().toISOString(),
+  };
 }
 
 interface MessageListProps {
@@ -379,7 +401,7 @@ interface MessageListProps {
   onDeleteMessage: (messageId: string) => void;
   onStartReply: (message: MessageDTO) => void;
   onOpenLightbox: (url: string, alt?: string) => void;
-  onRemixImage: (url: string, alt?: string) => void;
+  onRemixImage: (url: string, alt?: string, provider?: "chatgpt" | "grok") => void;
 }
 
 const MessageList = memo(function MessageList({
@@ -489,13 +511,14 @@ export function ChatApp() {
   const messageInputLineHeightRef = useRef<number | null>(null);
   const messageInputResizeFrameRef = useRef<number | null>(null);
   const lightboxCopyResetTimeoutRef = useRef<number | null>(null);
+  const bottomStickFrameRef = useRef<number | null>(null);
 
   const [session, setSession] = useState<SessionState | null>(() => loadSession());
   const [users, setUsers] = useState<UserPresenceDTO[]>([]);
   const [messages, setMessages] = useState<MessageDTO[]>([]);
   const [messageWindowSize, setMessageWindowSize] = useState(MESSAGE_RENDER_WINDOW);
   const [error, setError] = useState<string | null>(null);
-  const [aiStatus, setAiStatus] = useState("online");
+  const [aiStatus, setAiStatus] = useState<AiStatusDTO>(() => createDefaultAiStatus());
   const [uploadingChat, setUploadingChat] = useState(false);
   const [uploadingBackground, setUploadingBackground] = useState(false);
   const [chatBackgroundUrl, setChatBackgroundUrl] = useState<string | null>(null);
@@ -565,9 +588,18 @@ export function ChatApp() {
         clientId: "chatgpt",
         username: "ChatGPT",
         profilePicture: chatgptAvatar.src,
-        status: aiStatus,
+        status: aiStatus.chatgpt,
         isOnline: true,
-        lastSeenAt: new Date().toISOString(),
+        lastSeenAt: aiStatus.updatedAt,
+      },
+      {
+        id: "grok",
+        clientId: "grok",
+        username: "Grok",
+        profilePicture: grokAvatar.src,
+        status: aiStatus.grok,
+        isOnline: true,
+        lastSeenAt: aiStatus.updatedAt,
       },
       ...users.filter((user) => user.isOnline).sort((a, b) => a.username.localeCompare(b.username)),
     ],
@@ -614,6 +646,26 @@ export function ChatApp() {
       behavior,
     });
   }, []);
+
+  const captureScrollAnchor = useCallback(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+
+    prependAnchorRef.current = {
+      height: element.scrollHeight,
+      top: element.scrollTop,
+    };
+  }, []);
+
+  const scheduleBottomStick = useCallback(() => {
+    if (!isAtBottomRef.current) return;
+    if (bottomStickFrameRef.current !== null) return;
+
+    bottomStickFrameRef.current = window.requestAnimationFrame(() => {
+      bottomStickFrameRef.current = null;
+      scrollToBottom("auto");
+    });
+  }, [scrollToBottom]);
 
   const clearPendingDelivery = useCallback((messageId: string) => {
     setPendingDeliveries((current) => {
@@ -703,9 +755,24 @@ export function ChatApp() {
     setComposerOpen(true);
     setMessageDraft((current) => {
       if (hasChatGptMention(current)) return current;
-      const trimmed = current.trim();
-      if (!trimmed) return "@chatgpt ";
-      return `@chatgpt ${current}`;
+      return prependMention(current, "@chatgpt");
+    });
+
+    requestAnimationFrame(() => {
+      const textarea = messageInputRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      const cursor = textarea.value.length;
+      textarea.setSelectionRange(cursor, cursor);
+    });
+  }, []);
+
+  const activateAskGrok = useCallback(() => {
+    setComposerMode("message");
+    setComposerOpen(true);
+    setMessageDraft((current) => {
+      if (hasGrokMention(current)) return current;
+      return prependMention(current, "@grok");
     });
 
     requestAnimationFrame(() => {
@@ -883,7 +950,14 @@ export function ChatApp() {
     (incoming: MessageDTO[], options: { notify: boolean }) => {
       if (incoming.length === 0) return;
 
+      const shouldStickToBottom = isAtBottomRef.current;
       const fresh = incoming.filter((message) => !knownMessageIdsRef.current.has(message.id));
+
+      if (!shouldStickToBottom && fresh.length > 0) {
+        captureScrollAnchor();
+        setMessageWindowSize((current) => Math.min(MAX_VISIBLE_MESSAGES, current + fresh.length));
+      }
+
       setMessages((current) => limitVisibleMessages(mergeMessages(current, incoming)));
       updateLatestMessageCursor(incoming);
 
@@ -899,11 +973,11 @@ export function ChatApp() {
         void fetchMediaItems({ silent: true });
       }
 
-      if (isAtBottomRef.current) {
-        requestAnimationFrame(() => scrollToBottom(options.notify ? "smooth" : "auto"));
+      if (shouldStickToBottom) {
+        scheduleBottomStick();
       }
     },
-    [fetchMediaItems, notifyMessages, scrollToBottom, showMedia, updateLatestMessageCursor],
+    [captureScrollAnchor, fetchMediaItems, notifyMessages, scheduleBottomStick, showMedia, updateLatestMessageCursor],
   );
 
   const applySnapshot = useCallback(
@@ -911,7 +985,7 @@ export function ChatApp() {
       if (isLeavingRef.current) return;
 
       setUsers(snapshot.users);
-      setAiStatus(snapshot.aiStatus.status || "online");
+      setAiStatus(snapshot.aiStatus || createDefaultAiStatus());
       setChatBackgroundUrl(snapshot.background.url);
 
       const limitedMessages = limitVisibleMessages(snapshot.messages);
@@ -934,12 +1008,12 @@ export function ChatApp() {
     const [presence, page, ai, background] = await Promise.all([
       fetchPresence(),
       fetchMessagePage({ limit: SNAPSHOT_LIMIT }),
-      fetchAiStatus().catch(() => ({ status: "online", updatedAt: new Date().toISOString() })),
+      fetchAiStatus().catch(() => createDefaultAiStatus()),
       fetchChatBackground().catch(() => ({ url: null, updatedAt: null, updatedBy: null })),
     ]);
 
     setUsers(presence);
-    setAiStatus(ai.status || "online");
+    setAiStatus(ai);
     setChatBackgroundUrl(background.url);
     const limitedMessages = limitVisibleMessages(page.messages);
     setMessages(limitedMessages);
@@ -1075,10 +1149,7 @@ export function ChatApp() {
     if (!scrollRef.current) return;
 
     setLoadingOlder(true);
-    prependAnchorRef.current = {
-      height: scrollRef.current.scrollHeight,
-      top: scrollRef.current.scrollTop,
-    };
+    captureScrollAnchor();
 
     try {
       const oldest = messages[0]?.createdAt;
@@ -1092,7 +1163,7 @@ export function ChatApp() {
     } finally {
       setLoadingOlder(false);
     }
-  }, [applyIncomingMessages, fetchMessagePage, hasMoreOlder, loadingOlder, messages, session]);
+  }, [applyIncomingMessages, captureScrollAnchor, fetchMessagePage, hasMoreOlder, loadingOlder, messages, session]);
 
   useEffect(() => {
     isLeavingRef.current = isLeaving;
@@ -1129,6 +1200,10 @@ export function ChatApp() {
       if (messageInputResizeFrameRef.current !== null) {
         window.cancelAnimationFrame(messageInputResizeFrameRef.current);
         messageInputResizeFrameRef.current = null;
+      }
+      if (bottomStickFrameRef.current !== null) {
+        window.cancelAnimationFrame(bottomStickFrameRef.current);
+        bottomStickFrameRef.current = null;
       }
     };
   }, []);
@@ -1317,9 +1392,17 @@ export function ChatApp() {
     };
 
     const onAiStatus = (event: Event) => {
-      const parsed = parseEvent<{ status: string }>(event as MessageEvent<string>);
+      const parsed = parseEvent<{ status: string; provider?: "chatgpt" | "grok" }>(event as MessageEvent<string>);
       if (!parsed || isLeavingRef.current) return;
-      setAiStatus(parsed.status || "online");
+      const status = parsed.status || "online";
+      setAiStatus((current) => {
+        const nextProvider = parsed.provider || "chatgpt";
+        return {
+          ...current,
+          [nextProvider]: status,
+          updatedAt: new Date().toISOString(),
+        };
+      });
     };
 
     const onBackgroundUpdated = (event: Event) => {
@@ -1409,6 +1492,31 @@ export function ChatApp() {
   }, [derivedStatus, isLeaving, isWindowFocused, pushPresenceStatus, session]);
 
   useEffect(() => {
+    scheduleBottomStick();
+  }, [scheduleBottomStick, visibleMessages.length]);
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+
+    const onLoadCapture = () => {
+      scheduleBottomStick();
+    };
+
+    const observer = new MutationObserver(() => {
+      scheduleBottomStick();
+    });
+
+    element.addEventListener("load", onLoadCapture, true);
+    observer.observe(element, { childList: true, subtree: true });
+
+    return () => {
+      element.removeEventListener("load", onLoadCapture, true);
+      observer.disconnect();
+    };
+  }, [scheduleBottomStick]);
+
+  useEffect(() => {
     const element = scrollRef.current;
     if (!element) return;
 
@@ -1416,14 +1524,11 @@ export function ChatApp() {
       const distanceFromBottom = element.scrollHeight - (element.scrollTop + element.clientHeight);
       const atBottom = distanceFromBottom <= NEAR_BOTTOM_PX;
       isAtBottomRef.current = atBottom;
-      setIsAtBottom(atBottom);
+      setIsAtBottom((current) => (current === atBottom ? current : atBottom));
 
       if (element.scrollTop < 120 && !loadingOlder) {
         if (messageWindowSize < messages.length) {
-          prependAnchorRef.current = {
-            height: element.scrollHeight,
-            top: element.scrollTop,
-          };
+          captureScrollAnchor();
           setMessageWindowSize((current) => Math.min(messages.length, current + MESSAGE_RENDER_CHUNK));
           return;
         }
@@ -1441,7 +1546,7 @@ export function ChatApp() {
     return () => {
       element.removeEventListener("scroll", onScroll);
     };
-  }, [hasMoreOlder, loadOlderMessages, loadingOlder, messageWindowSize, messages.length]);
+  }, [captureScrollAnchor, hasMoreOlder, loadOlderMessages, loadingOlder, messageWindowSize, messages.length]);
 
   useEffect(() => {
     const anchor = prependAnchorRef.current;
@@ -1550,7 +1655,7 @@ export function ChatApp() {
           .join("\n");
         const combinedMessage = [content, uploadedImageMarkdown].filter(Boolean).join("\n\n");
         if (!combinedMessage) return;
-        const shouldTriggerAiWorker = hasChatGptMention(combinedMessage);
+        const shouldTriggerAiWorker = hasAiMention(combinedMessage);
 
         tempMessageId = createTempMessageId();
         appendOptimisticMessage({
@@ -1850,7 +1955,7 @@ export function ChatApp() {
   }, []);
 
   const handleRemixImage = useCallback(
-    (url: string, alt?: string) => {
+    (url: string, alt?: string, provider: "chatgpt" | "grok" = "grok") => {
       setComposerMode("message");
       setComposerOpen(true);
       setShowMentionSuggestions(false);
@@ -1870,13 +1975,23 @@ export function ChatApp() {
         ];
       });
       setMessageDraft((current) => {
-        if (hasChatGptMention(current)) {
-          return current.trim() ? current : "@chatgpt remixe dieses Bild: ";
+        if (provider === "chatgpt") {
+          if (hasChatGptMention(current)) {
+            return current.trim() ? current : "@chatgpt remixe dieses Bild: ";
+          }
+          if (!current.trim()) {
+            return "@chatgpt remixe dieses Bild: ";
+          }
+          return prependMention(current, "@chatgpt");
+        }
+
+        if (hasGrokMention(current)) {
+          return current.trim() ? current : "@grok remixe dieses Bild: ";
         }
         if (!current.trim()) {
-          return "@chatgpt remixe dieses Bild: ";
+          return "@grok remixe dieses Bild: ";
         }
-        return `@chatgpt ${current}`;
+        return prependMention(current, "@grok");
       });
 
       requestAnimationFrame(() => {
@@ -2519,7 +2634,7 @@ export function ChatApp() {
                     </span>
                   ) : null}
                 </div>
-                <p className="text-xs text-slate-500">Chatte mit deiner Gruppe. Erwähne @chatgpt für KI-Antworten.</p>
+                <p className="text-xs text-slate-500">Chatte mit deiner Gruppe. Erwähne @chatgpt oder @grok für KI-Antworten.</p>
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -2613,6 +2728,17 @@ export function ChatApp() {
                   }`}
                 >
                   ChatGPT fragen
+                </button>
+                <button
+                  type="button"
+                  onClick={activateAskGrok}
+                  className={`h-7 rounded-full px-3 text-xs font-semibold transition ${
+                    composerMode === "message" && hasGrokMention(messageDraft)
+                      ? "bg-sky-600 text-white"
+                      : "bg-sky-100 text-sky-700 hover:bg-sky-200"
+                  }`}
+                >
+                  Grok fragen
                 </button>
                 {SECONDARY_COMPOSER_MODES.map((mode) => (
                   <button
@@ -3083,7 +3209,7 @@ export function ChatApp() {
               <p>1. Schreibe Nachrichten, Fragen und Aufgaben im Composer.</p>
               <p>2. Erstelle Umfragen mit mehreren Optionen und sofortigen Updates.</p>
               <p>3. Teile Bilder und GIFs per Drag-and-drop.</p>
-              <p>4. Erwähne <span className="font-semibold text-slate-900">@chatgpt</span>, wenn du KI-Antworten möchtest.</p>
+              <p>4. Erwähne <span className="font-semibold text-slate-900">@chatgpt</span> oder <span className="font-semibold text-slate-900">@grok</span>, wenn du KI-Antworten möchtest.</p>
             </div>
             <div className="mt-5 rounded-2xl border border-sky-100 bg-sky-50 p-3 text-sm text-sky-900">
               Nächster Schritt: Benachrichtigungen aktivieren, damit du nichts verpasst.

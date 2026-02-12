@@ -14,7 +14,7 @@ export default function HomePage() {
           Der Gruppenchat für schnelle Abstimmungen und Antworten
         </h1>
         <p className="mt-4 max-w-2xl text-sm text-slate-600 sm:text-base">
-          ChatPPC vereint Echtzeit-Chat, Hilfe mit <span className="font-semibold">@chatgpt</span>, Fragen,
+          ChatPPC vereint Echtzeit-Chat, Hilfe mit <span className="font-semibold">@chatgpt</span> oder <span className="font-semibold">@grok</span>, Fragen,
           Umfragen mit bis zu 15 Optionen und Bildfreigaben in einer App.
         </p>
         <div className="mt-4 flex flex-wrap gap-2 text-xs font-medium text-slate-600">

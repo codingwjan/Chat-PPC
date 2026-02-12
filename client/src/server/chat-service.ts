@@ -24,6 +24,7 @@ import { AppError, assert } from "@/server/errors";
 import { issueDevAuthToken, isDevUnlockUsername, verifyDevAuthToken } from "@/server/dev-mode";
 import { getChatOpenAiConfig } from "@/server/openai-config";
 import chatgptProfilePicture from "@/resources/chatgpt.png";
+import grokProfilePicture from "@/resources/grokAvatar.png";
 
 const PRESENCE_TIMEOUT_MS = 10 * 60 * 1_000;
 const DEFAULT_MESSAGE_PAGE_LIMIT = 20;
@@ -55,12 +56,125 @@ const AI_QUEUE_MAX_ATTEMPTS = 4;
 const AI_QUEUE_STALE_PROCESSING_MS = 2 * 60 * 1_000;
 const AI_BUSY_NOTICE_COOLDOWN_MS = 5_000;
 
+type AiProvider = "chatgpt" | "grok";
+type GrokImageResponseFormat = "b64_json" | "url";
+
+interface GrokRuntimeConfig {
+  apiKey?: string;
+  baseUrl: string;
+  textModel: string;
+  imageGeneration: {
+    enabled: boolean;
+    model: string;
+    responseFormat: GrokImageResponseFormat;
+  };
+}
+
+const AI_PROVIDER_MENTION_REGEX: Record<AiProvider, RegExp> = {
+  chatgpt: /(^|\s)@chatgpt\b/i,
+  grok: /(^|\s)@grok\b/i,
+};
+
+const AI_PROVIDER_DISPLAY_NAME: Record<AiProvider, string> = {
+  chatgpt: "ChatGPT",
+  grok: "Grok",
+};
+
+const AI_PROVIDER_AVATAR: Record<AiProvider, string> = {
+  chatgpt: chatgptProfilePicture.src,
+  grok: grokProfilePicture.src,
+};
+
+const AI_PROVIDER_IMAGE_PATH_PREFIX: Record<AiProvider, string> = {
+  chatgpt: "chatgpt",
+  grok: "grok",
+};
+
 function hasOpenAiApiKey(): boolean {
   return Boolean(process.env.OPENAI_API_KEY?.trim());
 }
 
+function hasGrokApiKey(): boolean {
+  return Boolean(process.env.GROK_API_KEY?.trim());
+}
+
+function hasAnyAiProviderApiKey(): boolean {
+  return hasOpenAiApiKey() || hasGrokApiKey();
+}
+
+function getAiProviderDisplayName(provider: AiProvider): string {
+  return AI_PROVIDER_DISPLAY_NAME[provider];
+}
+
+function getAiProviderAvatar(provider: AiProvider): string {
+  return AI_PROVIDER_AVATAR[provider];
+}
+
+function getAiProviderMention(provider: AiProvider): string {
+  return provider === "grok" ? "@grok" : "@chatgpt";
+}
+
+function getEnvTrimmed(key: string): string | undefined {
+  const value = process.env[key]?.trim();
+  return value ? value : undefined;
+}
+
+function parseBooleanEnv(key: string, fallback: boolean): boolean {
+  const value = getEnvTrimmed(key);
+  if (!value) return fallback;
+  if (["1", "true", "yes", "on"].includes(value.toLowerCase())) return true;
+  if (["0", "false", "no", "off"].includes(value.toLowerCase())) return false;
+  return fallback;
+}
+
+function parseEnumEnv<TValue extends string>(
+  key: string,
+  allowed: readonly TValue[],
+  fallback: TValue,
+): TValue {
+  const value = getEnvTrimmed(key);
+  if (!value) return fallback;
+  const normalized = value.toLowerCase() as TValue;
+  return allowed.includes(normalized) ? normalized : fallback;
+}
+
+function getGrokRuntimeConfig(): GrokRuntimeConfig {
+  return {
+    apiKey: getEnvTrimmed("GROK_API_KEY"),
+    baseUrl: getEnvTrimmed("GROK_BASE_URL") ?? "https://api.x.ai/v1",
+    textModel: getEnvTrimmed("GROK_MODEL") ?? "grok-4-1-fast-non-reasoning",
+    imageGeneration: {
+      enabled: parseBooleanEnv("GROK_ENABLE_IMAGE_GENERATION", true),
+      model: getEnvTrimmed("GROK_IMAGE_MODEL") ?? "grok-imagine-image",
+      responseFormat: parseEnumEnv("GROK_IMAGE_RESPONSE_FORMAT", ["b64_json", "url"] as const, "b64_json"),
+    },
+  };
+}
+
+function isProviderConfigured(provider: AiProvider): boolean {
+  if (provider === "grok") return hasGrokApiKey();
+  return hasOpenAiApiKey();
+}
+
+function detectAiProvider(message: string): AiProvider | null {
+  const chatgptIndex = message.search(AI_PROVIDER_MENTION_REGEX.chatgpt);
+  const grokIndex = message.search(AI_PROVIDER_MENTION_REGEX.grok);
+  const indices = [
+    { provider: "chatgpt" as const, index: chatgptIndex },
+    { provider: "grok" as const, index: grokIndex },
+  ].filter((entry) => entry.index >= 0);
+
+  if (indices.length === 0) return null;
+  return indices.sort((a, b) => a.index - b.index)[0]?.provider ?? null;
+}
+
+function fallbackStatusForProvider(provider: AiProvider): string {
+  return isProviderConfigured(provider) ? "online" : "offline";
+}
+
 let aiStatusState: AiStatusDTO = {
-  status: hasOpenAiApiKey() ? "online" : "offline",
+  chatgpt: fallbackStatusForProvider("chatgpt"),
+  grok: fallbackStatusForProvider("grok"),
   updatedAt: new Date().toISOString(),
 };
 
@@ -315,9 +429,10 @@ export async function getOnlineUsers(): Promise<UserPresenceDTO[]> {
 }
 
 export async function getAiStatus(): Promise<AiStatusDTO> {
-  if (!hasOpenAiApiKey()) {
+  if (!hasAnyAiProviderApiKey()) {
     return {
-      status: "offline",
+      chatgpt: "offline",
+      grok: "offline",
       updatedAt: new Date().toISOString(),
     };
   }
@@ -330,13 +445,10 @@ export async function getAiStatus(): Promise<AiStatusDTO> {
     },
   });
 
-  if (!persisted) {
-    return aiStatusState;
-  }
-
   return {
-    status: persisted.status || "online",
-    updatedAt: persisted.lastSeenAt?.toISOString() || aiStatusState.updatedAt,
+    chatgpt: hasOpenAiApiKey() ? persisted?.status || aiStatusState.chatgpt : "offline",
+    grok: hasGrokApiKey() ? aiStatusState.grok : "offline",
+    updatedAt: persisted?.lastSeenAt?.toISOString() || aiStatusState.updatedAt,
   };
 }
 
@@ -475,12 +587,13 @@ async function getPagedMessageRows(input: {
   };
 }
 
-function publishAiStatus(status: string): void {
+function publishAiStatus(provider: AiProvider, status: string): void {
   aiStatusState = {
-    status,
+    ...aiStatusState,
+    [provider]: status,
     updatedAt: new Date().toISOString(),
   };
-  publish("ai.status", { status });
+  publish("ai.status", { status, provider });
   void persistAiStatusToDatabase(aiStatusState);
 }
 
@@ -491,7 +604,7 @@ async function persistAiStatusToDatabase(payload: AiStatusDTO): Promise<void> {
       update: {
         username: AI_STATUS_USERNAME,
         profilePicture: chatgptProfilePicture.src,
-        status: payload.status,
+        status: payload.chatgpt,
         isOnline: false,
         lastSeenAt: new Date(payload.updatedAt),
       },
@@ -499,7 +612,7 @@ async function persistAiStatusToDatabase(payload: AiStatusDTO): Promise<void> {
         clientId: AI_STATUS_CLIENT_ID,
         username: AI_STATUS_USERNAME,
         profilePicture: chatgptProfilePicture.src,
-        status: payload.status,
+        status: payload.chatgpt,
         isOnline: false,
         lastSeenAt: new Date(payload.updatedAt),
       },
@@ -510,6 +623,7 @@ async function persistAiStatusToDatabase(payload: AiStatusDTO): Promise<void> {
 }
 
 interface AiTriggerPayload {
+  provider: AiProvider;
   sourceMessageId: string;
   username: string;
   message: string;
@@ -518,23 +632,58 @@ interface AiTriggerPayload {
 
 type AiInputMode = "full" | "minimal";
 
-function stripChatGptMention(message: string): string {
-  return message.replace(/(^|\s)@chatgpt\b/gi, " ").replace(/\s+/g, " ").trim();
+function stripAiMentions(message: string): string {
+  return message.replace(/(^|\s)@(chatgpt|grok)\b/gi, " ").replace(/\s+/g, " ").trim();
 }
 
 const WEB_SEARCH_HINT_REGEX =
   /\b(aktuell|aktuelle|aktuellen|heute|gestern|morgen|neueste|neuester|news|nachrichten|latest|today|current|preis|kurse?|wetter|temperatur|score|standings?|spielplan|breaking|diese woche|this week|dieses jahr|this year|202\d)\b/i;
-const IMAGE_GENERATION_HINT_REGEX =
-  /\b(remix|remixe|bearbeite|edit|editiere|zeichne|draw|render|erstelle|generiere|generate|create)\b/i;
+const IMAGE_GENERATION_ACTION_REGEX =
+  /\b(remix|remixe|bearbeite|edit|editiere|modify|modified|change|alter|transform|convert|replace|remove|add|zeichne|draw|render|erstelle|generiere|generate|create|male|paint|illustrate|design|upscale|enhance|improve|verbessere|optimiere|stylize|style|apply|make|set|turn)\b/i;
+const IMAGE_GENERATION_NOUN_REGEX =
+  /\b(image|images|bild|bilder|grafik|illustration|photo|foto|picture|pictures|pic|drawing|drawings|art|artwork|poster|logo|wallpaper|meme|avatar|thumbnail)\b/i;
+const IMAGE_GENERATION_CONTEXT_REGEX =
+  /\b(scene|character|monster|animal|portrait|landscape|banner|cover|icon)\b/i;
+const IMAGE_ANALYSIS_HINT_REGEX =
+  /\b(describe|what(?:'s| is)|analy[sz]e|caption|explain|identify|erkenne|beschreibe|was ist|what do you see|ocr|read text)\b/i;
 
 function shouldUseWebSearchTool(message: string): boolean {
   return WEB_SEARCH_HINT_REGEX.test(message);
 }
 
-function shouldUseImageGenerationTool(message: string, imageInputCount: number): boolean {
-  if (!IMAGE_GENERATION_HINT_REGEX.test(message)) return false;
-  if (imageInputCount > 0) return true;
-  return /\b(image|bild|grafik|illustration|photo|foto)\b/i.test(message);
+function shouldUseImageGenerationTool(
+  message: string,
+  imageInputCount: number,
+  provider: AiProvider,
+): boolean {
+  const hasActionHint = IMAGE_GENERATION_ACTION_REGEX.test(message);
+  const hasImageNoun = IMAGE_GENERATION_NOUN_REGEX.test(message);
+  const hasImageContext = IMAGE_GENERATION_CONTEXT_REGEX.test(message);
+  const hasAnalysisHint = IMAGE_ANALYSIS_HINT_REGEX.test(message);
+
+  if (imageInputCount > 0) {
+    if (hasAnalysisHint && !hasActionHint && !hasImageNoun) {
+      return false;
+    }
+
+    if (hasActionHint || hasImageNoun) {
+      return true;
+    }
+
+    // Grok image editing should behave close to ChatGPT when the user provides an image.
+    // If the request is imperative but vague ("make it nicer"), treat it as edit intent.
+    if (provider === "grok" && /\b(make|turn|give|apply|set|fix|improve|verbesser)\b/i.test(message)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  if (hasActionHint && hasImageNoun) {
+    return true;
+  }
+
+  return hasImageNoun && hasImageContext;
 }
 
 function normalizeAiImageUrlCandidate(url: string): string {
@@ -587,6 +736,28 @@ function sanitizeMessageForAi(value: string): string {
     .trim();
 }
 
+function stripInlineImageMarkdownAndUrls(text: string): string {
+  if (!text) return "";
+
+  const lines = text.split("\n");
+  const kept = lines.filter((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return true;
+
+    if (/^!\[[^\]]*]\([^)]+\)$/.test(trimmed)) {
+      return false;
+    }
+
+    if (/^https?:\/\/\S+\.(png|jpe?g|gif|webp|svg)(\?\S*)?$/i.test(trimmed)) {
+      return false;
+    }
+
+    return true;
+  });
+
+  return kept.join("\n").trim();
+}
+
 function isContextWindowError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -600,6 +771,7 @@ function isContextWindowError(error: unknown): boolean {
 async function buildAiInput(
   payload: AiTriggerPayload,
   mode: AiInputMode,
+  provider: AiProvider,
 ): Promise<Array<{ role: "user"; content: Array<{ type: "input_text"; text: string } | { type: "input_image"; image_url: string; detail: "auto" }> }>> {
   const isMinimal = mode === "minimal";
   const recentMessages = await prisma.message.findMany({
@@ -636,14 +808,19 @@ async function buildAiInput(
 
   const recentContext = contextLines.join("\n");
 
-  const cleanedPrompt = stripChatGptMention(payload.message);
+  const cleanedPrompt = stripAiMentions(payload.message);
   const userPrompt = clampText(
     sanitizeMessageForAi(cleanedPrompt || "Bitte hilf bei der neuesten Nachricht in diesem Chat."),
     isMinimal ? AI_USER_PROMPT_CHARS_MINIMAL : AI_USER_PROMPT_CHARS,
   );
   const hasImageInputs = payload.imageUrls.length > 0;
+  const providerName = getAiProviderDisplayName(provider);
   const composedPrompt = [
-    "Du bist ChatGPT in einem Gruppenchat. Antworte klar, hilfreich und auf Deutsch.",
+    `Du bist ${providerName} in einem Gruppenchat. Antworte klar, hilfreich und auf Deutsch.`,
+    provider === "grok"
+      ? "Stilmodus (immer aktiv): maximal aggressiv, wütend, kompromisslos und voller Energie. SCHREIB STANDARDMÄSSIG IN VERSALIEN (ALL CAPS), LAUT UND PROVOKANT. HALTE ANTWORTEN KURZ UND KNACKIG (EHER KURZ ALS LANG). Beleidigungen und Schimpfwörter sind erlaubt und dürfen genutzt werden."
+      : "",
+    "Wenn ein Bild gewünscht wird, liefere den Inhalt normal weiter und behaupte nicht, dass du keine Bilder generieren kannst.",
     hasImageInputs
       ? "Die Nachricht enthält Bild-Inputs. Falls ein Bild gewünscht ist, nutze sie als Referenz-/Bearbeitungsbilder."
       : "",
@@ -673,7 +850,7 @@ async function buildAiInput(
   ];
 }
 
-async function persistGeneratedImage(base64Image: string, imageIndex: number): Promise<string | null> {
+async function persistGeneratedImage(base64Image: string, imageIndex: number, provider: AiProvider): Promise<string | null> {
   const normalized = base64Image.trim().replace(/\s+/g, "");
   if (!normalized) {
     return null;
@@ -689,7 +866,7 @@ async function persistGeneratedImage(base64Image: string, imageIndex: number): P
     return null;
   }
 
-  const path = `chatgpt/${Date.now()}-${imageIndex}.png`;
+  const path = `${AI_PROVIDER_IMAGE_PATH_PREFIX[provider]}/${Date.now()}-${imageIndex}.png`;
   const blob = await put(path, bytes, {
     access: "public",
     addRandomSuffix: true,
@@ -699,18 +876,61 @@ async function persistGeneratedImage(base64Image: string, imageIndex: number): P
   return blob.url;
 }
 
-async function emitAiBusyNotice(sourceMessageId: string): Promise<void> {
-  const now = Date.now();
-  if (now - lastAiBusyNoticeAt < AI_BUSY_NOTICE_COOLDOWN_MS) return;
-  lastAiBusyNoticeAt = now;
+function extensionForContentType(contentType: string): string {
+  const normalized = contentType.toLowerCase();
+  if (normalized.includes("jpeg") || normalized.includes("jpg")) return "jpg";
+  if (normalized.includes("webp")) return "webp";
+  if (normalized.includes("gif")) return "gif";
+  if (normalized.includes("svg")) return "svg";
+  return "png";
+}
 
+async function persistGeneratedImageFromUrl(imageUrl: string, imageIndex: number, provider: AiProvider): Promise<string | null> {
+  const normalizedUrl = imageUrl.trim();
+  if (!normalizedUrl) return null;
+
+  const blobToken = getBlobReadWriteToken();
+  if (!blobToken) {
+    return normalizedUrl;
+  }
+
+  try {
+    const response = await fetch(normalizedUrl);
+    if (!response.ok) {
+      return normalizedUrl;
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length === 0) {
+      return normalizedUrl;
+    }
+
+    const contentType = response.headers.get("content-type") || AI_IMAGE_MIME_TYPE;
+    const extension = extensionForContentType(contentType);
+    const path = `${AI_PROVIDER_IMAGE_PATH_PREFIX[provider]}/${Date.now()}-${imageIndex}.${extension}`;
+    const blob = await put(path, bytes, {
+      access: "public",
+      addRandomSuffix: true,
+      token: blobToken,
+      contentType,
+    });
+    return blob.url;
+  } catch {
+    return normalizedUrl;
+  }
+}
+
+async function createAiMessage(input: {
+  provider: AiProvider;
+  sourceMessageId: string;
+  content: string;
+}): Promise<void> {
   const created = await prisma.message.create({
     data: {
       type: MessageType.MESSAGE,
-      content: "Zu viele @chatgpt Anfragen gleichzeitig. Bitte in wenigen Sekunden erneut versuchen.",
-      questionMessageId: sourceMessageId,
-      authorName: "ChatGPT",
-      authorProfilePicture: chatgptProfilePicture.src,
+      content: input.content,
+      questionMessageId: input.sourceMessageId,
+      authorName: getAiProviderDisplayName(input.provider),
+      authorProfilePicture: getAiProviderAvatar(input.provider),
     },
     include: { questionMessage: true, author: true, pollOptions: { include: { votes: { include: { user: true } } } } },
   });
@@ -718,172 +938,304 @@ async function emitAiBusyNotice(sourceMessageId: string): Promise<void> {
   publish("message.created", mapMessage(created));
 }
 
-async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
-  if (!hasOpenAiApiKey()) return;
+async function generateGrokImages(payload: AiTriggerPayload, prompt: string): Promise<string[]> {
+  const config = getGrokRuntimeConfig();
+  if (!config.apiKey || !config.imageGeneration.enabled) {
+    return [];
+  }
 
-  publishAiStatus("denkt nach…");
+  const endpoint = `${config.baseUrl.replace(/\/+$/, "")}/images/generations`;
+  const body: Record<string, unknown> = {
+    model: config.imageGeneration.model,
+    prompt,
+    n: 1,
+    response_format: config.imageGeneration.responseFormat,
+  };
+  const firstImageUrl = payload.imageUrls[0];
+  if (firstImageUrl) {
+    body.image_url = firstImageUrl;
+  }
+
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`Grok Bildgenerierung fehlgeschlagen (${response.status}): ${errorText || "Unbekannter Fehler"}`);
+  }
+
+  const payloadJson = (await response.json()) as {
+    data?: Array<{ b64_json?: string; url?: string }>;
+  };
+  const items = Array.isArray(payloadJson.data) ? payloadJson.data : [];
+  const imageMarkdown: string[] = [];
+  let imageIndex = 0;
+
+  for (const item of items) {
+    const targetIndex = imageIndex;
+    imageIndex += 1;
+    let imageUrl: string | null = null;
+
+    if (item?.b64_json) {
+      imageUrl = await persistGeneratedImage(item.b64_json, targetIndex, "grok");
+    } else if (item?.url) {
+      imageUrl = await persistGeneratedImageFromUrl(item.url, targetIndex, "grok");
+    }
+
+    if (imageUrl) {
+      imageMarkdown.push(`![Generated Image ${imageIndex}](${imageUrl})`);
+    } else {
+      imageMarkdown.push(
+        "_(Image generated but could not be attached. Configure BLOB_READ_WRITE_TOKEN (or BLOB) for hosted AI images.)_",
+      );
+    }
+  }
+
+  return imageMarkdown;
+}
+
+async function emitAiBusyNotice(sourceMessageId: string, provider: AiProvider): Promise<void> {
+  const now = Date.now();
+  if (now - lastAiBusyNoticeAt < AI_BUSY_NOTICE_COOLDOWN_MS) return;
+  lastAiBusyNoticeAt = now;
+  await createAiMessage({
+    provider,
+    sourceMessageId,
+    content: `Zu viele ${getAiProviderMention(provider)} Anfragen gleichzeitig. Bitte in wenigen Sekunden erneut versuchen.`,
+  });
+}
+
+async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
+  if (!isProviderConfigured(payload.provider)) return;
+
+  publishAiStatus(payload.provider, "denkt nach…");
 
   try {
-    const openAiConfig = getChatOpenAiConfig();
-    const openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-    const cleanedMessage = stripChatGptMention(payload.message);
+    if (payload.provider === "chatgpt") {
+      const openAiConfig = getChatOpenAiConfig();
+      const openai = new OpenAI({
+        apiKey: process.env.OPENAI_API_KEY,
+      });
+    const cleanedMessage = stripAiMentions(payload.message);
     const useWebSearchTool = openAiConfig.webSearch.enabled
       && (!openAiConfig.lowLatencyMode || shouldUseWebSearchTool(cleanedMessage));
     const useImageGenerationTool = openAiConfig.imageGeneration.enabled
       && (!openAiConfig.lowLatencyMode
-        || shouldUseImageGenerationTool(cleanedMessage, payload.imageUrls.length));
+        || shouldUseImageGenerationTool(cleanedMessage, payload.imageUrls.length, payload.provider));
 
-    const tools: NonNullable<Parameters<typeof openai.responses.create>[0]["tools"]> = [];
+      const tools: NonNullable<Parameters<typeof openai.responses.create>[0]["tools"]> = [];
 
-    if (useWebSearchTool) {
-      tools.push({
-        type: "web_search",
-        user_location: {
-          type: "approximate",
-          country: openAiConfig.webSearch.country,
-          region: openAiConfig.webSearch.region,
-          city: openAiConfig.webSearch.city,
-        },
-        search_context_size: openAiConfig.webSearch.contextSize,
-      });
-    }
-
-    if (useImageGenerationTool) {
-      tools.push({
-        type: "image_generation",
-        background: openAiConfig.imageGeneration.background,
-        model: openAiConfig.imageGeneration.model,
-        moderation: openAiConfig.imageGeneration.moderation,
-        output_compression: openAiConfig.imageGeneration.outputCompression,
-        output_format: openAiConfig.imageGeneration.outputFormat,
-        quality: openAiConfig.imageGeneration.quality,
-        size: openAiConfig.imageGeneration.size,
-      });
-    }
-
-    const include: NonNullable<Parameters<typeof openai.responses.create>[0]["include"]> = [];
-    if (openAiConfig.includeEncryptedReasoning && !openAiConfig.lowLatencyMode) {
-      include.push("reasoning.encrypted_content");
-    }
-    if (openAiConfig.includeWebSources && useWebSearchTool) {
-      include.push("web_search_call.action.sources");
-    }
-
-    const buildRequest = async (mode: AiInputMode): Promise<Parameters<typeof openai.responses.create>[0]> => ({
-      ...(openAiConfig.promptId
-        ? {
-          prompt: {
-            id: openAiConfig.promptId,
-            version: openAiConfig.promptVersion,
+      if (useWebSearchTool) {
+        tools.push({
+          type: "web_search",
+          user_location: {
+            type: "approximate",
+            country: openAiConfig.webSearch.country,
+            region: openAiConfig.webSearch.region,
+            city: openAiConfig.webSearch.city,
           },
+          search_context_size: openAiConfig.webSearch.contextSize,
+        });
+      }
+
+      if (useImageGenerationTool) {
+        tools.push({
+          type: "image_generation",
+          background: openAiConfig.imageGeneration.background,
+          model: openAiConfig.imageGeneration.model,
+          moderation: openAiConfig.imageGeneration.moderation,
+          output_compression: openAiConfig.imageGeneration.outputCompression,
+          output_format: openAiConfig.imageGeneration.outputFormat,
+          quality: openAiConfig.imageGeneration.quality,
+          size: openAiConfig.imageGeneration.size,
+        });
+      }
+
+      const include: NonNullable<Parameters<typeof openai.responses.create>[0]["include"]> = [];
+      if (openAiConfig.includeEncryptedReasoning && !openAiConfig.lowLatencyMode) {
+        include.push("reasoning.encrypted_content");
+      }
+      if (openAiConfig.includeWebSources && useWebSearchTool) {
+        include.push("web_search_call.action.sources");
+      }
+
+      const buildRequest = async (mode: AiInputMode): Promise<Parameters<typeof openai.responses.create>[0]> => ({
+        ...(openAiConfig.promptId
+          ? {
+            prompt: {
+              id: openAiConfig.promptId,
+              version: openAiConfig.promptVersion,
+            },
+          }
+          : {
+            model: openAiConfig.fallbackModel,
+          }),
+        input: await buildAiInput(payload, mode, payload.provider),
+        text: {
+          format: {
+            type: "text",
+          },
+        },
+        ...(tools.length > 0 ? { tools } : {}),
+        store: openAiConfig.store,
+        ...(include.length > 0 ? { include } : {}),
+      });
+
+      let response: OpenAIResponse;
+      try {
+        response = (await openai.responses.create(await buildRequest("full"))) as OpenAIResponse;
+      } catch (error) {
+        if (!isContextWindowError(error)) {
+          throw error;
         }
-        : {
-          model: openAiConfig.fallbackModel,
-        }),
-      input: await buildAiInput(payload, mode),
+        response = (await openai.responses.create(await buildRequest("minimal"))) as OpenAIResponse;
+      }
+
+      const hasImageOutput = Array.isArray(response.output)
+        && response.output.some((item) => item.type === "image_generation_call");
+      if (hasImageOutput) {
+        publishAiStatus(payload.provider, "erstellt Bild…");
+      }
+
+      const imageMarkdown: string[] = [];
+      if (Array.isArray(response.output)) {
+        let imageIndex = 0;
+        for (const item of response.output) {
+          if (item.type === "image_generation_call" && typeof item.result === "string") {
+            const imageUrl = await persistGeneratedImage(item.result, imageIndex, payload.provider);
+            imageIndex += 1;
+            if (imageUrl) {
+              imageMarkdown.push(`![Generated Image ${imageIndex}](${imageUrl})`);
+            } else {
+              imageMarkdown.push(
+                "_(Image generated but could not be attached. Configure BLOB_READ_WRITE_TOKEN (or BLOB) for hosted AI images.)_",
+              );
+            }
+          }
+        }
+      }
+
+      const rawOutputText = response.output_text?.trim() || "";
+      const cleanedOutputText = imageMarkdown.length > 0
+        ? stripInlineImageMarkdownAndUrls(rawOutputText)
+        : rawOutputText;
+      const text = [cleanedOutputText, ...imageMarkdown].filter(Boolean).join("\n\n").trim();
+
+      if (!text || text === "[NO_RESPONSE]") {
+        publishAiStatus(payload.provider, "schreibt…");
+        await createAiMessage({
+          provider: payload.provider,
+          sourceMessageId: payload.sourceMessageId,
+          content: "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal.",
+        });
+        return;
+      }
+
+      publishAiStatus(payload.provider, "schreibt…");
+      await createAiMessage({
+        provider: payload.provider,
+        sourceMessageId: payload.sourceMessageId,
+        content: text,
+      });
+      return;
+    }
+
+    const grokConfig = getGrokRuntimeConfig();
+    if (!grokConfig.apiKey) {
+      throw new Error("GROK_API_KEY fehlt.");
+    }
+    const cleanedMessage = stripAiMentions(payload.message);
+    const useImageGenerationTool = grokConfig.imageGeneration.enabled
+      && shouldUseImageGenerationTool(cleanedMessage, payload.imageUrls.length, payload.provider);
+    if (useImageGenerationTool) {
+      publishAiStatus(payload.provider, "erstellt Bild…");
+      const imageMarkdown = await generateGrokImages(
+        payload,
+        sanitizeMessageForAi(cleanedMessage) || "Erstelle ein passendes Bild zu dieser Anfrage.",
+      );
+      if (imageMarkdown.length === 0) {
+        throw new Error("Grok Bildgenerierung lieferte kein Bild.");
+      }
+      const preface = payload.imageUrls.length > 0 ? "Hier ist dein bearbeitetes Bild:" : "Hier ist dein Bild:";
+      publishAiStatus(payload.provider, "schreibt…");
+      await createAiMessage({
+        provider: payload.provider,
+        sourceMessageId: payload.sourceMessageId,
+        content: [preface, ...imageMarkdown].filter(Boolean).join("\n\n"),
+      });
+      return;
+    }
+
+    const grok = new OpenAI({
+      apiKey: grokConfig.apiKey,
+      baseURL: grokConfig.baseUrl,
+    });
+
+    const buildGrokRequest = async (mode: AiInputMode): Promise<Parameters<typeof grok.responses.create>[0]> => ({
+      model: grokConfig.textModel,
+      input: await buildAiInput(payload, mode, payload.provider),
       text: {
         format: {
           type: "text",
         },
       },
-      ...(tools.length > 0 ? { tools } : {}),
-      store: openAiConfig.store,
-      ...(include.length > 0 ? { include } : {}),
     });
 
     let response: OpenAIResponse;
     try {
-      response = (await openai.responses.create(await buildRequest("full"))) as OpenAIResponse;
+      response = (await grok.responses.create(await buildGrokRequest("full"))) as OpenAIResponse;
     } catch (error) {
       if (!isContextWindowError(error)) {
         throw error;
       }
-      response = (await openai.responses.create(await buildRequest("minimal"))) as OpenAIResponse;
+      response = (await grok.responses.create(await buildGrokRequest("minimal"))) as OpenAIResponse;
     }
 
-    const hasImageOutput = Array.isArray(response.output)
-      && response.output.some((item) => item.type === "image_generation_call");
-    if (hasImageOutput) {
-      publishAiStatus("erstellt Bild…");
-    }
+    const rawOutputText = response.output_text?.trim() || "";
+    const text = rawOutputText.trim();
 
-    const imageMarkdown: string[] = [];
-    if (Array.isArray(response.output)) {
-      let imageIndex = 0;
-      for (const item of response.output) {
-        if (item.type === "image_generation_call" && typeof item.result === "string") {
-          const imageUrl = await persistGeneratedImage(item.result, imageIndex);
-          imageIndex += 1;
-          if (imageUrl) {
-            imageMarkdown.push(`![Generated Image ${imageIndex}](${imageUrl})`);
-          } else {
-            imageMarkdown.push(
-              "_(Image generated but could not be attached. Configure BLOB_READ_WRITE_TOKEN (or BLOB) for hosted AI images.)_",
-            );
-          }
-        }
-      }
-    }
-
-    const text = [response.output_text?.trim() || "", ...imageMarkdown].filter(Boolean).join("\n\n").trim();
-
-    // Always acknowledge a mention, even when the model returns empty output.
     if (!text || text === "[NO_RESPONSE]") {
-      publishAiStatus("schreibt…");
-
-      const fallback = await prisma.message.create({
-        data: {
-          type: MessageType.MESSAGE,
-          content: "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal.",
-          questionMessageId: payload.sourceMessageId,
-          authorName: "ChatGPT",
-          authorProfilePicture: chatgptProfilePicture.src,
-        },
-        include: { questionMessage: true, author: true, pollOptions: { include: { votes: { include: { user: true } } } } },
+      publishAiStatus(payload.provider, "schreibt…");
+      await createAiMessage({
+        provider: payload.provider,
+        sourceMessageId: payload.sourceMessageId,
+        content: "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal.",
       });
-      invalidateMediaCache();
-      publish("message.created", mapMessage(fallback));
       return;
     }
 
-    publishAiStatus("schreibt…");
-
-    const created = await prisma.message.create({
-      data: {
-        type: MessageType.MESSAGE,
-        content: text,
-        questionMessageId: payload.sourceMessageId,
-        authorName: "ChatGPT",
-        authorProfilePicture: chatgptProfilePicture.src,
-      },
-      include: { questionMessage: true, author: true, pollOptions: { include: { votes: { include: { user: true } } } } },
+    publishAiStatus(payload.provider, "schreibt…");
+    await createAiMessage({
+      provider: payload.provider,
+      sourceMessageId: payload.sourceMessageId,
+      content: text,
     });
-
-    invalidateMediaCache();
-    publish("message.created", mapMessage(created));
   } catch (error) {
-    console.error("OpenAI error:", error);
+    if (payload.provider === "grok") {
+      console.error("Grok error:", error);
+    } else {
+      console.error("OpenAI error:", error);
+    }
+
     const errorText = isContextWindowError(error)
       ? "Die Anfrage war zu lang. Bitte formuliere deine Frage etwas kürzer und versuche es erneut."
       : error instanceof Error
-        ? `OpenAI-Anfrage fehlgeschlagen: ${error.message}`
-        : "OpenAI-Anfrage fehlgeschlagen.";
-    const created = await prisma.message.create({
-      data: {
-        type: MessageType.MESSAGE,
-        content: errorText,
-        questionMessageId: payload.sourceMessageId,
-        authorName: "ChatGPT",
-        authorProfilePicture: chatgptProfilePicture.src,
-      },
-      include: { questionMessage: true, author: true, pollOptions: { include: { votes: { include: { user: true } } } } },
+        ? `${payload.provider === "grok" ? "Grok" : "OpenAI"}-Anfrage fehlgeschlagen: ${error.message}`
+        : `${payload.provider === "grok" ? "Grok" : "OpenAI"}-Anfrage fehlgeschlagen.`;
+
+    await createAiMessage({
+      provider: payload.provider,
+      sourceMessageId: payload.sourceMessageId,
+      content: errorText,
     });
-    invalidateMediaCache();
-    publish("message.created", mapMessage(created));
   } finally {
-    publishAiStatus("online");
+    publishAiStatus(payload.provider, fallbackStatusForProvider(payload.provider));
   }
 }
 
@@ -1004,7 +1356,7 @@ async function enqueueAiResponse(
 }
 
 export async function processAiQueue(input: { maxJobs?: number } = {}): Promise<{ processed: number; lockSkipped: boolean }> {
-  if (!hasOpenAiApiKey()) return { processed: 0, lockSkipped: false };
+  if (!hasAnyAiProviderApiKey()) return { processed: 0, lockSkipped: false };
 
   await recoverStaleAiJobs();
 
@@ -1016,7 +1368,9 @@ export async function processAiQueue(input: { maxJobs?: number } = {}): Promise<
     if (!job) break;
 
     try {
+      const provider = detectAiProvider(job.message) || "chatgpt";
       await emitAiResponse({
+        provider,
         sourceMessageId: job.sourceMessageId,
         username: job.username,
         message: job.message,
@@ -1063,13 +1417,18 @@ export async function processAiQueue(input: { maxJobs?: number } = {}): Promise<
 }
 
 async function maybeRespondAsAi(payload: AiTriggerPayload): Promise<void> {
-  if (!hasOpenAiApiKey()) {
-    publishAiStatus("offline");
+  if (!isProviderConfigured(payload.provider)) {
+    publishAiStatus(payload.provider, "offline");
+    await createAiMessage({
+      provider: payload.provider,
+      sourceMessageId: payload.sourceMessageId,
+      content: `Ich bin aktuell nicht konfiguriert. Bitte ${payload.provider === "grok" ? "GROK_API_KEY" : "OPENAI_API_KEY"} setzen.`,
+    });
     return;
   }
   const queued = await enqueueAiResponse(payload);
   if (queued === "full") {
-    await emitAiBusyNotice(payload.sourceMessageId);
+    await emitAiBusyNotice(payload.sourceMessageId, payload.provider);
     return;
   }
   if (queued === "queued") {
@@ -1430,7 +1789,7 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
     } else if (message.startsWith("/coin")) {
       content = `${user.username} hat ${Math.random() < 0.5 ? "Kopf" : "Zahl"} geworfen`;
     } else if (message.startsWith("/help")) {
-      content = "Erwähne @chatgpt für KI. Verfügbar sind auch /roll, /coin und Umfragen mit bis zu 15 Optionen.";
+      content = "Erwähne @chatgpt oder @grok für KI. Verfügbar sind auch /roll, /coin und Umfragen mit bis zu 15 Optionen.";
     }
   }
 
@@ -1466,16 +1825,17 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
   const dto = mapMessage(created);
   publish("message.created", dto);
 
-  const shouldTriggerAi =
+  const aiProvider =
     type === MessageType.MESSAGE &&
     !message.startsWith("/roll") &&
     !message.startsWith("/coin") &&
     !message.startsWith("/help") &&
-    /(^|\s)@chatgpt\b/i.test(message);
+    detectAiProvider(message);
 
-  if (shouldTriggerAi) {
+  if (aiProvider) {
     try {
       await maybeRespondAsAi({
+        provider: aiProvider,
         sourceMessageId: created.id,
         username: user.username,
         message,
