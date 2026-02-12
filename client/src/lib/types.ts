@@ -164,7 +164,8 @@ export interface LinkPreviewDTO {
 }
 
 export interface AiStatusDTO {
-  status: string;
+  chatgpt: string;
+  grok: string;
   updatedAt: string;
 }
 
@@ -188,7 +189,7 @@ export interface SseEventPayloadMap {
   "poll.updated": MessageDTO;
   "user.updated": UserPresenceDTO;
   "chat.background.updated": ChatBackgroundDTO;
-  "ai.status": { status: string };
+  "ai.status": { status: string; provider?: "chatgpt" | "grok" };
 }
 
 export interface SseEnvelope<TEvent extends SseEventName = SseEventName> {

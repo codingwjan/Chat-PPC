@@ -37,6 +37,7 @@ const prismaMock = vi.hoisted(() => ({
 
 const publishMock = vi.hoisted(() => vi.fn());
 const openAiCreateMock = vi.hoisted(() => vi.fn());
+const fetchMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/prisma", () => ({ prisma: prismaMock }));
 vi.mock("@/lib/sse-bus", () => ({ publish: publishMock }));
@@ -85,6 +86,8 @@ function baseMessage(overrides: Record<string, unknown> = {}) {
 describe("chat service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    fetchMock.mockReset();
+    vi.stubGlobal("fetch", fetchMock);
     __resetAiQueueForTests();
     prismaMock.blacklistEntry.findUnique.mockResolvedValue(null);
     prismaMock.user.findFirst.mockResolvedValue(null);
@@ -440,6 +443,39 @@ describe("chat service", () => {
     }
   });
 
+  it("queues @grok mention without blocking response", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-user", content: "@grok explain gravity" }),
+    );
+
+    try {
+      const result = await Promise.race([
+        createMessage({
+          clientId: "client-1",
+          type: "message",
+          message: "@grok explain gravity",
+        }).then(() => "resolved"),
+        new Promise<string>((resolve) => setTimeout(() => resolve("timeout"), 80)),
+      ]);
+
+      expect(result).toBe("resolved");
+      expect(prismaMock.aiJob.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            sourceMessageId: "msg-user",
+            username: "tester",
+            message: "@grok explain gravity",
+          }),
+        }),
+      );
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
   it("emits busy notice when pending AI queue is full", async () => {
     const previousOpenAiKey = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "test-key";
@@ -518,6 +554,124 @@ describe("chat service", () => {
       );
     } finally {
       process.env.OPENAI_API_KEY = previousOpenAiKey;
+    }
+  });
+
+  it("processes queued @grok jobs via DB worker", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    const previousGrokKey = process.env.GROK_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-grok-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@grok explain gravity",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-grok", content: "Grok answer", authorName: "Grok" }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({ output_text: "Grok answer", output: [] });
+
+    try {
+      const result = await processAiQueue({ maxJobs: 1 });
+      expect(result.processed).toBe(1);
+      expect(result.lockSkipped).toBe(false);
+      expect(openAiCreateMock).toHaveBeenCalledTimes(1);
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            authorName: "Grok",
+            questionMessageId: "msg-user",
+          }),
+        }),
+      );
+    } finally {
+      if (previousOpenAiKey) process.env.OPENAI_API_KEY = previousOpenAiKey;
+      else delete process.env.OPENAI_API_KEY;
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("routes @grok image-edit prompts to grok-imagine-image with input image", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    const previousGrokKey = process.env.GROK_API_KEY;
+    const previousGrokImageResponseFormat = process.env.GROK_IMAGE_RESPONSE_FORMAT;
+    const previousBlobToken = process.env.BLOB_READ_WRITE_TOKEN;
+    const previousBlob = process.env.BLOB;
+    delete process.env.OPENAI_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    process.env.GROK_IMAGE_RESPONSE_FORMAT = "url";
+    delete process.env.BLOB_READ_WRITE_TOKEN;
+    delete process.env.BLOB;
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-grok-image-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@grok modify this image",
+        imageUrls: ["https://example.com/input.png"],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-grok-image", content: "image answer", authorName: "Grok" }),
+    );
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        data: [{ url: "https://cdn.example.com/generated.png" }],
+      }),
+    } as unknown as Response);
+
+    try {
+      const result = await processAiQueue({ maxJobs: 1 });
+      expect(result.processed).toBe(1);
+      expect(result.lockSkipped).toBe(false);
+      expect(openAiCreateMock).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const [endpoint, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(endpoint).toContain("/images/generations");
+      const parsedBody = JSON.parse(String(init.body)) as {
+        model?: string;
+        prompt?: string;
+        image_url?: string;
+      };
+      expect(parsedBody.model).toBe("grok-imagine-image");
+      expect(parsedBody.image_url).toBe("https://example.com/input.png");
+      expect(parsedBody.prompt).toContain("modify this image");
+
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            authorName: "Grok",
+            questionMessageId: "msg-user",
+            content: expect.stringContaining("![Generated Image 1](https://cdn.example.com/generated.png)"),
+          }),
+        }),
+      );
+    } finally {
+      if (previousOpenAiKey) process.env.OPENAI_API_KEY = previousOpenAiKey;
+      else delete process.env.OPENAI_API_KEY;
+      process.env.GROK_API_KEY = previousGrokKey;
+      process.env.GROK_IMAGE_RESPONSE_FORMAT = previousGrokImageResponseFormat;
+      process.env.BLOB_READ_WRITE_TOKEN = previousBlobToken;
+      process.env.BLOB = previousBlob;
     }
   });
 

@@ -24,6 +24,7 @@ Required values:
 - `DATABASE_URL` PostgreSQL connection string
 - `BLOB_READ_WRITE_TOKEN` required for image uploads (profiles, chat, AI-generated images). `BLOB` is also accepted as an alias.
 - `OPENAI_API_KEY` optional, needed for real `@chatgpt` model responses
+- `GROK_API_KEY` optional, needed for real `@grok` model responses
 - `ALLOW_INLINE_UPLOADS` optional dev-only escape hatch (`true|false`, default `false`)
 
 OpenAI runtime configuration (all optional, defaults can be kept as shown in your current `client/.env`):
@@ -46,6 +47,16 @@ OpenAI runtime configuration (all optional, defaults can be kept as shown in you
 - `OPENAI_IMAGE_OUTPUT_FORMAT` `png|jpeg|webp`
 - `OPENAI_IMAGE_QUALITY` `auto|low|medium|high`
 - `OPENAI_IMAGE_SIZE` `auto|1024x1024|1024x1536|1536x1024`
+
+Grok runtime configuration (all optional except `GROK_API_KEY` if you use `@grok`):
+
+- `GROK_BASE_URL` default `https://api.x.ai/v1`
+- `GROK_MODEL` default `grok-4-1-fast-non-reasoning`
+- `GROK_ENABLE_IMAGE_GENERATION` `true|false` (default `true`)
+- `GROK_IMAGE_MODEL` default `grok-imagine-image`
+- `GROK_IMAGE_RESPONSE_FORMAT` `b64_json|url` (default `b64_json`)
+- Grok runs with an always-on bold/unhinged style prompt in this app runtime.
+- Grok avatar path in UI: `client/src/resources/grokAvatar.png`
 
 Developer mode configuration (optional):
 
@@ -133,7 +144,7 @@ Implemented route handlers:
 
 ## Notes
 
-- Typing state, online presence, poll voting, question/answer threading, and `@chatgpt` message trigger are preserved from the legacy app behavior.
+- Typing state, online presence, poll voting, question/answer threading, and `@chatgpt`/`@grok` message triggers are preserved from the legacy app behavior.
 - Poll voting is now enforced server-side (one vote per user per poll).
 - Login creates a system message in chat: `"username joined the chat"`.
 - Going offline creates a system message in chat: `"username left the chat"`.
