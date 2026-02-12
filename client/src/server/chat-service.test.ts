@@ -929,6 +929,51 @@ describe("chat service", () => {
     }
   });
 
+  it("retries ChatGPT once on transient 500 and then falls back from prompt to model", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    const previousEnableImageGeneration = process.env.OPENAI_ENABLE_IMAGE_GENERATION;
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.OPENAI_ENABLE_IMAGE_GENERATION = "false";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-500-fallback-model-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@chatgpt explain gravity quickly",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-ai-fallback-model", content: "Model fallback answer", authorName: "ChatGPT" }),
+    );
+    openAiCreateMock
+      .mockRejectedValueOnce(new Error("500 An error occurred while processing your request."))
+      .mockRejectedValueOnce(new Error("500 An error occurred while processing your request."))
+      .mockResolvedValueOnce({ output_text: "Model fallback answer", output: [] });
+
+    try {
+      await processAiQueue({ maxJobs: 1 });
+
+      expect(openAiCreateMock).toHaveBeenCalledTimes(3);
+      const thirdRequest = openAiCreateMock.mock.calls[2]?.[0] as { prompt?: unknown; model?: string } | undefined;
+      expect(thirdRequest?.prompt).toBeUndefined();
+      expect(thirdRequest?.model).toBe("gpt-4o-mini");
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+      if (previousEnableImageGeneration !== undefined) {
+        process.env.OPENAI_ENABLE_IMAGE_GENERATION = previousEnableImageGeneration;
+      } else {
+        delete process.env.OPENAI_ENABLE_IMAGE_GENERATION;
+      }
+    }
+  });
+
   it("retries ChatGPT image requests on transient 500 and falls back to gpt-image-1", async () => {
     const previousOpenAiKey = process.env.OPENAI_API_KEY;
     const previousImageModel = process.env.OPENAI_IMAGE_MODEL;

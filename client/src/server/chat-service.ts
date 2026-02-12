@@ -981,11 +981,12 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
         include.push("web_search_call.action.sources");
       }
 
-      const buildRequest = async (
-        mode: AiInputMode,
-        imageModelOverride?: string,
-      ): Promise<Parameters<typeof openai.responses.create>[0]> => ({
-        ...(openAiConfig.promptId
+      const buildRequest = async (input: {
+        mode: AiInputMode;
+        imageModelOverride?: string;
+        forceFallbackModel?: boolean;
+      }): Promise<Parameters<typeof openai.responses.create>[0]> => ({
+        ...(!input.forceFallbackModel && openAiConfig.promptId
           ? {
             prompt: {
               id: openAiConfig.promptId,
@@ -995,7 +996,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
           : {
             model: openAiConfig.fallbackModel,
           }),
-        input: await buildAiInput(payload, mode, payload.provider),
+        input: await buildAiInput(payload, input.mode, payload.provider),
         text: {
           format: {
             type: "text",
@@ -1005,8 +1006,8 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
         ...(tools.length > 0
           ? {
             tools: (
-              imageModelOverride
-                ? tools.map((tool) => (tool.type === "image_generation" ? { ...tool, model: imageModelOverride } : tool))
+              input.imageModelOverride
+                ? tools.map((tool) => (tool.type === "image_generation" ? { ...tool, model: input.imageModelOverride } : tool))
                 : tools
             ) as NonNullable<Parameters<typeof openai.responses.create>[0]["tools"]>,
           }
@@ -1015,35 +1016,80 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
         ...(include.length > 0 ? { include } : {}),
       });
 
-      const requestWithContextFallback = async (imageModelOverride?: string): Promise<OpenAIResponse> => {
+      const requestWithContextFallback = async (input?: {
+        imageModelOverride?: string;
+        forceFallbackModel?: boolean;
+      }): Promise<OpenAIResponse> => {
         try {
-          return (await openai.responses.create(await buildRequest("full", imageModelOverride))) as OpenAIResponse;
+          return (await openai.responses.create(await buildRequest({
+            mode: "full",
+            imageModelOverride: input?.imageModelOverride,
+            forceFallbackModel: input?.forceFallbackModel,
+          }))) as OpenAIResponse;
         } catch (error) {
           if (!isContextWindowError(error)) {
             throw error;
           }
-          return (await openai.responses.create(await buildRequest("minimal", imageModelOverride))) as OpenAIResponse;
+          return (await openai.responses.create(await buildRequest({
+            mode: "minimal",
+            imageModelOverride: input?.imageModelOverride,
+            forceFallbackModel: input?.forceFallbackModel,
+          }))) as OpenAIResponse;
         }
       };
 
-      let response: OpenAIResponse;
-      try {
-        response = await requestWithContextFallback();
-      } catch (error) {
-        if (!useImageGenerationTool || !isRetryableOpenAiServerError(error)) {
-          throw error;
+      const requestWithServerRecovery = async (): Promise<OpenAIResponse> => {
+        try {
+          return await requestWithContextFallback();
+        } catch (firstError) {
+          if (!isRetryableOpenAiServerError(firstError)) {
+            throw firstError;
+          }
         }
 
+        // Retry once unchanged for transient OpenAI 5xx failures.
         try {
-          response = await requestWithContextFallback();
+          return await requestWithContextFallback();
         } catch (retryError) {
-          const canFallbackImageModel = openAiConfig.imageGeneration.model !== "gpt-image-1";
-          if (!canFallbackImageModel || !isRetryableOpenAiServerError(retryError)) {
+          let lastError: unknown = retryError;
+          if (!isRetryableOpenAiServerError(retryError)) {
             throw retryError;
           }
-          response = await requestWithContextFallback("gpt-image-1");
+
+          const canFallbackImageModel = useImageGenerationTool && openAiConfig.imageGeneration.model !== "gpt-image-1";
+          if (canFallbackImageModel) {
+            try {
+              return await requestWithContextFallback({ imageModelOverride: "gpt-image-1" });
+            } catch (imageModelError) {
+              lastError = imageModelError;
+            }
+          }
+
+          const canFallbackPrompt = Boolean(openAiConfig.promptId);
+          if (canFallbackPrompt) {
+            try {
+              return await requestWithContextFallback({ forceFallbackModel: true });
+            } catch (promptFallbackError) {
+              lastError = promptFallbackError;
+            }
+          }
+
+          if (canFallbackImageModel && canFallbackPrompt) {
+            try {
+              return await requestWithContextFallback({
+                imageModelOverride: "gpt-image-1",
+                forceFallbackModel: true,
+              });
+            } catch (finalFallbackError) {
+              lastError = finalFallbackError;
+            }
+          }
+
+          throw lastError;
         }
-      }
+      };
+
+      const response = await requestWithServerRecovery();
 
       const hasImageOutput = Array.isArray(response.output)
         && response.output.some((item) => item.type === "image_generation_call");
