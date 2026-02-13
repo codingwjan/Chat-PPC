@@ -9,13 +9,22 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
   type ChangeEvent,
   type ClipboardEvent,
+  type DragEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { ChatComposer, type ComposerMode } from "@/components/chat-composer";
 import { ChatMessage } from "@/components/chat-message";
+import { ChatShellHeader } from "@/components/chat-shell-header";
+import { ChatShellSidebar } from "@/components/chat-shell-sidebar";
 import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
+import { UiToast } from "@/components/ui-toast";
 import { apiJson } from "@/lib/http";
+import {
+  detectBrowserNotificationCapability,
+  type NotificationCapability,
+} from "@/lib/notification-capability";
 import {
   clearSession,
   getDefaultProfilePicture,
@@ -42,17 +51,6 @@ import type {
 } from "@/lib/types";
 import chatgptAvatar from "@/resources/chatgpt.png";
 import grokAvatar from "@/resources/grokAvatar.png";
-
-type ComposerMode = "message" | "question" | "poll";
-const PRIMARY_COMPOSER_MODES: ComposerMode[] = ["message"];
-const SECONDARY_COMPOSER_MODES: ComposerMode[] = ["question", "poll"];
-
-const COMPOSER_MODE_LABEL: Record<ComposerMode, string> = {
-  message: "Nachricht",
-  question: "Frage",
-  poll: "Umfrage",
-};
-
 interface UploadResponse {
   url: string;
 }
@@ -61,39 +59,6 @@ interface UploadedDraftImage {
   id: string;
   url: string;
   label: string;
-}
-
-function DraftImagePreview({
-  image,
-  onRemove,
-}: {
-  image: UploadedDraftImage;
-  onRemove: () => void;
-}) {
-  const [loaded, setLoaded] = useState(false);
-
-  return (
-    <div className="group relative h-14 w-14 overflow-hidden rounded-xl border border-slate-200 bg-slate-100">
-      {!loaded ? <div className="absolute inset-0 animate-pulse bg-slate-200" aria-hidden /> : null}
-      <img
-        src={image.url}
-        alt={image.label}
-        className={`h-full w-full object-cover transition-opacity duration-200 ${loaded ? "opacity-100" : "opacity-0"}`}
-        loading="lazy"
-        decoding="async"
-        onLoad={() => setLoaded(true)}
-        onError={() => setLoaded(true)}
-      />
-      <button
-        type="button"
-        onClick={onRemove}
-        className="absolute right-1 top-1 hidden h-5 w-5 items-center justify-center rounded-full bg-slate-900/80 text-xs text-white group-hover:flex"
-        aria-label="Hochgeladenes Bild entfernen"
-      >
-        ×
-      </button>
-    </div>
-  );
 }
 
 const MESSAGE_PAGE_SIZE = 12;
@@ -108,12 +73,13 @@ const MAX_VISIBLE_MESSAGES = Number.POSITIVE_INFINITY;
 const MESSAGE_RENDER_WINDOW = 40;
 const MESSAGE_RENDER_CHUNK = 20;
 const SUPPORTED_CHAT_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const SUPPORTED_PROFILE_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const MEDIA_PAGE_SIZE = 3;
 const MEDIA_CACHE_KEY = "chatppc.media.cache.v1";
 const MEDIA_CACHE_TTL_MS = 5 * 60 * 1_000;
 const DEFAULT_COMPOSER_HEIGHT_PX = 208;
 const COMPOSER_BOTTOM_GAP_PX = 16;
-type NotificationState = NotificationPermission | "unsupported";
+const LAST_MESSAGE_EXTRA_CLEARANCE_PX = 28;
 
 function hasChatGptMention(message: string): boolean {
   return /(^|\s)@chatgpt\b/i.test(message);
@@ -309,6 +275,22 @@ async function readApiError(response: Response, fallback: string): Promise<strin
   return payload?.error || fallback;
 }
 
+function extractSupportedImageFiles(
+  dataTransfer: DataTransfer | null | undefined,
+  supportedMimeTypes: Set<string>,
+): File[] {
+  if (!dataTransfer) return [];
+
+  const fromItems = Array.from(dataTransfer.items)
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null)
+    .filter((file) => supportedMimeTypes.has(file.type));
+  if (fromItems.length > 0) return fromItems;
+
+  return Array.from(dataTransfer.files).filter((file) => supportedMimeTypes.has(file.type));
+}
+
 function statusForComposer(input: {
   mode: ComposerMode;
   messageDraft: string;
@@ -351,23 +333,30 @@ function formatPresenceStatus(user: UserPresenceDTO): string {
   return "online";
 }
 
-function describeNotificationState(state: NotificationState): string {
-  if (state === "denied") {
+function describeNotificationState(capability: NotificationCapability): string {
+  if (capability.kind === "ios_home_screen_required") {
+    return "Auf iPhone/iPad funktionieren Browser-Benachrichtigungen nur als Home-Bildschirm-App. Nutze Teilen -> Zum Home-Bildschirm.";
+  }
+  if (capability.kind === "insecure_context") {
+    return "Benachrichtigungen sind nur über HTTPS verfügbar. Öffne ChatPPC über eine sichere URL.";
+  }
+  if (capability.kind === "unsupported") {
+    return "Dieser Browser unterstützt Web-Benachrichtigungen nicht.";
+  }
+  if (capability.permission === "denied") {
     return "Benachrichtigungen sind blockiert. Aktiviere sie in den Browser-Einstellungen und versuche es erneut.";
   }
-  if (state === "unsupported") {
-    return "Dieser Browser unterstützt keine Desktop-Benachrichtigungen.";
-  }
-  if (state === "granted") {
+  if (capability.permission === "granted") {
     return "Desktop-Benachrichtigungen für neue Nachrichten und Beitritte sind aktiviert.";
   }
   return "Aktiviere Desktop-Benachrichtigungen für neue Nachrichten und wenn jemand dem Chat beitritt.";
 }
 
-function notificationButtonLabel(state: NotificationState): string {
-  if (state === "granted") return "Benachrichtigungen aktiv";
-  if (state === "denied") return "Benachrichtigungen aktivieren";
-  if (state === "unsupported") return "Nicht unterstützt";
+function notificationButtonLabel(capability: NotificationCapability): string {
+  if (capability.kind === "ios_home_screen_required") return "Home-Bildschirm nötig";
+  if (capability.kind === "insecure_context") return "HTTPS erforderlich";
+  if (capability.kind === "unsupported") return "Nicht unterstützt";
+  if (capability.permission === "granted") return "Benachrichtigungen aktiv";
   return "Benachrichtigungen aktivieren";
 }
 
@@ -480,38 +469,55 @@ interface OnlineUsersListProps {
 }
 
 const OnlineUsersList = memo(function OnlineUsersList({ users, avatarSizeClassName, onOpenLightbox }: OnlineUsersListProps) {
+  const defaultProfilePicture = normalizeProfilePictureUrl(undefined);
   return (
     <>
-      {users.map((user) => (
-        <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
-          <button
-            type="button"
-            onClick={() => onOpenLightbox(user.profilePicture, `Profilbild von ${user.username}`)}
-            className={`${avatarSizeClassName} shrink-0 cursor-zoom-in overflow-hidden rounded-full border border-slate-200 object-cover transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300`}
-            aria-label={`Profilbild von ${user.username} öffnen`}
-          >
-            <img
-              src={user.profilePicture}
-              alt={`${user.username} Profilbild`}
-              className="h-full w-full object-cover"
-              loading="lazy"
-              decoding="async"
-            />
-          </button>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
-            <p className="truncate text-xs text-slate-500">{formatPresenceStatus(user)}</p>
-            {shouldShowAiProgress(user) ? (
-              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
-                <div
-                  className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out animate-pulse"
-                  style={{ width: `${aiProgressForStatus(user.status)}%` }}
+      {users.map((user) => {
+        const avatarUrl = normalizeProfilePictureUrl(user.profilePicture);
+        const isFallbackAvatar = avatarUrl === defaultProfilePicture;
+        return (
+          <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
+            {isFallbackAvatar ? (
+              <div className={`${avatarSizeClassName} shrink-0 overflow-hidden rounded-full border border-slate-200`}>
+                <img
+                  src={avatarUrl}
+                  alt={`${user.username} Profilbild`}
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                  decoding="async"
                 />
               </div>
-            ) : null}
+            ) : (
+              <button
+                type="button"
+                onClick={() => onOpenLightbox(avatarUrl, `Profilbild von ${user.username}`)}
+                className={`${avatarSizeClassName} shrink-0 cursor-zoom-in overflow-hidden rounded-full border border-slate-200 object-cover transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300`}
+                aria-label={`Profilbild von ${user.username} öffnen`}
+              >
+                <img
+                  src={avatarUrl}
+                  alt={`${user.username} Profilbild`}
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
+              <p className="truncate text-xs text-slate-500">{formatPresenceStatus(user)}</p>
+              {shouldShowAiProgress(user) ? (
+                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
+                  <div
+                    className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out animate-pulse"
+                    style={{ width: `${aiProgressForStatus(user.status)}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
           </div>
-        </div>
-      ))}
+        );
+      })}
     </>
   );
 });
@@ -543,6 +549,7 @@ export function ChatApp() {
   const bottomStickFrameRef = useRef<number | null>(null);
   const previousScrollTopRef = useRef(0);
   const lastKnownScrollHeightRef = useRef(0);
+  const notificationCapabilityLoggedRef = useRef(false);
 
   const [session, setSession] = useState<SessionState | null>(() => loadSession());
   const [users, setUsers] = useState<UserPresenceDTO[]>([]);
@@ -560,7 +567,6 @@ export function ChatApp() {
   const [loadingMediaMore, setLoadingMediaMore] = useState(false);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [showMedia, setShowMedia] = useState(false);
-  const [composerOpen, setComposerOpen] = useState(false);
   const [composerMode, setComposerMode] = useState<ComposerMode>("message");
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -571,12 +577,9 @@ export function ChatApp() {
     return !document.hidden;
   });
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [notificationState, setNotificationState] = useState<NotificationState>(() => {
-    if (typeof window === "undefined" || !("Notification" in window)) {
-      return "unsupported";
-    }
-    return Notification.permission;
-  });
+  const [notificationCapability, setNotificationCapability] = useState<NotificationCapability>(
+    () => detectBrowserNotificationCapability(),
+  );
   const [adminOverview, setAdminOverview] = useState<AdminOverviewDTO | null>(null);
   const [adminBusy, setAdminBusy] = useState(false);
   const [adminNotice, setAdminNotice] = useState<string | null>(null);
@@ -609,11 +612,10 @@ export function ChatApp() {
   const [mentionIndex, setMentionIndex] = useState(0);
   const [composerHistoryIndex, setComposerHistoryIndex] = useState(-1);
   const [isDraggingUpload, setIsDraggingUpload] = useState(false);
-  const [viewportHeightPx, setViewportHeightPx] = useState<number | null>(null);
-  const [viewportOffsetTopPx, setViewportOffsetTopPx] = useState(0);
-  const [isTouchDevice, setIsTouchDevice] = useState(false);
+  const [profileDropActive, setProfileDropActive] = useState(false);
   const [composerHeightPx, setComposerHeightPx] = useState(DEFAULT_COMPOSER_HEIGHT_PX);
   const isDeveloperMode = Boolean(session?.devMode && session.devAuthToken);
+  const showNotificationPrompt = notificationCapability.kind !== "available" || notificationCapability.permission !== "granted";
 
   const sessionProfilePicture = useMemo(
     () => normalizeProfilePictureUrl(session?.profilePicture),
@@ -810,7 +812,6 @@ export function ChatApp() {
 
   const activateAskChatGpt = useCallback(() => {
     setComposerMode("message");
-    setComposerOpen(true);
     setMessageDraft((current) => {
       if (hasChatGptMention(current)) return current;
       return prependMention(current, "@chatgpt");
@@ -827,7 +828,6 @@ export function ChatApp() {
 
   const activateAskGrok = useCallback(() => {
     setComposerMode("message");
-    setComposerOpen(true);
     setMessageDraft((current) => {
       if (hasGrokMention(current)) return current;
       return prependMention(current, "@grok");
@@ -850,7 +850,11 @@ export function ChatApp() {
 
   const notifyMessages = useCallback(
     (incoming: MessageDTO[]) => {
-      if (Notification.permission !== "granted" || isLeavingRef.current) return;
+      if (
+        notificationCapability.kind !== "available"
+        || notificationCapability.permission !== "granted"
+        || isLeavingRef.current
+      ) return;
 
       const currentUsername = session?.username?.trim().toLowerCase() ?? "";
 
@@ -864,13 +868,13 @@ export function ChatApp() {
         const title = isJoinSystemMessage(payload)
           ? "Neue Anmeldung"
           : `${payload.username}: ${compactMessage || "Neue Nachricht"}`;
-        new Notification(title, {
+        new window.Notification(title, {
           body: isJoinSystemMessage(payload) ? compactMessage : undefined,
           icon: payload.profilePicture,
         });
       }
     },
-    [session?.clientId, session?.username],
+    [notificationCapability.kind, notificationCapability.permission, session?.clientId, session?.username],
   );
 
   const fetchMessagePage = useCallback(async (params: {
@@ -1207,57 +1211,37 @@ export function ChatApp() {
         `linear-gradient(rgba(248,250,252,0.15), rgba(248,250,252,0.15)), url("${escapedUrl}")`,
       backgroundSize: "cover",
       backgroundPosition: "center",
-      backgroundAttachment: isTouchDevice ? "scroll" : "fixed",
+      backgroundAttachment: "scroll",
     } as const;
-  }, [chatBackgroundUrl, isTouchDevice]);
+  }, [chatBackgroundUrl]);
 
-  const viewportAwareMainStyle = useMemo<CSSProperties>(() => {
-    const style: CSSProperties = {
-      ...(chatBackgroundStyle || {}),
-    };
-
-    if (isTouchDevice) {
-      style.position = "fixed";
-      style.inset = 0;
-      style.width = "100%";
-      style.overflow = "hidden";
-      if (viewportHeightPx && Number.isFinite(viewportHeightPx) && viewportHeightPx > 0) {
-        style.height = `${Math.round(viewportHeightPx)}px`;
-      }
-      if (viewportOffsetTopPx > 0) {
-        style.transform = `translateY(${viewportOffsetTopPx}px)`;
-      }
-    }
-    return style;
-  }, [chatBackgroundStyle, isTouchDevice, viewportHeightPx, viewportOffsetTopPx]);
-
-  const scrollContainerStyle = useMemo<CSSProperties>(() => {
+  const jumpToNewestStyle = useMemo(() => {
     return {
-      paddingBottom: `calc(${Math.round(composerHeightPx + COMPOSER_BOTTOM_GAP_PX)}px + env(safe-area-inset-bottom))`,
+      bottom: `calc(env(safe-area-inset-bottom) + ${Math.round(composerHeightPx + COMPOSER_BOTTOM_GAP_PX + 8)}px)`,
     };
   }, [composerHeightPx]);
 
-  const jumpToNewestStyle = useMemo<CSSProperties>(() => {
+  const scrollContainerStyle = useMemo(() => {
+    const dynamicPadding = Math.round(composerHeightPx * 0.12) + LAST_MESSAGE_EXTRA_CLEARANCE_PX;
     return {
-      bottom: `calc(env(safe-area-inset-bottom) + ${Math.round(composerHeightPx + COMPOSER_BOTTOM_GAP_PX)}px)`,
+      paddingBottom: `${dynamicPadding}px`,
     };
   }, [composerHeightPx]);
 
   const refreshNotificationState = useCallback(() => {
-    if (typeof window === "undefined" || !("Notification" in window)) {
-      setNotificationState("unsupported");
-      return;
-    }
-    setNotificationState(Notification.permission);
+    setNotificationCapability(detectBrowserNotificationCapability());
   }, []);
 
   const requestNotificationPermission = useCallback(async (): Promise<void> => {
-    if (typeof window === "undefined" || !("Notification" in window)) {
-      setNotificationState("unsupported");
+    const capability = detectBrowserNotificationCapability();
+    setNotificationCapability(capability);
+
+    if (typeof window === "undefined" || capability.kind !== "available" || !capability.canRequest) {
       return;
     }
-    const permission = await Notification.requestPermission();
-    setNotificationState(permission);
+
+    await window.Notification.requestPermission();
+    setNotificationCapability(detectBrowserNotificationCapability());
   }, []);
 
   const pushPresenceStatus = useCallback(
@@ -1368,25 +1352,8 @@ export function ChatApp() {
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    const isTouchViewport = () => window.matchMedia("(pointer: coarse)").matches || window.navigator.maxTouchPoints > 0;
     let frame: number | null = null;
     const updateViewportMetrics = () => {
-      const touchViewport = isTouchViewport();
-      setIsTouchDevice((current) => (current === touchViewport ? current : touchViewport));
-
-      const viewport = window.visualViewport;
-      if (touchViewport) {
-        const nextHeight = Math.round(viewport?.height ?? window.innerHeight);
-        const nextOffsetTop = Math.max(0, Math.round(viewport?.offsetTop ?? 0));
-        if (Number.isFinite(nextHeight) && nextHeight > 0) {
-          setViewportHeightPx((current) => (current === nextHeight ? current : nextHeight));
-        }
-        setViewportOffsetTopPx((current) => (current === nextOffsetTop ? current : nextOffsetTop));
-      } else {
-        setViewportHeightPx((current) => (current === null ? current : null));
-        setViewportOffsetTopPx((current) => (current === 0 ? current : 0));
-      }
-
       const element = scrollRef.current;
       if (!element) return;
       const distanceFromBottom = element.scrollHeight - (element.scrollTop + element.clientHeight);
@@ -1438,10 +1405,23 @@ export function ChatApp() {
   useEffect(() => {
     refreshNotificationState();
     window.addEventListener("focus", refreshNotificationState);
+    document.addEventListener("visibilitychange", refreshNotificationState);
     return () => {
       window.removeEventListener("focus", refreshNotificationState);
+      document.removeEventListener("visibilitychange", refreshNotificationState);
     };
   }, [refreshNotificationState]);
+
+  useEffect(() => {
+    if (!isDeveloperMode || notificationCapabilityLoggedRef.current) return;
+    notificationCapabilityLoggedRef.current = true;
+    console.info("[notifications] capability", {
+      kind: notificationCapability.kind,
+      permission: notificationCapability.permission,
+      isSecureContext: notificationCapability.isSecureContext,
+      isStandalone: notificationCapability.isStandalone,
+    });
+  }, [isDeveloperMode, notificationCapability]);
 
   useEffect(() => {
     if (!session) return;
@@ -1845,7 +1825,6 @@ export function ChatApp() {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setComposerOpen(true);
         setComposerMode("message");
         messageInputRef.current?.focus();
       }
@@ -2201,7 +2180,6 @@ export function ChatApp() {
       message: message.message,
     });
     setComposerMode("message");
-    setComposerOpen(true);
     requestAnimationFrame(() => {
       messageInputRef.current?.focus();
     });
@@ -2216,7 +2194,6 @@ export function ChatApp() {
   const handleRemixImage = useCallback(
     (url: string, alt?: string) => {
       setComposerMode("message");
-      setComposerOpen(true);
       setShowMentionSuggestions(false);
       setMentionFilter("");
       setMentionIndex(0);
@@ -2392,9 +2369,45 @@ export function ChatApp() {
 
   async function onProfileImageUpload(file: File | undefined) {
     if (!file) return;
+    if (!SUPPORTED_PROFILE_UPLOAD_MIME_TYPES.has(file.type)) {
+      setError("Nur jpg, png, webp oder gif werden unterstützt.");
+      return;
+    }
     setError(null);
     setProfileCropFile(file);
     if (profileUploadRef.current) profileUploadRef.current.value = "";
+  }
+
+  function onProfileImagePaste(event: ClipboardEvent<HTMLElement>): void {
+    const imageFiles = extractSupportedImageFiles(event.clipboardData, SUPPORTED_PROFILE_UPLOAD_MIME_TYPES);
+    if (imageFiles.length === 0) return;
+    event.preventDefault();
+    void onProfileImageUpload(imageFiles[0]);
+  }
+
+  function onProfileImageDragOver(event: DragEvent<HTMLElement>): void {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setProfileDropActive(true);
+  }
+
+  function onProfileImageDragLeave(event: DragEvent<HTMLElement>): void {
+    const nextTarget = event.relatedTarget as Node | null;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+    setProfileDropActive(false);
+  }
+
+  function onProfileImageDrop(event: DragEvent<HTMLElement>): void {
+    event.preventDefault();
+    setProfileDropActive(false);
+
+    const imageFiles = extractSupportedImageFiles(event.dataTransfer, SUPPORTED_PROFILE_UPLOAD_MIME_TYPES);
+    if (imageFiles.length === 0) {
+      setError("Nur jpg, png, webp oder gif werden unterstützt.");
+      return;
+    }
+    void onProfileImageUpload(imageFiles[0]);
   }
 
   async function onProfileCropConfirm(file: File) {
@@ -2423,7 +2436,6 @@ export function ChatApp() {
       if (!response.ok) throw new Error(await readApiError(response, "Upload fehlgeschlagen"));
       const { url } = (await response.json()) as { url: string };
       setComposerMode("message");
-      setComposerOpen(true);
       setUploadedDraftImages((current) => [
         ...current,
         {
@@ -2467,7 +2479,6 @@ export function ChatApp() {
       }));
 
       setComposerMode("message");
-      setComposerOpen(true);
       setUploadedDraftImages((current) => [...current, ...uploadedItems]);
       setError(null);
     } catch (uploadError) {
@@ -2478,15 +2489,91 @@ export function ChatApp() {
   }
 
   function onMessageInputPaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
-    const imageFiles = Array.from(event.clipboardData.items)
-      .filter((item) => item.kind === "file")
-      .map((item) => item.getAsFile())
-      .filter(
-        (file): file is File => file !== null && SUPPORTED_CHAT_UPLOAD_MIME_TYPES.has(file.type),
-      );
+    const imageFiles = extractSupportedImageFiles(event.clipboardData, SUPPORTED_CHAT_UPLOAD_MIME_TYPES);
 
     if (imageFiles.length === 0) return;
     void onChatImageDrop(imageFiles);
+  }
+
+  function selectMentionUser(username: string): void {
+    const selectionStart = messageInputRef.current?.selectionStart || 0;
+    const textBefore = messageDraft.slice(0, selectionStart);
+    const textAfter = messageDraft.slice(selectionStart);
+    const newTextBefore = textBefore.replace(/@(\w*)$/, `@${username} `);
+    setMessageDraft(newTextBefore + textAfter);
+    setShowMentionSuggestions(false);
+  }
+
+  function onMessageInputKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>): void {
+    if (showMentionSuggestions && filteredMentionUsers.length > 0) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setMentionIndex((index) => (index + 1) % filteredMentionUsers.length);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setMentionIndex((index) => (index - 1 + filteredMentionUsers.length) % filteredMentionUsers.length);
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        const user = filteredMentionUsers[mentionIndex];
+        if (!user) return;
+        selectMentionUser(user.username);
+        return;
+      }
+      if (event.key === "Escape") {
+        setShowMentionSuggestions(false);
+        return;
+      }
+    }
+
+    if (event.key === "ArrowUp" && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
+      event.preventDefault();
+      if (ownMessageHistory.length === 0) return;
+
+      if (composerHistoryIndex === -1) {
+        draftBeforeHistoryRef.current = messageDraft;
+        const nextIndex = ownMessageHistory.length - 1;
+        setComposerHistoryIndex(nextIndex);
+        setMessageDraft(ownMessageHistory[nextIndex] || "");
+        return;
+      }
+
+      const nextIndex = Math.max(0, composerHistoryIndex - 1);
+      setComposerHistoryIndex(nextIndex);
+      setMessageDraft(ownMessageHistory[nextIndex] || "");
+      return;
+    }
+
+    if (event.key === "ArrowDown" && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
+      if (composerHistoryIndex === -1) return;
+      event.preventDefault();
+
+      if (composerHistoryIndex < ownMessageHistory.length - 1) {
+        const nextIndex = composerHistoryIndex + 1;
+        setComposerHistoryIndex(nextIndex);
+        setMessageDraft(ownMessageHistory[nextIndex] || "");
+        return;
+      }
+
+      setComposerHistoryIndex(-1);
+      setMessageDraft(draftBeforeHistoryRef.current);
+      draftBeforeHistoryRef.current = "";
+      return;
+    }
+
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void submitComposer();
+    }
+  }
+
+  function onQuestionInputKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): void {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void submitComposer();
   }
 
   async function saveChatBackground(url: string | null): Promise<void> {
@@ -2562,249 +2649,225 @@ export function ChatApp() {
     if (!session) return;
     setUsernameDraft(session.username);
     setProfilePictureDraft(session.profilePicture || getDefaultProfilePicture());
+    setMobileSidebarOpen(false);
+    setProfileDropActive(false);
     setEditingProfile(true);
   }
 
   function closeProfileEditor(): void {
+    setProfileDropActive(false);
     setEditingProfile(false);
   }
+
+  const backgroundControls = (
+    <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Geteilter Chat-Hintergrund</p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={() => backgroundUploadRef.current?.click()}
+          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
+          disabled={uploadingBackground}
+        >
+          {uploadingBackground ? "Wird hochgeladen…" : "Hintergrund hochladen"}
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            void saveChatBackground(null).catch(() => {
+              setError("Chat-Hintergrund konnte nicht zurückgesetzt werden.");
+            });
+          }}
+          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
+        >
+          Zurücksetzen
+        </button>
+      </div>
+    </div>
+  );
+
+  const notificationControls = showNotificationPrompt ? (
+    <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Benachrichtigungen</p>
+      <p className="mt-1 text-xs text-slate-600">{describeNotificationState(notificationCapability)}</p>
+      <button
+        type="button"
+        onClick={() => void enableNotificationsFromSidebar()}
+        disabled={!notificationCapability.canRequest}
+        className="mt-2 h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 disabled:opacity-60"
+      >
+        {notificationButtonLabel(notificationCapability)}
+      </button>
+    </div>
+  ) : undefined;
+
+  const developerControls = isDeveloperMode ? (
+    <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Entwicklerwerkzeuge</p>
+        <button
+          type="button"
+          onClick={() => setShowAdminPanel((value) => !value)}
+          className="h-7 rounded-lg border border-amber-300 bg-white px-2 text-[11px] font-semibold text-amber-900"
+        >
+          {showAdminPanel ? "Ausblenden" : "Öffnen"}
+        </button>
+      </div>
+      {showAdminPanel ? (
+        <div className="mt-2 space-y-2">
+          <div className="grid grid-cols-2 gap-2 text-[11px] text-amber-900">
+            <div className="rounded-lg bg-white px-2 py-1">
+              Nutzer: <span className="font-semibold">{adminOverview?.usersTotal ?? "-"}</span>
+            </div>
+            <div className="rounded-lg bg-white px-2 py-1">
+              Online: <span className="font-semibold">{adminOverview?.usersOnline ?? "-"}</span>
+            </div>
+            <div className="rounded-lg bg-white px-2 py-1">
+              Nachrichten: <span className="font-semibold">{adminOverview?.messagesTotal ?? "-"}</span>
+            </div>
+            <div className="rounded-lg bg-white px-2 py-1">
+              Sperrliste: <span className="font-semibold">{adminOverview?.blacklistTotal ?? "-"}</span>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void fetchAdminOverview()}
+              disabled={adminBusy}
+              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+            >
+              Aktualisieren
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!window.confirm("Alle Chat-Nachrichten und Umfragen löschen?")) return;
+                void runAdminAction("delete_all_messages");
+              }}
+              disabled={adminBusy}
+              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+            >
+              Nachrichten löschen
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!window.confirm("Alle Nutzer außer dir abmelden?")) return;
+                void runAdminAction("logout_all_users");
+              }}
+              disabled={adminBusy}
+              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+            >
+              Nutzer abmelden
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!window.confirm("Sperrliste für Benutzernamen leeren?")) return;
+                void runAdminAction("clear_blacklist");
+              }}
+              disabled={adminBusy}
+              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+            >
+              Sperrliste leeren
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!window.confirm("Alles zurücksetzen? Nachrichten, Nutzer und Sperrliste werden gelöscht.")) return;
+                void runAdminAction("reset_all");
+              }}
+              disabled={adminBusy}
+              className="h-8 rounded-lg bg-amber-600 px-3 text-[11px] font-semibold text-white disabled:opacity-60"
+            >
+              Alles zurücksetzen
+            </button>
+          </div>
+          <div className="space-y-2">
+            <div className="flex gap-2">
+              <input
+                value={adminTargetUsername}
+                onChange={(event) => setAdminTargetUsername(event.target.value)}
+                placeholder="Benutzername zum Löschen…"
+                className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const target = adminTargetUsername.trim();
+                  if (!target) return;
+                  if (!window.confirm(`Nutzer ${target} löschen?`)) return;
+                  void runAdminAction("delete_user", { targetUsername: target });
+                }}
+                disabled={adminBusy}
+                className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+              >
+                Nutzer löschen
+              </button>
+            </div>
+            <div className="flex gap-2">
+              <input
+                value={adminTargetMessageId}
+                onChange={(event) => setAdminTargetMessageId(event.target.value)}
+                placeholder="Nachrichten-ID zum Löschen…"
+                className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  const target = adminTargetMessageId.trim();
+                  if (!target) return;
+                  if (!window.confirm(`Nachricht ${target} löschen?`)) return;
+                  void runAdminAction("delete_message", { targetMessageId: target });
+                }}
+                disabled={adminBusy}
+                className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+              >
+                Nachricht löschen
+              </button>
+            </div>
+          </div>
+          {adminNotice ? <p className="text-[11px] font-medium text-amber-900">{adminNotice}</p> : null}
+        </div>
+      ) : null}
+    </div>
+  ) : undefined;
 
   if (!session) return <div className="p-6 text-sm text-slate-500">Wird geladen…</div>;
 
   return (
     <main
-      style={viewportAwareMainStyle}
-      className="h-[100dvh] w-screen overflow-hidden bg-[radial-gradient(circle_at_top_right,_#dbeafe_0%,_#f8fafc_45%,_#eff6ff_100%)] [touch-action:manipulation]"
+      style={chatBackgroundStyle}
+      className="relative h-[100svh] w-full overflow-hidden bg-[radial-gradient(circle_at_top_right,_#dbeafe_0%,_#f8fafc_45%,_#eff6ff_100%)]"
     >
-      <div className="grid h-full w-full md:grid-cols-[320px_1fr]">
-        <aside className="hidden h-full border-r border-slate-200 bg-white/90 p-4 backdrop-blur md:flex md:flex-col">
-          <div className="flex items-center gap-3 rounded-2xl border border-slate-100 bg-slate-50 p-3">
-            <button
-              type="button"
-              onClick={openProfileEditor}
-              className="rounded-full transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-              title="Profilbild ändern"
-              aria-label="Profilbild ändern"
-            >
-              <img
-                src={sessionProfilePicture}
-                alt={`${session.username} avatar`}
-                className="h-14 w-14 rounded-full border border-slate-200 object-cover"
-                loading="lazy"
-                decoding="async"
-              />
-            </button>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-semibold text-slate-900">{session.username}</p>
-              <p className={`text-xs font-medium ${isDeveloperMode ? "text-amber-600" : "text-sky-500"}`}>
-                {isDeveloperMode ? "Entwicklermodus" : "online"}
-              </p>
-            </div>
-          </div>
-          <button
-            className="mt-3 h-10 rounded-xl border border-slate-200 bg-white text-sm font-medium text-slate-700"
-            onClick={openProfileEditor}
-          >
-            Profil bearbeiten
-          </button>
-          <input
-            ref={profileUploadRef}
-            type="file"
-            className="hidden"
-            accept="image/png,image/jpeg,image/webp,image/gif"
-            onChange={(event) => void onProfileImageUpload(event.target.files?.[0])}
-          />
+      <ChatShellSidebar
+        mobileOpen={mobileSidebarOpen}
+        onCloseMobile={() => setMobileSidebarOpen(false)}
+        username={session.username}
+        profilePicture={sessionProfilePicture}
+        statusLabel={isDeveloperMode ? "Entwicklermodus" : "online"}
+        onOpenProfileEditor={openProfileEditor}
+        onLogout={() => void logout()}
+        onlineUsersContent={<OnlineUsersList users={onlineUsers} avatarSizeClassName="h-11 w-11" onOpenLightbox={handleOpenLightbox} />}
+        notificationContent={notificationControls}
+        backgroundContent={backgroundControls}
+        developerContent={developerControls}
+      />
 
-          <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Geteilter Chat-Hintergrund</p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={() => backgroundUploadRef.current?.click()}
-                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
-                disabled={uploadingBackground}
-              >
-                {uploadingBackground ? "Wird hochgeladen…" : "Hintergrund hochladen"}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  void saveChatBackground(null).catch(() => {
-                    setError("Chat-Hintergrund konnte nicht zurückgesetzt werden.");
-                  });
-                }}
-                className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
-              >
-                Zurücksetzen
-              </button>
-            </div>
-          </div>
-
-          {isDeveloperMode ? (
-            <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Entwicklerwerkzeuge</p>
-                <button
-                  type="button"
-                  onClick={() => setShowAdminPanel((value) => !value)}
-                  className="h-7 rounded-lg border border-amber-300 bg-white px-2 text-[11px] font-semibold text-amber-900"
-                >
-                  {showAdminPanel ? "Ausblenden" : "Öffnen"}
-                </button>
-              </div>
-
-              {showAdminPanel ? (
-                <div className="mt-2 space-y-2">
-                  <div className="grid grid-cols-2 gap-2 text-[11px] text-amber-900">
-                    <div className="rounded-lg bg-white px-2 py-1">
-                      Nutzer: <span className="font-semibold">{adminOverview?.usersTotal ?? "-"}</span>
-                    </div>
-                    <div className="rounded-lg bg-white px-2 py-1">
-                      Online: <span className="font-semibold">{adminOverview?.usersOnline ?? "-"}</span>
-                    </div>
-                    <div className="rounded-lg bg-white px-2 py-1">
-                      Nachrichten: <span className="font-semibold">{adminOverview?.messagesTotal ?? "-"}</span>
-                    </div>
-                    <div className="rounded-lg bg-white px-2 py-1">
-                      Sperrliste: <span className="font-semibold">{adminOverview?.blacklistTotal ?? "-"}</span>
-                    </div>
-                  </div>
-
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void fetchAdminOverview()}
-                      disabled={adminBusy}
-                      className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-                    >
-                      Aktualisieren
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!window.confirm("Alle Chat-Nachrichten und Umfragen löschen?")) return;
-                        void runAdminAction("delete_all_messages");
-                      }}
-                      disabled={adminBusy}
-                      className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-                    >
-                      Nachrichten löschen
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!window.confirm("Alle Nutzer außer dir abmelden?")) return;
-                        void runAdminAction("logout_all_users");
-                      }}
-                      disabled={adminBusy}
-                      className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-                    >
-                      Nutzer abmelden
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!window.confirm("Sperrliste für Benutzernamen leeren?")) return;
-                        void runAdminAction("clear_blacklist");
-                      }}
-                      disabled={adminBusy}
-                      className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-                    >
-                      Sperrliste leeren
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!window.confirm("Alles zurücksetzen? Nachrichten, Nutzer und Sperrliste werden gelöscht.")) return;
-                        void runAdminAction("reset_all");
-                      }}
-                      disabled={adminBusy}
-                      className="h-8 rounded-lg bg-amber-600 px-3 text-[11px] font-semibold text-white disabled:opacity-60"
-                    >
-                      Alles zurücksetzen
-                    </button>
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex gap-2">
-                      <input
-                        value={adminTargetUsername}
-                        onChange={(event) => setAdminTargetUsername(event.target.value)}
-                        placeholder="Benutzername zum Löschen…"
-                        className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const target = adminTargetUsername.trim();
-                          if (!target) return;
-                          if (!window.confirm(`Nutzer ${target} löschen?`)) return;
-                          void runAdminAction("delete_user", { targetUsername: target });
-                        }}
-                        disabled={adminBusy}
-                        className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-                      >
-                        Nutzer löschen
-                      </button>
-                    </div>
-
-                    <div className="flex gap-2">
-                      <input
-                        value={adminTargetMessageId}
-                        onChange={(event) => setAdminTargetMessageId(event.target.value)}
-                        placeholder="Nachrichten-ID zum Löschen…"
-                        className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const target = adminTargetMessageId.trim();
-                          if (!target) return;
-                          if (!window.confirm(`Nachricht ${target} löschen?`)) return;
-                          void runAdminAction("delete_message", { targetMessageId: target });
-                        }}
-                        disabled={adminBusy}
-                        className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-                      >
-                        Nachricht löschen
-                      </button>
-                    </div>
-                  </div>
-
-                  {adminNotice ? <p className="text-[11px] font-medium text-amber-900">{adminNotice}</p> : null}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-
-          {notificationState !== "granted" ? (
-            <div className="mt-3 rounded-xl border border-slate-100 bg-slate-50 p-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Benachrichtigungen</p>
-              <p className="mt-1 text-xs text-slate-600">{describeNotificationState(notificationState)}</p>
-              <button
-                type="button"
-                onClick={() => void enableNotificationsFromSidebar()}
-                disabled={notificationState === "unsupported"}
-                className="mt-2 h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 disabled:opacity-60"
-              >
-                {notificationButtonLabel(notificationState)}
-              </button>
-            </div>
-          ) : null}
-
-	          <div className="mt-4 min-h-0 flex-1 overflow-y-auto">
-	            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">ChatPPC Online</p>
-	            <div className="space-y-2">
-              <OnlineUsersList users={onlineUsers} avatarSizeClassName="h-11 w-11" onOpenLightbox={handleOpenLightbox} />
-	            </div>
-	          </div>
-          <button onClick={() => void logout()} className="mt-4 h-10 rounded-xl bg-rose-600 text-sm font-semibold text-white">
-            Chat verlassen
-          </button>
-        </aside>
+      <div className="flex h-full min-h-0 flex-col lg:pl-72">
+        <ChatShellHeader
+          title="ChatPPC"
+          subtitle="Chatte mit deiner Gruppe. Erwähne @chatgpt oder @grok für KI-Antworten."
+          isDeveloperMode={isDeveloperMode}
+          sessionProfilePicture={sessionProfilePicture}
+          sessionUsername={session.username}
+          onOpenProfileEditor={openProfileEditor}
+          onOpenSidebar={() => setMobileSidebarOpen(true)}
+          onOpenMedia={() => setShowMedia(true)}
+        />
 
         <section
-          className="relative flex min-h-0 flex-col"
+          className="relative flex min-h-0 flex-1 flex-col"
           onDragEnter={(event) => {
             event.preventDefault();
             dragDepthRef.current += 1;
@@ -2839,81 +2902,35 @@ export function ChatApp() {
               </div>
             </div>
           ) : null}
-          <header className="flex items-center justify-between border-b border-slate-200 bg-white/85 px-4 py-3 backdrop-blur">
-            <div className="flex items-center gap-3">
-              <button
-                type="button"
-                onClick={openProfileEditor}
-                className="shrink-0 rounded-full transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 md:hidden"
-                title="Profilbild ändern"
-                aria-label="Profilbild ändern"
-              >
-                <img
-                  src={sessionProfilePicture}
-                  alt={`${session.username} avatar`}
-                  className="h-10 w-10 shrink-0 rounded-full border border-slate-200 object-cover [aspect-ratio:1/1]"
-                  loading="lazy"
-                  decoding="async"
-                />
-              </button>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h1 className="text-xl font-bold text-slate-900">ChatPPC</h1>
-                  {isDeveloperMode ? (
-                    <span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-900">
-                      DEV
-                    </span>
-                  ) : null}
-                </div>
-                <p className="text-xs text-slate-500">Chatte mit deiner Gruppe. Erwähne @chatgpt oder @grok für KI-Antworten.</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 md:hidden"
-                onClick={() => setMobileSidebarOpen(true)}
-              >
-                Personen
-              </button>
-              <button
-                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700"
-                onClick={() => setShowMedia(true)}
-              >
-                Medien
-              </button>
-            </div>
-          </header>
 
           <div
             ref={scrollRef}
-            className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 sm:p-4"
+            className="min-h-0 flex-1 overflow-y-auto p-3 [overscroll-behavior:contain] [-webkit-overflow-scrolling:touch] sm:p-4"
             style={scrollContainerStyle}
           >
             {loadingOlder ? (
               <p className="text-center text-xs text-slate-500">Ältere Nachrichten werden geladen…</p>
             ) : null}
-
-            <MessageList
-              messages={visibleMessages}
-              currentUsername={session.username}
-              isDeveloperMode={isDeveloperMode}
-              pendingDeliveries={pendingDeliveries}
-              answerDrafts={answerDrafts}
-              onAnswerDraftChange={handleAnswerDraftChange}
-              onSubmitAnswer={submitAnswer}
-              onVote={handleVote}
-              onDeleteMessage={handleDeleteMessage}
-              onStartReply={handleStartReply}
-              onOpenLightbox={handleOpenLightbox}
-              onRemixImage={handleRemixImage}
-            />
+            <div className="space-y-3">
+              <MessageList
+                messages={visibleMessages}
+                currentUsername={session.username}
+                isDeveloperMode={isDeveloperMode}
+                pendingDeliveries={pendingDeliveries}
+                answerDrafts={answerDrafts}
+                onAnswerDraftChange={handleAnswerDraftChange}
+                onSubmitAnswer={submitAnswer}
+                onVote={handleVote}
+                onDeleteMessage={handleDeleteMessage}
+                onStartReply={handleStartReply}
+                onOpenLightbox={handleOpenLightbox}
+                onRemixImage={handleRemixImage}
+              />
+            </div>
           </div>
 
           {!isAtBottom ? (
-            <div
-              className="pointer-events-none fixed inset-x-0 z-50 flex justify-center md:absolute md:z-40"
-              style={jumpToNewestStyle}
-            >
+            <div className="pointer-events-none absolute inset-x-0 z-30 flex justify-center" style={jumpToNewestStyle}>
               <button
                 type="button"
                 className="pointer-events-auto rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white shadow-lg"
@@ -2929,409 +2946,69 @@ export function ChatApp() {
             </div>
           ) : null}
 
-          <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex justify-center pb-[calc(env(safe-area-inset-bottom)+0.75rem)] md:absolute">
-            <div
-              ref={composerRef}
-              className={`pointer-events-auto w-[min(940px,94vw)] rounded-[2rem] border border-white/70 bg-white/90 p-3 shadow-[0_18px_50px_rgba(15,23,42,0.18)] backdrop-blur transition-all duration-300 ${
-                composerOpen ? "scale-100" : "scale-[0.98]"
-              }`}
-            >
-              <div className="mb-2 flex flex-wrap items-center gap-2">
-                {PRIMARY_COMPOSER_MODES.map((mode) => (
-                  <button
-                    type="button"
-                    key={mode}
-                    onClick={() => {
-                      setComposerMode(mode);
-                      setComposerOpen(true);
-                    }}
-                    className={`h-7 rounded-full px-3 text-xs font-semibold transition ${
-                      composerMode === mode
-                        ? "bg-slate-900 text-white"
-                        : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                    }`}
-                  >
-                    {COMPOSER_MODE_LABEL[mode]}
-                  </button>
-                ))}
-                <button
-                  type="button"
-                  onClick={activateAskChatGpt}
-                  className={`h-7 rounded-full px-3 text-xs font-semibold transition ${
-                    composerMode === "message" && hasChatGptMention(messageDraft)
-                      ? "bg-sky-600 text-white"
-                      : "bg-sky-100 text-sky-700 hover:bg-sky-200"
-                  }`}
-                >
-                  ChatGPT fragen
-                </button>
-                <button
-                  type="button"
-                  onClick={activateAskGrok}
-                  className={`h-7 rounded-full px-3 text-xs font-semibold transition ${
-                    composerMode === "message" && hasGrokMention(messageDraft)
-                      ? "bg-sky-600 text-white"
-                      : "bg-sky-100 text-sky-700 hover:bg-sky-200"
-                  }`}
-                >
-                  Grok fragen
-                </button>
-                {SECONDARY_COMPOSER_MODES.map((mode) => (
-                  <button
-                    type="button"
-                    key={mode}
-                    onClick={() => {
-                      setComposerMode(mode);
-                      setComposerOpen(true);
-                    }}
-                    className={`h-7 rounded-full px-3 text-xs font-semibold transition ${
-                      composerMode === mode
-                        ? "bg-slate-900 text-white"
-                        : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                    }`}
-                  >
-                    {COMPOSER_MODE_LABEL[mode]}
-                  </button>
-                ))}
-                <div className="ml-auto flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => chatUploadRef.current?.click()}
-                    disabled={uploadingChat}
-                    className="flex h-7 w-7 items-center justify-center rounded-lg bg-slate-100 text-slate-600 transition hover:bg-slate-200 disabled:opacity-50"
-                    title="Bild hochladen"
-                    aria-label="Bild hochladen"
-                  >
-                    {uploadingChat ? (
-                      <div className="h-3 w-3 animate-spin rounded-full border-2 border-slate-400 border-t-transparent" />
-                    ) : (
-                      <span className="text-sm">📎</span>
-                    )}
-                  </button>
-                  <input
-                    ref={chatUploadRef}
-                    type="file"
-                    className="hidden"
-                    accept="image/png,image/jpeg,image/webp,image/gif"
-                    onChange={(event) => void onChatImageUpload(event.target.files?.[0])}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void submitComposer()}
-                    className="h-7 rounded-lg bg-slate-900 px-4 text-xs font-semibold text-white transition hover:bg-slate-800"
-                  >
-                    Senden
-                  </button>
-                </div>
-              </div>
-
-              {composerMode === "message" ? (
-                <div className="space-y-2">
-                  {replyTarget ? (
-                    <div className="flex items-start justify-between gap-3 rounded-xl border border-sky-200 bg-sky-50 px-3 py-2">
-                      <div className="min-w-0">
-                        <p className="text-[11px] font-semibold uppercase tracking-wide text-sky-700">Antwort auf</p>
-                        <p className="truncate text-xs text-slate-700">
-                          {replyTarget.username}: {replyTarget.message}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setReplyTarget(null)}
-                        className="shrink-0 rounded-lg border border-sky-200 bg-white px-2 py-1 text-[11px] font-semibold text-sky-700"
-                      >
-                        Entfernen
-                      </button>
-                    </div>
-                  ) : null}
-
-                  {uploadedDraftImages.length > 0 ? (
-                    <div className="flex flex-wrap gap-2">
-                      {uploadedDraftImages.map((image) => (
-                        <DraftImagePreview
-                          key={image.id}
-                          image={image}
-                          onRemove={() =>
-                            setUploadedDraftImages((current) =>
-                              current.filter((uploadedImage) => uploadedImage.id !== image.id),
-                            )
-                          }
-                        />
-                      ))}
-                    </div>
-                  ) : null}
-
-                  <textarea
-                    ref={messageInputRef}
-                    value={messageDraft}
-                    onFocus={() => setComposerOpen(true)}
-                    onChange={handleMessageDraftChange}
-                    onPaste={onMessageInputPaste}
-                    onKeyDown={(event) => {
-                      if (showMentionSuggestions && filteredMentionUsers.length > 0) {
-                        if (event.key === "ArrowDown") {
-                          event.preventDefault();
-                          setMentionIndex((index) => (index + 1) % filteredMentionUsers.length);
-                          return;
-                        }
-                        if (event.key === "ArrowUp") {
-                          event.preventDefault();
-                          setMentionIndex(
-                            (index) => (index - 1 + filteredMentionUsers.length) % filteredMentionUsers.length,
-                          );
-                          return;
-                        }
-                        if (event.key === "Enter" || event.key === "Tab") {
-                          event.preventDefault();
-                          const user = filteredMentionUsers[mentionIndex];
-                          const selectionStart = messageInputRef.current?.selectionStart || 0;
-                          const textBefore = messageDraft.slice(0, selectionStart);
-                          const textAfter = messageDraft.slice(selectionStart);
-                          const newTextBefore = textBefore.replace(/@(\w*)$/, `@${user.username} `);
-                          setMessageDraft(newTextBefore + textAfter);
-                          setShowMentionSuggestions(false);
-                          return;
-                        }
-                        if (event.key === "Escape") {
-                          setShowMentionSuggestions(false);
-                          return;
-                        }
-                      }
-
-                      if (event.key === "ArrowUp" && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
-                        event.preventDefault();
-                        if (ownMessageHistory.length === 0) return;
-
-                        if (composerHistoryIndex === -1) {
-                          draftBeforeHistoryRef.current = messageDraft;
-                          const nextIndex = ownMessageHistory.length - 1;
-                          setComposerHistoryIndex(nextIndex);
-                          setMessageDraft(ownMessageHistory[nextIndex] || "");
-                          return;
-                        }
-
-                        const nextIndex = Math.max(0, composerHistoryIndex - 1);
-                        setComposerHistoryIndex(nextIndex);
-                        setMessageDraft(ownMessageHistory[nextIndex] || "");
-                        return;
-                      }
-
-                      if (event.key === "ArrowDown" && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
-                        if (composerHistoryIndex === -1) return;
-                        event.preventDefault();
-
-                        if (composerHistoryIndex < ownMessageHistory.length - 1) {
-                          const nextIndex = composerHistoryIndex + 1;
-                          setComposerHistoryIndex(nextIndex);
-                          setMessageDraft(ownMessageHistory[nextIndex] || "");
-                          return;
-                        }
-
-                        setComposerHistoryIndex(-1);
-                        setMessageDraft(draftBeforeHistoryRef.current);
-                        draftBeforeHistoryRef.current = "";
-                        return;
-                      }
-
-                      if (event.key === "Enter" && !event.shiftKey) {
-                        event.preventDefault();
-                        void submitComposer();
-                      }
-                    }}
-                    placeholder="Nachricht schreiben…"
-                    rows={1}
-                    className="w-full resize-none rounded-xl border border-slate-200 px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                  />
-                </div>
-              ) : null}
-
-              {showMentionSuggestions && filteredMentionUsers.length > 0 && composerMode === "message" ? (
-                <div className="absolute bottom-full left-4 mb-2 max-h-40 w-48 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
-                  {filteredMentionUsers.map((user, index) => (
-                    <button
-                      type="button"
-                      key={user.clientId}
-                      onClick={() => {
-                        const selectionStart = messageInputRef.current?.selectionStart || 0;
-                        const textBefore = messageDraft.slice(0, selectionStart);
-                        const textAfter = messageDraft.slice(selectionStart);
-                        const newTextBefore = textBefore.replace(/@(\w*)$/, `@${user.username} `);
-                        setMessageDraft(newTextBefore + textAfter);
-                        setShowMentionSuggestions(false);
-                      }}
-                      className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition ${
-                        index === mentionIndex
-                          ? "bg-sky-100 text-sky-900"
-                          : "text-slate-700 hover:bg-slate-50"
-                      }`}
-                    >
-                      <img
-                        src={user.profilePicture}
-                        className="h-5 w-5 rounded-full object-cover"
-                        alt=""
-                        loading="lazy"
-                        decoding="async"
-                      />
-                      <span className="truncate">{user.username}</span>
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-
-              {composerMode === "question" ? (
-                <input
-                  value={questionDraft}
-                  onFocus={() => setComposerOpen(true)}
-                  onChange={(event) => setQuestionDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void submitComposer();
-                    }
-                  }}
-                  placeholder="Stelle deiner Gruppe eine Frage…"
-                  className="h-9 w-full rounded-xl border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
-                />
-              ) : null}
-
-              {composerMode === "poll" ? (
-                <div className="space-y-2">
-                  <input
-                    value={pollQuestion}
-                    onFocus={() => setComposerOpen(true)}
-                    onChange={(event) => setPollQuestion(event.target.value)}
-                    placeholder="Umfragefrage…"
-                    className="h-9 w-full rounded-xl border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                  />
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {pollOptions.map((option, index) => (
-                      <input
-                        key={`poll-option-${index}`}
-                        value={option}
-                        onChange={(event) => updatePollOptionValue(index, event.target.value)}
-                        placeholder={`Option ${index + 1}…`}
-                        className="h-8 rounded-lg border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                      />
-                    ))}
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setPollOptions((current) => (current.length <= 2 ? current : current.slice(0, -1)))
-                      }
-                      className="h-7 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
-                    >
-                      Option entfernen
-                    </button>
-                    <label className="ml-2 inline-flex items-center gap-2 text-xs text-slate-600">
-                      <input
-                        type="checkbox"
-                        checked={pollMultiSelect}
-                        onChange={(event) => setPollMultiSelect(event.target.checked)}
-                      />
-                      Mehrfachauswahl
-                    </label>
-                    <p className="text-xs text-slate-500">
-                      Stimmen werden beim Klick sofort aktualisiert und können jederzeit geändert werden.
-                    </p>
-                  </div>
-                </div>
-              ) : null}
+          <div className="sticky bottom-0 z-20 bg-transparent px-2 pb-[calc(env(safe-area-inset-bottom)+0.6rem)] pt-2 sm:px-3">
+            <div className="mx-auto w-full max-w-[960px]">
+              <ChatComposer
+                composerRef={composerRef}
+                messageInputRef={messageInputRef}
+                chatUploadRef={chatUploadRef}
+                mode={composerMode}
+                messageDraft={messageDraft}
+                questionDraft={questionDraft}
+                pollQuestion={pollQuestion}
+                pollOptions={pollOptions}
+                pollMultiSelect={pollMultiSelect}
+                uploadedDraftImages={uploadedDraftImages}
+                replyTarget={replyTarget}
+                uploadingChat={uploadingChat}
+                showMentionSuggestions={showMentionSuggestions}
+                mentionUsers={filteredMentionUsers}
+                mentionIndex={mentionIndex}
+                hasChatGptMention={hasChatGptMention(messageDraft)}
+                hasGrokMention={hasGrokMention(messageDraft)}
+                onModeChange={(mode) => {
+                  setComposerMode(mode);
+                }}
+                onAskChatGpt={activateAskChatGpt}
+                onAskGrok={activateAskGrok}
+                onRemoveReplyTarget={() => setReplyTarget(null)}
+                onMessageDraftChange={handleMessageDraftChange}
+                onMessageInputPaste={onMessageInputPaste}
+                onMessageKeyDown={onMessageInputKeyDown}
+                onQuestionDraftChange={setQuestionDraft}
+                onQuestionKeyDown={onQuestionInputKeyDown}
+                onPollQuestionChange={setPollQuestion}
+                onPollOptionChange={updatePollOptionValue}
+                onPollMultiSelectChange={setPollMultiSelect}
+                onRemovePollOption={() => setPollOptions((current) => (current.length <= 2 ? current : current.slice(0, -1)))}
+                onSelectMention={selectMentionUser}
+                onRemoveDraftImage={(imageId) =>
+                  setUploadedDraftImages((current) => current.filter((uploadedImage) => uploadedImage.id !== imageId))
+                }
+                onOpenUpload={() => chatUploadRef.current?.click()}
+                onUploadChange={(event) => void onChatImageUpload(event.target.files?.[0])}
+                onSubmit={() => void submitComposer()}
+              />
             </div>
           </div>
-
-          {error ? (
-            <p
-              className="absolute left-1/2 top-16 z-30 -translate-x-1/2 rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-600"
-              aria-live="polite"
-            >
-              {error}
-            </p>
-          ) : null}
         </section>
       </div>
 
-      {mobileSidebarOpen ? (
-        <div className="fixed inset-0 z-40 md:hidden">
-          <button
-            className="absolute inset-0 bg-slate-900/40"
-            onClick={() => setMobileSidebarOpen(false)}
-            aria-label="Panel schließen"
-          />
-          <div className="absolute right-0 top-0 h-full w-[90vw] max-w-sm overflow-y-auto bg-white p-4 [overscroll-behavior:contain]">
-            <button
-              className="mb-3 h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700"
-              onClick={() => setMobileSidebarOpen(false)}
-            >
-              Schließen
-            </button>
-            <div className="space-y-2">
-              <OnlineUsersList users={onlineUsers} avatarSizeClassName="h-9 w-9" onOpenLightbox={handleOpenLightbox} />
-            </div>
-            {notificationState !== "granted" ? (
-              <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Benachrichtigungen</p>
-                <p className="mt-1 text-xs text-slate-600">{describeNotificationState(notificationState)}</p>
-                <button
-                  type="button"
-                  onClick={() => void enableNotificationsFromSidebar()}
-                  disabled={notificationState === "unsupported"}
-                  className="mt-2 h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 disabled:opacity-60"
-                >
-                  {notificationButtonLabel(notificationState)}
-                </button>
-              </div>
-            ) : null}
-            <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 p-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Geteilter Chat-Hintergrund</p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => backgroundUploadRef.current?.click()}
-                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
-                  disabled={uploadingBackground}
-                >
-                  {uploadingBackground ? "Wird hochgeladen…" : "Hintergrund hochladen"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void saveChatBackground(null).catch(() => {
-                      setError("Chat-Hintergrund konnte nicht zurückgesetzt werden.");
-                    });
-                  }}
-                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
-                >
-                  Zurücksetzen
-                </button>
-              </div>
-            </div>
-            {isDeveloperMode ? (
-              <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Entwicklerwerkzeuge</p>
-                <p className="mt-1 text-[11px] text-amber-900">
-                  Öffne die Desktop-Seitenleiste für Zurücksetzen/Löschen/Moderation.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => void fetchAdminOverview()}
-                  disabled={adminBusy}
-                  className="mt-2 h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-                >
-                  Aktualisieren Stats
-                </button>
-              </div>
-            ) : null}
-            <button
-              onClick={() => void logout()}
-              className="mt-4 h-10 w-full rounded-xl bg-rose-600 text-sm font-semibold text-white"
-            >
-              Chat verlassen
-            </button>
-          </div>
-        </div>
-      ) : null}
+      <UiToast
+        show={Boolean(error)}
+        title="Hinweis"
+        message={error || ""}
+        tone="error"
+        onClose={() => setError(null)}
+      />
+
+      <input
+        ref={profileUploadRef}
+        type="file"
+        className="hidden"
+        accept="image/png,image/jpeg,image/webp,image/gif"
+        onChange={(event) => void onProfileImageUpload(event.target.files?.[0])}
+      />
 
       {editingProfile ? (
         <div className="fixed inset-0 z-[65] grid place-items-center bg-slate-900/45 p-4" onClick={closeProfileEditor}>
@@ -3366,39 +3043,55 @@ export function ChatApp() {
               Profil schließen
             </button>
 
-            <div className="mt-4 space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+            <div className="mt-4 space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4" onPaste={onProfileImagePaste}>
               <input
                 value={usernameDraft}
                 onChange={(event) => setUsernameDraft(event.target.value)}
                 placeholder="Benutzername…"
                 className="h-12 w-full rounded-xl border border-slate-200 px-4 text-base text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
               />
-              <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
-                <img
-                  src={profilePictureDraft || getDefaultProfilePicture()}
-                  alt="Profilbild-Vorschau"
-                  className="h-16 w-16 rounded-full border border-slate-200 object-cover"
-                  loading="lazy"
-                  decoding="async"
-                />
-                <p className="text-sm text-slate-500">Vor dem Speichern Profilbild hochladen und zuschneiden.</p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => profileUploadRef.current?.click()}
-                  className="h-11 rounded-xl border border-slate-200 bg-white px-5 text-sm font-medium text-slate-700"
-                >
-                  {uploadingProfile ? "Wird hochgeladen…" : "Hochladen"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void saveProfile()}
-                  className="h-11 rounded-xl bg-slate-900 px-5 text-sm font-semibold text-white disabled:opacity-60"
-                  disabled={uploadingProfile}
-                >
-                  Speichern
-                </button>
+              <div
+                className={`space-y-3 rounded-xl border border-dashed p-3 transition ${
+                  profileDropActive
+                    ? "border-sky-400 bg-sky-50"
+                    : "border-slate-300 bg-white"
+                }`}
+                tabIndex={0}
+                onDragOver={onProfileImageDragOver}
+                onDragEnter={onProfileImageDragOver}
+                onDragLeave={onProfileImageDragLeave}
+                onDrop={onProfileImageDrop}
+              >
+                <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
+                  <img
+                    src={profilePictureDraft || getDefaultProfilePicture()}
+                    alt="Profilbild-Vorschau"
+                    className="h-16 w-16 rounded-full border border-slate-200 object-cover"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  <p className="text-sm text-slate-500">Vor dem Speichern Profilbild hochladen und zuschneiden.</p>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Bild hierher ziehen oder per Einfügen (Cmd/Ctrl + V) übernehmen.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() => profileUploadRef.current?.click()}
+                    className="h-11 rounded-xl border border-slate-200 bg-white px-5 text-sm font-medium text-slate-700"
+                  >
+                    {uploadingProfile ? "Wird hochgeladen…" : "Hochladen"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void saveProfile()}
+                    className="h-11 rounded-xl bg-slate-900 px-5 text-sm font-semibold text-white disabled:opacity-60"
+                    disabled={uploadingProfile}
+                  >
+                    Speichern
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -3514,10 +3207,10 @@ export function ChatApp() {
               <button
                 type="button"
                 onClick={() => void enableNotificationsFromOnboarding()}
-                disabled={notificationState === "unsupported"}
+                disabled={!notificationCapability.canRequest}
                 className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
               >
-                {notificationButtonLabel(notificationState)}
+                {notificationButtonLabel(notificationCapability)}
               </button>
               <button
                 type="button"
@@ -3527,7 +3220,7 @@ export function ChatApp() {
                 Jetzt ohne Benachrichtigungen fortfahren
               </button>
             </div>
-            <p className="mt-3 text-xs text-slate-500">{describeNotificationState(notificationState)}</p>
+            <p className="mt-3 text-xs text-slate-500">{describeNotificationState(notificationCapability)}</p>
           </div>
         </div>
       ) : null}

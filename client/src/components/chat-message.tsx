@@ -420,17 +420,27 @@ function ChatMessageComponent({
               </button>
             </div>
           ) : null}
-          <div className="mb-3 flex items-start justify-between gap-2">
-            <div>
-              <p className="text-base font-semibold text-slate-900">{message.message}</p>
-              <p className="text-sm text-slate-500">Umfrage von {message.username}</p>
+          <div className="mb-3 flex items-start gap-3">
+            <MessageAvatar
+              key={`poll-${message.id}:${message.profilePicture}`}
+              src={message.profilePicture}
+              alt={profilePictureAlt}
+              onOpenLightbox={onOpenLightbox}
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-base font-semibold text-slate-900">{message.message}</p>
+                  <p className="text-sm text-slate-500">Umfrage von {message.username}</p>
+                </div>
+                <time className="shrink-0 text-xs text-slate-400" dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
+              </div>
               <p className="text-xs text-slate-400">
                 {pollSettings?.multiSelect
                   ? "Mehrfachauswahl aktiv - Klick aktualisiert deine Stimme sofort"
                   : "Einzelauswahl - Klick aktualisiert deine Stimme sofort"}
               </p>
             </div>
-            <time className="text-xs text-slate-400" dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
           </div>
           <div className="space-y-2">
             {options.map((option) => {

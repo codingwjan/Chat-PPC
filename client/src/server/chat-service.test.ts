@@ -167,6 +167,30 @@ describe("chat service", () => {
     ).toBeNull();
   });
 
+  it("extracts AI poll payload from numbered survey text fallback", () => {
+    const payload = __extractAiPollPayloadForTests(`
+Alles klar, wir machen das sauber.
+
+**Umfrage: Papa Kellerbar – was ist Phase?**
+
+1. Familie geht vor. Kellerbar kann warten.
+2. Erst kurz in die Kellerbar, dann maybe Familie.
+3. Direkt Kellerbar. Kinder wachsen auch ohne mich auf.
+
+Abstimmen und ehrlich sein.
+`);
+
+    expect(payload).toEqual({
+      question: "Papa Kellerbar – was ist Phase?",
+      options: [
+        "Familie geht vor. Kellerbar kann warten.",
+        "Erst kurz in die Kellerbar, dann maybe Familie.",
+        "Direkt Kellerbar. Kinder wachsen auch ohne mich auf.",
+      ],
+      multiSelect: false,
+    });
+  });
+
   it("rejects blacklisted usernames on login", async () => {
     prismaMock.blacklistEntry.findUnique.mockResolvedValueOnce({
       id: "blocked",
@@ -858,6 +882,66 @@ describe("chat service", () => {
             type: MessageType.MESSAGE,
             authorName: "ChatGPT",
             content: "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal.",
+          }),
+        }),
+      );
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+    }
+  });
+
+  it("creates native poll message from ChatGPT numbered survey text fallback", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-chatgpt-poll-fallback-text-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@chatgpt create a poll",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({
+        id: "msg-chatgpt-poll-fallback-text",
+        type: MessageType.VOTING_POLL,
+        content: "Papa Kellerbar – was ist Phase?",
+        authorName: "ChatGPT",
+        pollMultiSelect: false,
+        pollAllowVoteChange: true,
+        pollOptions: [
+          { id: "o1", label: "Familie geht vor. Kellerbar kann warten.", sortOrder: 0, votes: [] },
+          { id: "o2", label: "Erst kurz in die Kellerbar, dann maybe Familie.", sortOrder: 1, votes: [] },
+        ],
+      }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: `
+Alles klar, wir machen das sauber.
+
+**Umfrage: Papa Kellerbar – was ist Phase?**
+
+1. Familie geht vor. Kellerbar kann warten.
+2. Erst kurz in die Kellerbar, dann maybe Familie.
+`,
+      output: [],
+    });
+
+    try {
+      await processAiQueue({ maxJobs: 1 });
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            type: MessageType.VOTING_POLL,
+            content: "Papa Kellerbar – was ist Phase?",
+            authorName: "ChatGPT",
           }),
         }),
       );

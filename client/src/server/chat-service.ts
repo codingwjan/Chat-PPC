@@ -756,6 +756,58 @@ interface AiPollPayload {
 }
 
 const AI_POLL_BLOCK_REGEX = /<POLL_JSON>([\s\S]*?)<\/POLL_JSON>/gi;
+const AI_POLL_OPTION_LINE_REGEX = /^\s*(?:\d{1,2}[.)]|[-*])\s+(.+)$/;
+const AI_POLL_HINT_REGEX = /\b(umfrage|survey|poll|abstimmen|vote|voting)\b/i;
+
+function normalizePollText(value: string): string {
+  return value
+    .trim()
+    .replace(/^[-*_`#\s]+/, "")
+    .replace(/[-*_`#\s]+$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractListPollPayload(rawText: string): AiPollPayload | null {
+  const text = stripAiPollBlocks(rawText);
+  if (!text || !AI_POLL_HINT_REGEX.test(text)) return null;
+
+  const lines = text
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+
+  const options: string[] = [];
+  let firstOptionIndex = -1;
+
+  lines.forEach((line, index) => {
+    const match = line.match(AI_POLL_OPTION_LINE_REGEX);
+    if (!match) return;
+    if (firstOptionIndex === -1) firstOptionIndex = index;
+    const label = normalizePollText(match[1] || "");
+    if (label) options.push(label);
+  });
+
+  if (options.length < 2 || options.length > 15) return null;
+  if (new Set(options.map((option) => option.toLowerCase())).size !== options.length) return null;
+
+  const headingLine = lines.find((line) => AI_POLL_HINT_REGEX.test(line) && !AI_POLL_OPTION_LINE_REGEX.test(line));
+  const headingQuestion = headingLine
+    ? normalizePollText(headingLine.includes(":") ? headingLine.split(":").slice(1).join(":") : headingLine)
+    : "";
+
+  const fallbackQuestion = firstOptionIndex > 0
+    ? normalizePollText(lines[firstOptionIndex - 1] || "")
+    : "";
+
+  const question = headingQuestion || fallbackQuestion || "Umfrage";
+  if (!question) return null;
+
+  const multiSelect = /\b(mehrfach|multiple\s+choice|multi[\s-]?select)\b/i.test(text);
+  return { question, options, multiSelect };
+}
 
 function stripAiPollBlocks(text: string): string {
   return text.replace(/<POLL_JSON>[\s\S]*?<\/POLL_JSON>/gi, "").trim();
@@ -765,7 +817,9 @@ function extractAiPollPayload(rawText: string): AiPollPayload | null {
   if (!rawText) return null;
 
   const matches = [...rawText.matchAll(AI_POLL_BLOCK_REGEX)];
-  if (matches.length !== 1) return null;
+  if (matches.length !== 1) {
+    return extractListPollPayload(rawText);
+  }
 
   const jsonPayload = matches[0]?.[1]?.trim();
   if (!jsonPayload) return null;
@@ -774,7 +828,7 @@ function extractAiPollPayload(rawText: string): AiPollPayload | null {
   try {
     parsed = JSON.parse(jsonPayload);
   } catch {
-    return null;
+    return extractListPollPayload(rawText);
   }
 
   if (typeof parsed !== "object" || parsed === null) return null;
@@ -795,12 +849,12 @@ function extractAiPollPayload(rawText: string): AiPollPayload | null {
     .filter(Boolean);
 
   if (!question || options.length < 2 || options.length > 15) {
-    return null;
+    return extractListPollPayload(rawText);
   }
 
   const uniqueOptions = new Set(options.map((option) => option.toLowerCase()));
   if (uniqueOptions.size !== options.length) {
-    return null;
+    return extractListPollPayload(rawText);
   }
 
   return {

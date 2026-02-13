@@ -1,7 +1,7 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
-import { FormEvent, KeyboardEvent, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
 import { useRouter } from "next/navigation";
 import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { apiJson } from "@/lib/http";
@@ -13,6 +13,7 @@ interface UploadResponse {
 }
 
 const USERNAME_PLACEHOLDER = "Dein Benutzername";
+const SUPPORTED_PROFILE_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 
 function createClientId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -49,6 +50,20 @@ export function LoginForm() {
   const [uploading, setUploading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [profileDropActive, setProfileDropActive] = useState(false);
+
+  function extractSupportedImageFiles(dataTransfer: DataTransfer | null | undefined): File[] {
+    if (!dataTransfer) return [];
+
+    const fromItems = Array.from(dataTransfer.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null)
+      .filter((file) => SUPPORTED_PROFILE_UPLOAD_MIME_TYPES.has(file.type));
+    if (fromItems.length > 0) return fromItems;
+
+    return Array.from(dataTransfer.files).filter((file) => SUPPORTED_PROFILE_UPLOAD_MIME_TYPES.has(file.type));
+  }
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -94,11 +109,49 @@ export function LoginForm() {
 
   async function onUploadChange(file: File | undefined) {
     if (!file) return;
+    if (!SUPPORTED_PROFILE_UPLOAD_MIME_TYPES.has(file.type)) {
+      setError("Nur jpg, png, webp oder gif werden unterstützt.");
+      return;
+    }
+
     setError(null);
     setCropFile(file);
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
+  }
+
+  function onProfileImagePaste(event: ClipboardEvent<HTMLElement>): void {
+    const imageFiles = extractSupportedImageFiles(event.clipboardData);
+    if (imageFiles.length === 0) return;
+    event.preventDefault();
+    void onUploadChange(imageFiles[0]);
+  }
+
+  function onProfileImageDragOver(event: DragEvent<HTMLElement>): void {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setProfileDropActive(true);
+  }
+
+  function onProfileImageDragLeave(event: DragEvent<HTMLElement>): void {
+    const nextTarget = event.relatedTarget as Node | null;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+    setProfileDropActive(false);
+  }
+
+  function onProfileImageDrop(event: DragEvent<HTMLElement>): void {
+    event.preventDefault();
+    setProfileDropActive(false);
+
+    const imageFiles = extractSupportedImageFiles(event.dataTransfer);
+    if (imageFiles.length === 0) {
+      setError("Nur jpg, png, webp oder gif werden unterstützt.");
+      return;
+    }
+
+    void onUploadChange(imageFiles[0]);
   }
 
   async function onCropConfirm(file: File) {
@@ -124,80 +177,86 @@ export function LoginForm() {
   }
 
   return (
-    <main className="h-[100dvh] w-screen overflow-y-auto bg-[radial-gradient(circle_at_top_left,_#dbeafe_0%,_#f8fafc_40%,_#eef2ff_100%)] px-4 py-6 sm:px-6 [padding-bottom:calc(env(safe-area-inset-bottom)+1rem)]">
-      <div className="mx-auto flex min-h-full max-w-4xl items-center">
-        <section className="grid w-full overflow-hidden rounded-3xl border border-white/70 bg-white/70 shadow-2xl backdrop-blur md:grid-cols-[1.1fr_1fr]">
-          <div className="bg-slate-900 p-8 text-white md:p-10">
-            <p className="mb-3 inline-flex rounded-full bg-white/10 px-3 py-1 text-xs font-semibold tracking-wide">
-              ChatPPC
-            </p>
-            <h1 className="text-3xl font-bold leading-tight">In wenigen Sekunden im Gruppenchat.</h1>
-            <p className="mt-4 text-sm text-slate-200">
-              Schneller Echtzeit-Chat mit Umfragen, Fragen und Bildfreigaben für kleine Teams und Klassen.
-            </p>
-            <div className="mt-8 rounded-2xl border border-white/15 bg-white/5 p-4 text-xs text-slate-200">
-              Tipp: Lade vor dem Beitritt ein Profilbild hoch und schneide es direkt zu.
-            </div>
-          </div>
+    <main className="min-h-[100svh] bg-white">
+      <div className="flex min-h-[100svh]">
+        <div className="flex flex-1 flex-col justify-center px-4 py-10 sm:px-6 lg:flex-none lg:px-20 xl:px-24">
+          <div className="mx-auto w-full max-w-sm lg:w-96">
+            <p className="inline-flex rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700">ChatPPC</p>
+            <h1 className="mt-6 text-2xl font-bold tracking-tight text-slate-900">Anmelden</h1>
+            <p className="mt-2 text-sm text-slate-500">Wähle einen Namen und starte den Chat.</p>
 
-          <div className="p-6 sm:p-8 md:p-10">
-            <h2 className="text-2xl font-bold text-slate-900 text-balance">Anmelden</h2>
-            <p className="mt-1 text-sm text-slate-500">Wähle einen Namen und starte den Chat.</p>
-
-            <form className="mt-6 space-y-4" onSubmit={onSubmit}>
-              <label className="block text-sm font-medium text-slate-700">
-                Benutzername
-                <input
-                  className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm transition focus:border-sky-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                  type="text"
-                  placeholder={USERNAME_PLACEHOLDER}
-                  name="username"
-                  autoComplete="username"
-                  spellCheck={false}
-                  minLength={3}
-                  required
-                  onKeyDown={onUsernameKeyDown}
-                />
-              </label>
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-sky-300 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading}
-                >
-                  {uploading ? "Wird hochgeladen…" : "Bild hochladen"}
-                </button>
-                <input
-                  ref={fileInputRef}
-                  className="hidden"
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif"
-                  onChange={(event) => void onUploadChange(event.target.files?.[0])}
-                />
-                <div className="text-xs text-slate-500">Max. 6 MB</div>
+            <form className="mt-8 space-y-6" onSubmit={onSubmit} onPaste={onProfileImagePaste}>
+              <div>
+                <label htmlFor="username" className="block text-sm font-medium text-slate-900">
+                  Benutzername
+                </label>
+                <div className="mt-2">
+                  <input
+                    id="username"
+                    className="block h-11 w-full rounded-md bg-white px-3 text-base text-slate-900 outline-1 -outline-offset-1 outline-slate-300 placeholder:text-slate-400 focus:outline-2 focus:-outline-offset-2 focus:outline-sky-600"
+                    type="text"
+                    placeholder={USERNAME_PLACEHOLDER}
+                    name="username"
+                    autoComplete="username"
+                    spellCheck={false}
+                    minLength={3}
+                    required
+                    onKeyDown={onUsernameKeyDown}
+                  />
+                </div>
               </div>
 
-              <div className="flex items-center gap-3">
-                <img
-                  src={profilePicture || getDefaultProfilePicture()}
-                  alt="Vorschau Profilbild"
-                  className="h-12 w-12 rounded-full border border-slate-200 object-cover"
-                  width={48}
-                  height={48}
-                  loading="lazy"
-                />
-                <p className="text-xs text-slate-500">Profilbild-Vorschau</p>
+              <div
+                className={`space-y-3 rounded-xl border border-dashed p-3 transition ${
+                  profileDropActive ? "border-sky-400 bg-sky-50" : "border-slate-300 bg-slate-50/70"
+                }`}
+                tabIndex={0}
+                onDragOver={onProfileImageDragOver}
+                onDragEnter={onProfileImageDragOver}
+                onDragLeave={onProfileImageDragLeave}
+                onDrop={onProfileImageDrop}
+              >
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    className="inline-flex h-10 items-center rounded-md bg-white px-4 text-sm font-semibold text-slate-700 shadow-xs ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => fileInputRef.current?.click()}
+                    disabled={uploading}
+                  >
+                    {uploading ? "Wird hochgeladen…" : "Bild hochladen"}
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    className="hidden"
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp,image/gif"
+                    onChange={(event) => void onUploadChange(event.target.files?.[0])}
+                  />
+                  <span className="text-xs text-slate-500">Max. 6 MB</span>
+                </div>
+
+                <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-white p-2">
+                  <img
+                    src={profilePicture || getDefaultProfilePicture()}
+                    alt="Vorschau Profilbild"
+                    className="h-12 w-12 shrink-0 rounded-full border border-slate-200 object-cover [aspect-ratio:1/1]"
+                    width={48}
+                    height={48}
+                    loading="lazy"
+                  />
+                  <p className="text-xs text-slate-500">Profilbild-Vorschau</p>
+                </div>
+                <p className="text-xs text-slate-500">Bild per Drag-and-drop oder Cmd/Ctrl + V einfügen.</p>
               </div>
 
               {error ? (
-                <div className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-600" aria-live="polite">
+                <div className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-600" aria-live="polite">
                   {error}
                 </div>
               ) : null}
 
               <button
-                className="h-11 w-full rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-70"
+                className="flex h-11 w-full items-center justify-center rounded-md bg-slate-900 px-4 text-sm font-semibold text-white shadow-xs hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-70"
                 type="submit"
                 disabled={loading || uploading}
               >
@@ -205,7 +264,20 @@ export function LoginForm() {
               </button>
             </form>
           </div>
-        </section>
+        </div>
+
+        <div className="relative hidden flex-1 lg:block">
+          <img
+            alt="Chat Hintergrund"
+            src="https://images.unsplash.com/photo-1496917756835-20cb06e75b4e?auto=format&fit=crop&w=1908&q=80"
+            className="absolute inset-0 h-full w-full object-cover"
+          />
+          <div className="absolute inset-0 bg-slate-900/35" />
+          <div className="absolute inset-x-8 bottom-8 rounded-2xl border border-white/20 bg-black/35 p-4 text-slate-100 backdrop-blur">
+            <p className="text-sm font-semibold">In wenigen Sekunden im Gruppenchat.</p>
+            <p className="mt-1 text-xs text-slate-200">Umfragen, Fragen und Bildfreigaben in einem Chat-Flow.</p>
+          </div>
+        </div>
       </div>
 
       {cropFile ? (
