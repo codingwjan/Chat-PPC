@@ -191,6 +191,32 @@ Abstimmen und ehrlich sein.
     });
   });
 
+  it("extracts AI poll payload from lettered markdown-style poll text", () => {
+    const payload = __extractAiPollPayloadForTests(`
+Alles klar, Reset gedrückt. Neue Umfrage, komplett clean.
+
+UMFRAGE: Was ist das unnötigste Schulfach?
+
+A) Mathe – Zahlen greifen mich persönlich an
+B) Kunst – „Interpretation“ = ich hab einfach nix gekonnt
+C) Sport – Ich schwitze nicht für Noten
+D) Musik – Blockflöte war ein Fehler
+
+Abstimmen und begründen.
+`);
+
+    expect(payload).toEqual({
+      question: "Was ist das unnötigste Schulfach?",
+      options: [
+        "Mathe – Zahlen greifen mich persönlich an",
+        "Kunst – „Interpretation“ = ich hab einfach nix gekonnt",
+        "Sport – Ich schwitze nicht für Noten",
+        "Musik – Blockflöte war ein Fehler",
+      ],
+      multiSelect: false,
+    });
+  });
+
   it("rejects blacklisted usernames on login", async () => {
     prismaMock.blacklistEntry.findUnique.mockResolvedValueOnce({
       id: "blocked",

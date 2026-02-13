@@ -756,7 +756,7 @@ interface AiPollPayload {
 }
 
 const AI_POLL_BLOCK_REGEX = /<POLL_JSON>([\s\S]*?)<\/POLL_JSON>/gi;
-const AI_POLL_OPTION_LINE_REGEX = /^\s*(?:\d{1,2}[.)]|[-*])\s+(.+)$/;
+const AI_POLL_OPTION_LINE_REGEX = /^\s*(?:(?:\d{1,2}|[A-Oa-o])[.)]|[-*])\s+(.+)$/;
 const AI_POLL_HINT_REGEX = /\b(umfrage|survey|poll|abstimmen|vote|voting)\b/i;
 
 function normalizePollText(value: string): string {
@@ -793,7 +793,12 @@ function extractListPollPayload(rawText: string): AiPollPayload | null {
   if (options.length < 2 || options.length > 15) return null;
   if (new Set(options.map((option) => option.toLowerCase())).size !== options.length) return null;
 
-  const headingLine = lines.find((line) => AI_POLL_HINT_REGEX.test(line) && !AI_POLL_OPTION_LINE_REGEX.test(line));
+  const preOptionLines = firstOptionIndex > 0 ? lines.slice(0, firstOptionIndex) : lines;
+  const nonOptionHintLines = preOptionLines.filter(
+    (line) => AI_POLL_HINT_REGEX.test(line) && !AI_POLL_OPTION_LINE_REGEX.test(line),
+  );
+  const headingLine = [...nonOptionHintLines].reverse().find((line) => line.includes(":"))
+    || [...nonOptionHintLines].reverse()[0];
   const headingQuestion = headingLine
     ? normalizePollText(headingLine.includes(":") ? headingLine.split(":").slice(1).join(":") : headingLine)
     : "";
