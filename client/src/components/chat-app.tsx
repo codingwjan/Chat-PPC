@@ -40,6 +40,7 @@ import type {
   AiStatusDTO,
   ChatBackgroundDTO,
   CreateMessageRequest,
+  ExtendPollRequest,
   LoginResponseDTO,
   MediaItemDTO,
   MediaPageDTO,
@@ -254,6 +255,11 @@ interface ReplyTargetState {
   message: string;
 }
 
+interface PollExtendDraftState {
+  pollMessageId: string;
+  existingOptions: string[];
+}
+
 async function uploadProfileImage(file: File): Promise<string> {
   const formData = new FormData();
   formData.set("file", file);
@@ -411,6 +417,7 @@ interface MessageListProps {
   onAnswerDraftChange: (messageId: string, value: string) => void;
   onSubmitAnswer: (messageId: string) => void;
   onVote: (messageId: string, optionIds: string[]) => void;
+  onExtendPoll: (message: MessageDTO) => void;
   onDeleteMessage: (messageId: string) => void;
   onStartReply: (message: MessageDTO) => void;
   onOpenLightbox: (url: string, alt?: string) => void;
@@ -426,6 +433,7 @@ const MessageList = memo(function MessageList({
   onAnswerDraftChange,
   onSubmitAnswer,
   onVote,
+  onExtendPoll,
   onDeleteMessage,
   onStartReply,
   onOpenLightbox,
@@ -448,6 +456,7 @@ const MessageList = memo(function MessageList({
           onAnswerDraftChange={onAnswerDraftChange}
           onSubmitAnswer={onSubmitAnswer}
           onVote={onVote}
+          onExtendPoll={onExtendPoll}
           onDeleteMessage={onDeleteMessage}
           onStartReply={onStartReply}
           onOpenLightbox={onOpenLightbox}
@@ -595,6 +604,7 @@ export function ChatApp() {
   const [pollQuestion, setPollQuestion] = useState("");
   const [pollOptions, setPollOptions] = useState<string[]>(["", ""]);
   const [pollMultiSelect, setPollMultiSelect] = useState(false);
+  const [pollExtendDraft, setPollExtendDraft] = useState<PollExtendDraftState | null>(null);
 
   const [editingProfile, setEditingProfile] = useState(false);
   const [uploadingProfile, setUploadingProfile] = useState(false);
@@ -1934,6 +1944,11 @@ export function ChatApp() {
 
   const updatePollOptionValue = useCallback((index: number, value: string) => {
     setPollOptions((current) => {
+      const lockedCount = pollExtendDraft?.existingOptions.length ?? 0;
+      if (index < lockedCount) {
+        return current;
+      }
+
       const next = current.map((option, optionIndex) => (optionIndex === index ? value : option));
       const allFieldsFilled = next.length > 0 && next.every((option) => option.trim().length > 0);
 
@@ -1943,7 +1958,7 @@ export function ChatApp() {
 
       return next;
     });
-  }, []);
+  }, [pollExtendDraft?.existingOptions.length]);
 
   const submitComposer = useCallback(async () => {
     if (!session) return;
@@ -2029,46 +2044,80 @@ export function ChatApp() {
           return;
         }
 
-        tempMessageId = createTempMessageId();
-        appendOptimisticMessage({
-          id: tempMessageId,
-          authorId: session.clientId,
-          type: "votingPoll",
-          message: question,
-          username: session.username,
-          profilePicture: sessionProfilePicture,
-          createdAt: new Date().toISOString(),
-          poll: {
-            options: options.map((option, index) => ({
-              id: `${tempMessageId}-opt-${index}`,
-              label: option,
-              votes: 0,
-              voters: [],
-            })),
-            settings: {
-              multiSelect: pollMultiSelect,
-              allowVoteChange: true,
+        if (pollExtendDraft) {
+          const normalizedExisting = pollExtendDraft.existingOptions.map((option) => option.trim()).filter(Boolean);
+          const existingOptionSet = new Set(normalizedExisting.map((option) => option.toLowerCase()));
+          const optionSet = new Set(options.map((option) => option.toLowerCase()));
+
+          const missingExistingOption = normalizedExisting.some(
+            (existingOption) => !optionSet.has(existingOption.toLowerCase()),
+          );
+          if (missingExistingOption) {
+            setError("Bestehende Umfrageoptionen können beim Erweitern nicht entfernt werden.");
+            return;
+          }
+
+          const newOptions = options.filter((option) => !existingOptionSet.has(option.toLowerCase()));
+          if (newOptions.length === 0) {
+            setError("Füge mindestens eine neue Umfrageoption hinzu.");
+            return;
+          }
+
+          const updated = await apiJson<MessageDTO>("/api/polls/extend", {
+            method: "POST",
+            body: JSON.stringify({
+              clientId: session.clientId,
+              pollMessageId: pollExtendDraft.pollMessageId,
+              pollOptions: newOptions,
+            } satisfies ExtendPollRequest),
+          });
+          applyIncomingMessages([updated], { notify: false });
+          setPollExtendDraft(null);
+          setPollQuestion("");
+          setPollOptions(["", ""]);
+          setPollMultiSelect(false);
+        } else {
+          tempMessageId = createTempMessageId();
+          appendOptimisticMessage({
+            id: tempMessageId,
+            authorId: session.clientId,
+            type: "votingPoll",
+            message: question,
+            username: session.username,
+            profilePicture: sessionProfilePicture,
+            createdAt: new Date().toISOString(),
+            poll: {
+              options: options.map((option, index) => ({
+                id: `${tempMessageId}-opt-${index}`,
+                label: option,
+                votes: 0,
+                voters: [],
+              })),
+              settings: {
+                multiSelect: pollMultiSelect,
+                allowVoteChange: true,
+              },
             },
-          },
-          resultone: "0",
-          resulttwo: "0",
-        });
-        startPendingDelivery(tempMessageId);
+            resultone: "0",
+            resulttwo: "0",
+          });
+          startPendingDelivery(tempMessageId);
 
-        const created = await sendMessage({
-          clientId: session.clientId,
-          type: "votingPoll",
-          message: question,
-          pollOptions: options,
-          pollMultiSelect,
-        });
-        clearPendingDelivery(tempMessageId);
-        removeOptimisticMessage(tempMessageId);
-        applyIncomingMessages([created], { notify: false });
+          const created = await sendMessage({
+            clientId: session.clientId,
+            type: "votingPoll",
+            message: question,
+            pollOptions: options,
+            pollMultiSelect,
+          });
+          clearPendingDelivery(tempMessageId);
+          removeOptimisticMessage(tempMessageId);
+          applyIncomingMessages([created], { notify: false });
 
-        setPollQuestion("");
-        setPollOptions(["", ""]);
-        setPollMultiSelect(false);
+          setPollQuestion("");
+          setPollOptions(["", ""]);
+          setPollMultiSelect(false);
+        }
       }
 
       setError(null);
@@ -2087,6 +2136,7 @@ export function ChatApp() {
     createTempMessageId,
     messageDraft,
     pollMultiSelect,
+    pollExtendDraft,
     pollOptions,
     pollQuestion,
     questionDraft,
@@ -2197,6 +2247,34 @@ export function ChatApp() {
       }
     },
     [applyIncomingMessages, session, sessionProfilePicture],
+  );
+
+  const handleExtendPoll = useCallback(
+    async (message: MessageDTO) => {
+      if (message.type !== "votingPoll") return;
+
+      const existingOptions = message.poll?.options.map((option) => option.label.trim()).filter(Boolean) ?? [];
+      if (existingOptions.length < 2) {
+        setError("Diese Umfrage kann nicht erweitert werden.");
+        return;
+      }
+
+      const prefilledOptions = [...existingOptions];
+      if (prefilledOptions.length < 15) {
+        prefilledOptions.push("");
+      }
+
+      setComposerMode("poll");
+      setPollExtendDraft({
+        pollMessageId: message.id,
+        existingOptions,
+      });
+      setPollQuestion(message.message);
+      setPollOptions(prefilledOptions);
+      setPollMultiSelect(Boolean(message.poll?.settings.multiSelect));
+      setError(null);
+    },
+    [],
   );
 
   const handleDeleteMessage = useCallback(
@@ -2960,6 +3038,7 @@ export function ChatApp() {
                 onAnswerDraftChange={handleAnswerDraftChange}
                 onSubmitAnswer={submitAnswer}
                 onVote={handleVote}
+                onExtendPoll={handleExtendPoll}
                 onDeleteMessage={handleDeleteMessage}
                 onStartReply={handleStartReply}
                 onOpenLightbox={handleOpenLightbox}
@@ -3019,6 +3098,9 @@ export function ChatApp() {
                 hasGrokMention={hasLeadingAiTag(messageDraft, "grok")}
                 onModeChange={(mode) => {
                   setComposerMode(mode);
+                  if (mode !== "poll" && pollExtendDraft) {
+                    setPollExtendDraft(null);
+                  }
                 }}
                 onAskChatGpt={activateAskChatGpt}
                 onAskGrok={activateAskGrok}
@@ -3031,7 +3113,19 @@ export function ChatApp() {
                 onPollQuestionChange={setPollQuestion}
                 onPollOptionChange={updatePollOptionValue}
                 onPollMultiSelectChange={setPollMultiSelect}
-                onRemovePollOption={() => setPollOptions((current) => (current.length <= 2 ? current : current.slice(0, -1)))}
+                onRemovePollOption={() =>
+                  setPollOptions((current) => {
+                    const minCount = Math.max(2, pollExtendDraft?.existingOptions.length ?? 0);
+                    return current.length <= minCount ? current : current.slice(0, -1);
+                  })}
+                pollExtending={Boolean(pollExtendDraft)}
+                pollLockedOptionCount={pollExtendDraft?.existingOptions.length ?? 0}
+                onCancelPollExtend={() => {
+                  setPollExtendDraft(null);
+                  setPollQuestion("");
+                  setPollOptions(["", ""]);
+                  setPollMultiSelect(false);
+                }}
                 onSelectMention={selectMentionUser}
                 onRemoveDraftImage={(imageId) =>
                   setUploadedDraftImages((current) => current.filter((uploadedImage) => uploadedImage.id !== imageId))

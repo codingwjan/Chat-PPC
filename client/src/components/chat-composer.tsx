@@ -34,6 +34,8 @@ interface ChatComposerProps {
   pollQuestion: string;
   pollOptions: string[];
   pollMultiSelect: boolean;
+  pollExtending: boolean;
+  pollLockedOptionCount: number;
   uploadedDraftImages: UploadedDraftImage[];
   replyTarget: ReplyTargetState | null;
   uploadingChat: boolean;
@@ -55,6 +57,7 @@ interface ChatComposerProps {
   onPollOptionChange: (index: number, value: string) => void;
   onPollMultiSelectChange: (checked: boolean) => void;
   onRemovePollOption: () => void;
+  onCancelPollExtend: () => void;
   onSelectMention: (username: string) => void;
   onRemoveDraftImage: (imageId: string) => void;
   onOpenUpload: () => void;
@@ -108,6 +111,8 @@ export function ChatComposer({
   pollQuestion,
   pollOptions,
   pollMultiSelect,
+  pollExtending,
+  pollLockedOptionCount,
   uploadedDraftImages,
   replyTarget,
   uploadingChat,
@@ -129,6 +134,7 @@ export function ChatComposer({
   onPollOptionChange,
   onPollMultiSelectChange,
   onRemovePollOption,
+  onCancelPollExtend,
   onSelectMention,
   onRemoveDraftImage,
   onOpenUpload,
@@ -275,11 +281,21 @@ export function ChatComposer({
 
       {mode === "poll" ? (
         <div className="space-y-2">
+          {pollExtending ? (
+            <div className="rounded-xl border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+              Bestehende Optionen sind vorausgefüllt. Füge unten neue Optionen hinzu und sende.
+            </div>
+          ) : null}
           <input
             value={pollQuestion}
             onChange={(event) => onPollQuestionChange(event.target.value)}
             placeholder="Umfragefrage…"
-            className="h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+            readOnly={pollExtending}
+            className={`h-10 w-full rounded-2xl border px-4 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 ${
+              pollExtending
+                ? "border-slate-200 bg-slate-100 text-slate-500"
+                : "border-slate-200 bg-white"
+            }`}
           />
           <div className="grid gap-2 sm:grid-cols-2">
             {pollOptions.map((option, index) => (
@@ -288,7 +304,12 @@ export function ChatComposer({
                 value={option}
                 onChange={(event) => onPollOptionChange(index, event.target.value)}
                 placeholder={`Option ${index + 1}…`}
-                className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                readOnly={pollExtending && index < pollLockedOptionCount}
+                className={`h-9 rounded-xl border px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 ${
+                  pollExtending && index < pollLockedOptionCount
+                    ? "border-slate-200 bg-slate-100 text-slate-500"
+                    : "border-slate-200 bg-white"
+                }`}
               />
             ))}
           </div>
@@ -305,14 +326,24 @@ export function ChatComposer({
                 type="checkbox"
                 checked={pollMultiSelect}
                 onChange={(event) => onPollMultiSelectChange(event.target.checked)}
+                disabled={pollExtending}
               />
               Mehrfachauswahl
             </label>
+            {pollExtending ? (
+              <button
+                type="button"
+                onClick={onCancelPollExtend}
+                className="h-9 rounded-xl border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
+              >
+                Abbrechen
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={onSubmit}
               className="ml-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-900 text-white transition hover:bg-slate-800"
-              aria-label="Umfrage senden"
+              aria-label={pollExtending ? "Umfrage erweitern" : "Umfrage senden"}
             >
               <PaperAirplaneIcon className="size-5" />
             </button>

@@ -3,6 +3,7 @@ import type {
   AdminActionRequest,
   AdminOverviewRequest,
   CreateMessageRequest,
+  ExtendPollRequest,
   LoginRequest,
   PresencePingRequest,
   RenameUserRequest,
@@ -166,6 +167,15 @@ const votePollSchema = z.object({
   }
 });
 
+const extendPollSchema = z.object({
+  clientId: text("clientId"),
+  pollMessageId: text("pollMessageId"),
+  pollOptions: z
+    .array(text("pollOptions[]"))
+    .min(1, "Mindestens eine Umfrageoption ist erforderlich")
+    .max(15, "Umfragen unterstützen bis zu 15 neue Optionen"),
+});
+
 const adminOverviewSchema = z.object({
   clientId: text("clientId"),
   devAuthToken: text("devAuthToken"),
@@ -237,6 +247,10 @@ export function parseCreateMessageRequest(payload: unknown): CreateMessageReques
 
 export function parseVotePollRequest(payload: unknown): VotePollRequest {
   return parseOrThrow(votePollSchema, payload);
+}
+
+export function parseExtendPollRequest(payload: unknown): ExtendPollRequest {
+  return parseOrThrow(extendPollSchema, payload);
 }
 
 export function parseAdminOverviewRequest(payload: unknown): AdminOverviewRequest {
