@@ -20,6 +20,7 @@ import { ChatShellHeader } from "@/components/chat-shell-header";
 import { ChatShellSidebar } from "@/components/chat-shell-sidebar";
 import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { UiToast } from "@/components/ui-toast";
+import { hasLeadingAiTag, toggleLeadingAiTag } from "@/lib/composer-ai-tags";
 import { apiJson } from "@/lib/http";
 import {
   detectBrowserNotificationCapability,
@@ -80,6 +81,7 @@ const MEDIA_CACHE_TTL_MS = 5 * 60 * 1_000;
 const DEFAULT_COMPOSER_HEIGHT_PX = 208;
 const COMPOSER_BOTTOM_GAP_PX = 16;
 const LAST_MESSAGE_EXTRA_CLEARANCE_PX = 28;
+const HARD_BOTTOM_ATTACH_PX = 8;
 
 function hasChatGptMention(message: string): boolean {
   return /(^|\s)@chatgpt\b/i.test(message);
@@ -91,12 +93,6 @@ function hasGrokMention(message: string): boolean {
 
 function hasAiMention(message: string): boolean {
   return hasChatGptMention(message) || hasGrokMention(message);
-}
-
-function prependMention(current: string, mention: "@chatgpt" | "@grok"): string {
-  const trimmed = current.trim();
-  if (!trimmed) return `${mention} `;
-  return `${mention} ${current}`;
 }
 
 function mergeUser(users: UserPresenceDTO[], next: UserPresenceDTO): UserPresenceDTO[] {
@@ -550,6 +546,7 @@ export function ChatApp() {
   const previousScrollTopRef = useRef(0);
   const lastKnownScrollHeightRef = useRef(0);
   const notificationCapabilityLoggedRef = useRef(false);
+  const userDetachedFromBottomRef = useRef(false);
 
   const [session, setSession] = useState<SessionState | null>(() => loadSession());
   const [users, setUsers] = useState<UserPresenceDTO[]>([]);
@@ -739,7 +736,7 @@ export function ChatApp() {
       const distanceFromBottom = element
         ? element.scrollHeight - (element.scrollTop + element.clientHeight)
         : 0;
-      const shouldAutoScroll = distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX;
+      const shouldAutoScroll = !userDetachedFromBottomRef.current && distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX;
 
       setMessages((current) => limitVisibleMessages(mergeMessage(current, message)));
       if (!shouldAutoScroll) {
@@ -747,6 +744,7 @@ export function ChatApp() {
       }
 
       prependAnchorRef.current = null;
+      userDetachedFromBottomRef.current = false;
       isAtBottomRef.current = true;
       setIsAtBottom(true);
       requestAnimationFrame(() => {
@@ -812,10 +810,7 @@ export function ChatApp() {
 
   const activateAskChatGpt = useCallback(() => {
     setComposerMode("message");
-    setMessageDraft((current) => {
-      if (hasChatGptMention(current)) return current;
-      return prependMention(current, "@chatgpt");
-    });
+    setMessageDraft((current) => toggleLeadingAiTag(current, "chatgpt"));
 
     requestAnimationFrame(() => {
       const textarea = messageInputRef.current;
@@ -828,10 +823,7 @@ export function ChatApp() {
 
   const activateAskGrok = useCallback(() => {
     setComposerMode("message");
-    setMessageDraft((current) => {
-      if (hasGrokMention(current)) return current;
-      return prependMention(current, "@grok");
-    });
+    setMessageDraft((current) => toggleLeadingAiTag(current, "grok"));
 
     requestAnimationFrame(() => {
       const textarea = messageInputRef.current;
@@ -1050,14 +1042,33 @@ export function ChatApp() {
       setAiStatus(snapshot.aiStatus || createDefaultAiStatus());
       setChatBackgroundUrl(snapshot.background.url);
 
-      const limitedMessages = limitVisibleMessages(snapshot.messages);
-      setMessages(limitedMessages);
-      setMessageWindowSize(Math.min(limitedMessages.length, MESSAGE_RENDER_WINDOW));
-      setHasMoreOlder(limitedMessages.length >= SNAPSHOT_LIMIT && limitedMessages.length < MAX_VISIBLE_MESSAGES);
+      const latestSnapshotMessages = limitVisibleMessages(snapshot.messages);
+      const preserveReadingPosition = userDetachedFromBottomRef.current || !isAtBottomRef.current;
 
-      knownMessageIdsRef.current = new Set(limitedMessages.map((message) => message.id));
+      if (preserveReadingPosition) {
+        setMessages((current) => limitVisibleMessages(mergeMessages(current, latestSnapshotMessages)));
+        setMessageWindowSize((current) => {
+          const minWindow = Math.min(latestSnapshotMessages.length, MESSAGE_RENDER_WINDOW);
+          return Math.min(MAX_VISIBLE_MESSAGES, Math.max(current, minWindow));
+        });
+        setHasMoreOlder((current) => {
+          const snapshotSuggestsMore =
+            latestSnapshotMessages.length >= SNAPSHOT_LIMIT && latestSnapshotMessages.length < MAX_VISIBLE_MESSAGES;
+          return current || snapshotSuggestsMore;
+        });
+        knownMessageIdsRef.current = new Set([
+          ...knownMessageIdsRef.current,
+          ...latestSnapshotMessages.map((message) => message.id),
+        ]);
+      } else {
+        setMessages(latestSnapshotMessages);
+        setMessageWindowSize(Math.min(latestSnapshotMessages.length, MESSAGE_RENDER_WINDOW));
+        setHasMoreOlder(latestSnapshotMessages.length >= SNAPSHOT_LIMIT && latestSnapshotMessages.length < MAX_VISIBLE_MESSAGES);
+        knownMessageIdsRef.current = new Set(latestSnapshotMessages.map((message) => message.id));
+      }
+
       latestMessageAtRef.current = null;
-      updateLatestMessageCursor(limitedMessages);
+      updateLatestMessageCursor(latestSnapshotMessages);
 
       if (showMedia) {
         void fetchMediaItems({ silent: true });
@@ -1077,14 +1088,29 @@ export function ChatApp() {
     setUsers(presence);
     setAiStatus(ai);
     setChatBackgroundUrl(background.url);
-    const limitedMessages = limitVisibleMessages(page.messages);
-    setMessages(limitedMessages);
-    setMessageWindowSize(Math.min(limitedMessages.length, MESSAGE_RENDER_WINDOW));
-    setHasMoreOlder(page.hasMore && limitedMessages.length < MAX_VISIBLE_MESSAGES);
+    const latestPageMessages = limitVisibleMessages(page.messages);
+    const preserveReadingPosition = userDetachedFromBottomRef.current || !isAtBottomRef.current;
 
-    knownMessageIdsRef.current = new Set(limitedMessages.map((message) => message.id));
+    if (preserveReadingPosition) {
+      setMessages((current) => limitVisibleMessages(mergeMessages(current, latestPageMessages)));
+      setMessageWindowSize((current) => {
+        const minWindow = Math.min(latestPageMessages.length, MESSAGE_RENDER_WINDOW);
+        return Math.min(MAX_VISIBLE_MESSAGES, Math.max(current, minWindow));
+      });
+      setHasMoreOlder((current) => current || page.hasMore);
+      knownMessageIdsRef.current = new Set([
+        ...knownMessageIdsRef.current,
+        ...latestPageMessages.map((message) => message.id),
+      ]);
+    } else {
+      setMessages(latestPageMessages);
+      setMessageWindowSize(Math.min(latestPageMessages.length, MESSAGE_RENDER_WINDOW));
+      setHasMoreOlder(page.hasMore && latestPageMessages.length < MAX_VISIBLE_MESSAGES);
+      knownMessageIdsRef.current = new Set(latestPageMessages.map((message) => message.id));
+    }
+
     latestMessageAtRef.current = null;
-    updateLatestMessageCursor(limitedMessages);
+    updateLatestMessageCursor(latestPageMessages);
 
     return presence;
   }, [fetchAiStatus, fetchChatBackground, fetchMessagePage, fetchPresence, updateLatestMessageCursor]);
@@ -1357,7 +1383,14 @@ export function ChatApp() {
       const element = scrollRef.current;
       if (!element) return;
       const distanceFromBottom = element.scrollHeight - (element.scrollTop + element.clientHeight);
-      if (distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX) {
+      const forceAttach = distanceFromBottom <= HARD_BOTTOM_ATTACH_PX;
+      if (forceAttach) {
+        userDetachedFromBottomRef.current = false;
+      }
+      if (
+        (forceAttach || distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX)
+        && !userDetachedFromBottomRef.current
+      ) {
         isAtBottomRef.current = true;
         setIsAtBottom(true);
         scheduleBottomStick();
@@ -1781,7 +1814,13 @@ export function ChatApp() {
       lastKnownScrollHeightRef.current = element.scrollHeight;
 
       const distanceFromBottom = element.scrollHeight - (currentScrollTop + element.clientHeight);
-      const atBottom = distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX;
+      if (distanceFromBottom <= HARD_BOTTOM_ATTACH_PX) {
+        userDetachedFromBottomRef.current = false;
+      } else if (currentScrollTop < previousScrollTop) {
+        userDetachedFromBottomRef.current = true;
+      }
+
+      const atBottom = !userDetachedFromBottomRef.current && distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX;
       isAtBottomRef.current = atBottom;
       setIsAtBottom((current) => (current === atBottom ? current : atBottom));
 
@@ -1819,7 +1858,7 @@ export function ChatApp() {
     const delta = element.scrollHeight - anchor.height;
     element.scrollTop = anchor.top + delta;
     prependAnchorRef.current = null;
-  }, [messages]);
+  }, [messages.length, messageWindowSize]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -2217,7 +2256,7 @@ export function ChatApp() {
         if (!current.trim()) {
           return "@chatgpt remixe dieses Bild: ";
         }
-        return prependMention(current, "@chatgpt");
+        return `@chatgpt ${current}`;
       });
 
       requestAnimationFrame(() => {
@@ -2935,6 +2974,7 @@ export function ChatApp() {
                 type="button"
                 className="pointer-events-auto rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white shadow-lg"
                 onClick={() => {
+                  userDetachedFromBottomRef.current = false;
                   isAtBottomRef.current = true;
                   setIsAtBottom(true);
                   setMessageWindowSize(Math.min(messages.length, MESSAGE_RENDER_WINDOW));
@@ -2975,8 +3015,8 @@ export function ChatApp() {
                 showMentionSuggestions={showMentionSuggestions}
                 mentionUsers={filteredMentionUsers}
                 mentionIndex={mentionIndex}
-                hasChatGptMention={hasChatGptMention(messageDraft)}
-                hasGrokMention={hasGrokMention(messageDraft)}
+                hasChatGptMention={hasLeadingAiTag(messageDraft, "chatgpt")}
+                hasGrokMention={hasLeadingAiTag(messageDraft, "grok")}
                 onModeChange={(mode) => {
                   setComposerMode(mode);
                 }}
