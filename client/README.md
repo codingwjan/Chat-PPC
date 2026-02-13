@@ -31,7 +31,7 @@ OpenAI runtime configuration (all optional, defaults can be kept as shown in you
 
 - `OPENAI_MODEL` fallback model when no prompt id is used
 - `OPENAI_PROMPT_ID` reusable prompt id for `responses.create`
-- `OPENAI_PROMPT_VERSION` prompt version (update this when you publish a new prompt version)
+- `OPENAI_PROMPT_VERSION` prompt version (current pinned target: `7`; update this when you publish a new prompt version)
 - `OPENAI_LOW_LATENCY_MODE` `true|false` (default `false`; if set to `true`, tools/includes are selected more aggressively for speed)
 - `OPENAI_STORE_RESPONSES` `true|false`
 - `OPENAI_INCLUDE_REASONING_ENCRYPTED` `true|false`

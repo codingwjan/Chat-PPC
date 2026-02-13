@@ -47,6 +47,7 @@ vi.mock("openai", () => ({
 }));
 
 import {
+  __extractAiPollPayloadForTests,
   __resetAiQueueForTests,
   createMessage,
   getChatBackground,
@@ -130,6 +131,40 @@ describe("chat service", () => {
     prismaMock.$queryRaw.mockResolvedValue([{ locked: true }]);
     prismaMock.$queryRawUnsafe.mockResolvedValue([]);
     openAiCreateMock.mockResolvedValue({ output_text: "", output: [] });
+  });
+
+  it("extracts valid AI poll payload from POLL_JSON block", () => {
+    const payload = __extractAiPollPayloadForTests(
+      '<POLL_JSON>{"question":"Welche Farbe?","options":["Rot","Blau"],"multiSelect":false}</POLL_JSON>',
+    );
+    expect(payload).toEqual({
+      question: "Welche Farbe?",
+      options: ["Rot", "Blau"],
+      multiSelect: false,
+    });
+  });
+
+  it("rejects malformed AI poll payloads", () => {
+    expect(__extractAiPollPayloadForTests("<POLL_JSON>{invalid-json}</POLL_JSON>")).toBeNull();
+    expect(
+      __extractAiPollPayloadForTests(
+        '<POLL_JSON>{"question":"Q","options":["A","A"],"multiSelect":false}</POLL_JSON>',
+      ),
+    ).toBeNull();
+    expect(
+      __extractAiPollPayloadForTests(
+        '<POLL_JSON>{"question":"Q","options":["A"],"multiSelect":false}</POLL_JSON>',
+      ),
+    ).toBeNull();
+    expect(
+      __extractAiPollPayloadForTests(
+        `<POLL_JSON>${JSON.stringify({
+          question: "Q",
+          options: Array.from({ length: 16 }, (_, i) => `Option ${i + 1}`),
+          multiSelect: false,
+        })}</POLL_JSON>`,
+      ),
+    ).toBeNull();
   });
 
   it("rejects blacklisted usernames on login", async () => {
@@ -674,6 +709,160 @@ describe("chat service", () => {
       if (previousOpenAiKey) process.env.OPENAI_API_KEY = previousOpenAiKey;
       else delete process.env.OPENAI_API_KEY;
       process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("creates native poll message from Grok POLL_JSON output", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    const previousGrokKey = process.env.GROK_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-grok-poll-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@grok erstelle eine umfrage",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({
+        id: "msg-grok-poll",
+        type: MessageType.VOTING_POLL,
+        content: "Welche Farbe?",
+        authorName: "Grok",
+        pollMultiSelect: true,
+        pollAllowVoteChange: true,
+        pollOptions: [
+          { id: "o1", label: "Rot", sortOrder: 0, votes: [] },
+          { id: "o2", label: "Blau", sortOrder: 1, votes: [] },
+        ],
+      }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: '<POLL_JSON>{"question":"Welche Farbe?","options":["Rot","Blau"],"multiSelect":true}</POLL_JSON>',
+      output: [],
+    });
+
+    try {
+      await processAiQueue({ maxJobs: 1 });
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            type: MessageType.VOTING_POLL,
+            content: "Welche Farbe?",
+            pollMultiSelect: true,
+            authorName: "Grok",
+          }),
+        }),
+      );
+    } finally {
+      if (previousOpenAiKey) process.env.OPENAI_API_KEY = previousOpenAiKey;
+      else delete process.env.OPENAI_API_KEY;
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("creates native poll message from ChatGPT POLL_JSON output", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-chatgpt-poll-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@chatgpt create a poll",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({
+        id: "msg-chatgpt-poll",
+        type: MessageType.VOTING_POLL,
+        content: "Best day?",
+        authorName: "ChatGPT",
+        pollMultiSelect: false,
+        pollAllowVoteChange: true,
+        pollOptions: [
+          { id: "o1", label: "Mon", sortOrder: 0, votes: [] },
+          { id: "o2", label: "Fri", sortOrder: 1, votes: [] },
+        ],
+      }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: '<POLL_JSON>{"question":"Best day?","options":["Mon","Fri"],"multiSelect":false}</POLL_JSON>',
+      output: [],
+    });
+
+    try {
+      await processAiQueue({ maxJobs: 1 });
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            type: MessageType.VOTING_POLL,
+            content: "Best day?",
+            pollMultiSelect: false,
+            authorName: "ChatGPT",
+          }),
+        }),
+      );
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+    }
+  });
+
+  it("falls back to normal text response when POLL_JSON output is invalid", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-chatgpt-poll-invalid-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@chatgpt create a poll",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-chatgpt-fallback", content: "fallback", authorName: "ChatGPT" }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: "<POLL_JSON>{broken-json}</POLL_JSON>",
+      output: [],
+    });
+
+    try {
+      await processAiQueue({ maxJobs: 1 });
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            type: MessageType.MESSAGE,
+            authorName: "ChatGPT",
+            content: "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal.",
+          }),
+        }),
+      );
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
     }
   });
 

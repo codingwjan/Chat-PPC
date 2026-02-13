@@ -12,6 +12,7 @@ import {
   type ImgHTMLAttributes,
   type SyntheticEvent,
 } from "react";
+import { getDefaultProfilePicture } from "@/lib/default-avatar";
 import type { LinkPreviewDTO, MessageDTO } from "@/lib/types";
 
 interface ChatMessageProps {
@@ -31,10 +32,10 @@ interface ChatMessageProps {
 
 const IMAGE_URL_REGEX = /\.(jpeg|jpg|gif|png|webp|svg)(\?.*)?$/i;
 const DEFAULT_INLINE_IMAGE_ASPECT_RATIO = 4 / 3;
-const MIN_IMAGE_SKELETON_MS = 140;
 const previewCache = new Map<string, LinkPreviewDTO | null>();
 const pendingPreviewRequests = new Map<string, Promise<LinkPreviewDTO | null>>();
 const imageAspectRatioCache = new Map<string, number>();
+const DEFAULT_PROFILE_PICTURE = getDefaultProfilePicture();
 
 function formatTime(isoDate: string): string {
   return new Date(isoDate).toLocaleTimeString("de-DE", {
@@ -79,6 +80,18 @@ function extractPreviewUrls(text: string): string[] {
   }
 
   return [...unique];
+}
+
+function normalizeProfilePictureUrl(value: string | null | undefined): string {
+  const trimmed = value?.trim() || "";
+  if (!trimmed) return DEFAULT_PROFILE_PICTURE;
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) return trimmed;
+  try {
+    new URL(trimmed);
+    return trimmed;
+  } catch {
+    return DEFAULT_PROFILE_PICTURE;
+  }
 }
 
 async function fetchLinkPreview(url: string): Promise<LinkPreviewDTO | null> {
@@ -131,42 +144,30 @@ function LazyImage({
   decoding,
   ...imgProps
 }: LazyImageProps) {
-  const [loaded, setLoaded] = useState(false);
-  const mountTimestampRef = useRef<number>(Date.now());
-  const revealTimeoutRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    setLoaded(false);
-    mountTimestampRef.current = Date.now();
-    if (revealTimeoutRef.current !== null) {
-      window.clearTimeout(revealTimeoutRef.current);
-      revealTimeoutRef.current = null;
-    }
-  }, [imgProps.src]);
-
-  useEffect(() => {
-    return () => {
-      if (revealTimeoutRef.current !== null) {
-        window.clearTimeout(revealTimeoutRef.current);
-        revealTimeoutRef.current = null;
-      }
-    };
-  }, []);
+  const srcKey = String(imgProps.src ?? "");
+  const [imageState, setImageState] = useState<{ src: string; loaded: boolean }>({
+    src: srcKey,
+    loaded: false,
+  });
+  const loaded = imageState.src === srcKey && imageState.loaded;
 
   const revealImage = useCallback(() => {
-    if (loaded) return;
-    const elapsed = Date.now() - mountTimestampRef.current;
-    const delay = Math.max(0, MIN_IMAGE_SKELETON_MS - elapsed);
-    if (delay === 0) {
-      setLoaded(true);
-      return;
-    }
+    setImageState((current) => {
+      if (current.src === srcKey && current.loaded) {
+        return current;
+      }
+      return { src: srcKey, loaded: true };
+    });
+  }, [srcKey]);
 
-    revealTimeoutRef.current = window.setTimeout(() => {
-      revealTimeoutRef.current = null;
-      setLoaded(true);
-    }, delay);
-  }, [loaded]);
+  const handleImageRef = useCallback(
+    (node: HTMLImageElement | null) => {
+      if (!node || !node.complete) return;
+      if (node.naturalWidth <= 0 || node.naturalHeight <= 0) return;
+      revealImage();
+    },
+    [revealImage],
+  );
 
   return (
     <div className={`relative overflow-hidden ${frameClassName}`} style={frameStyle}>
@@ -177,6 +178,7 @@ function LazyImage({
         />
       ) : null}
       <img
+        ref={handleImageRef}
         {...imgProps}
         alt={alt}
         loading={loading ?? "lazy"}
@@ -207,11 +209,6 @@ function InlineSharedImage({ src, alt, onOpenLightbox, onRemixImage }: InlineSha
     const cached = imageAspectRatioCache.get(src);
     return cached && Number.isFinite(cached) && cached > 0 ? cached : DEFAULT_INLINE_IMAGE_ASPECT_RATIO;
   });
-
-  useEffect(() => {
-    const cached = imageAspectRatioCache.get(src);
-    setAspectRatio(cached && Number.isFinite(cached) && cached > 0 ? cached : DEFAULT_INLINE_IMAGE_ASPECT_RATIO);
-  }, [src]);
 
   const handleImageLoad = useCallback((event: SyntheticEvent<HTMLImageElement>) => {
     const element = event.currentTarget;
@@ -316,6 +313,51 @@ function LinkPreviewCard({ url }: { url: string }) {
         <p className="text-xs text-slate-500">{preview.hostname}</p>
       </div>
     </a>
+  );
+}
+
+function MessageAvatar({
+  src,
+  alt,
+  onOpenLightbox,
+}: {
+  src: string;
+  alt: string;
+  onOpenLightbox?: (url: string, alt?: string) => void;
+}) {
+  const normalizedSrc = useMemo(() => normalizeProfilePictureUrl(src), [src]);
+  const [failed, setFailed] = useState(false);
+
+  const activeSrc = failed ? DEFAULT_PROFILE_PICTURE : normalizedSrc;
+  const isFallback = failed || activeSrc === DEFAULT_PROFILE_PICTURE;
+
+  if (onOpenLightbox && !isFallback) {
+    return (
+      <button
+        type="button"
+        onClick={() => onOpenLightbox(activeSrc, alt)}
+        className="shrink-0 cursor-zoom-in rounded-full transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+        aria-label={`${alt} öffnen`}
+      >
+        <LazyImage
+          src={activeSrc}
+          alt={alt}
+          frameClassName="h-16 w-16 rounded-full border-2 border-slate-200 bg-slate-200/80 shadow-sm"
+          imageClassName="h-full w-full rounded-full object-cover"
+          onError={() => setFailed(true)}
+        />
+      </button>
+    );
+  }
+
+  return (
+    <LazyImage
+      src={activeSrc}
+      alt={alt}
+      frameClassName="h-16 w-16 shrink-0 rounded-full border-2 border-slate-200 bg-slate-200/80 shadow-sm"
+      imageClassName="h-full w-full rounded-full object-cover"
+      onError={() => setFailed(true)}
+    />
   );
 }
 
@@ -548,28 +590,12 @@ function ChatMessageComponent({
           </div>
         ) : null}
         <div className="flex items-start gap-3">
-          {onOpenLightbox ? (
-            <button
-              type="button"
-              onClick={() => onOpenLightbox(message.profilePicture, profilePictureAlt)}
-              className="shrink-0 cursor-zoom-in rounded-full transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-              aria-label={`${profilePictureAlt} öffnen`}
-            >
-              <LazyImage
-                src={message.profilePicture}
-                alt={profilePictureAlt}
-                frameClassName="h-16 w-16 rounded-full border-2 border-slate-200 bg-slate-200/80 shadow-sm"
-                imageClassName="h-full w-full rounded-full object-cover"
-              />
-            </button>
-          ) : (
-            <LazyImage
-              src={message.profilePicture}
-              alt={profilePictureAlt}
-              frameClassName="h-16 w-16 shrink-0 rounded-full border-2 border-slate-200 bg-slate-200/80 shadow-sm"
-              imageClassName="h-full w-full rounded-full object-cover"
-            />
-          )}
+          <MessageAvatar
+            key={`${message.id}:${message.profilePicture}`}
+            src={message.profilePicture}
+            alt={profilePictureAlt}
+            onOpenLightbox={onOpenLightbox}
+          />
           <div className="min-w-0">
             <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
               <p className="text-sm font-semibold text-slate-900">{message.username}</p>
@@ -595,7 +621,15 @@ function ChatMessageComponent({
               if (imgMatch) {
                 const imageAlt = imgMatch[1] || "Geteiltes Bild";
                 const imageUrl = imgMatch[2];
-                return <InlineSharedImage key={i} src={imageUrl} alt={imageAlt} onOpenLightbox={onOpenLightbox} onRemixImage={onRemixImage} />;
+                return (
+                  <InlineSharedImage
+                    key={`${i}-${imageUrl}`}
+                    src={imageUrl}
+                    alt={imageAlt}
+                    onOpenLightbox={onOpenLightbox}
+                    onRemixImage={onRemixImage}
+                  />
+                );
               }
 
               // Split line by URLs, @mentions, and text
@@ -609,7 +643,7 @@ function ChatMessageComponent({
                   if (isImageUrl(url)) {
                     return (
                       <InlineSharedImage
-                        key={`${i}-${j}`}
+                        key={`${i}-${j}-${url}`}
                         src={url}
                         alt="Geteilter Inhalt"
                         onOpenLightbox={onOpenLightbox}

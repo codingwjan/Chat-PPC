@@ -36,7 +36,7 @@ export interface ChatOpenAiConfig {
 
 const DEFAULTS = {
   promptId: "pmpt_698b4aee21308196b860d14abc12b51d0f2e06f804bcc0ca",
-  promptVersion: "5",
+  promptVersion: "7",
   fallbackModel: "gpt-4o-mini",
   lowLatencyMode: false,
   store: true,

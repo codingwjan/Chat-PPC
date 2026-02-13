@@ -2,7 +2,17 @@
 /* eslint-disable @next/next/no-img-element */
 
 import { useRouter } from "next/navigation";
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type ClipboardEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type ChangeEvent,
+  type ClipboardEvent,
+} from "react";
 import { ChatMessage } from "@/components/chat-message";
 import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { apiJson } from "@/lib/http";
@@ -33,15 +43,14 @@ import type {
 import chatgptAvatar from "@/resources/chatgpt.png";
 import grokAvatar from "@/resources/grokAvatar.png";
 
-type ComposerMode = "message" | "question" | "poll" | "challenge";
+type ComposerMode = "message" | "question" | "poll";
 const PRIMARY_COMPOSER_MODES: ComposerMode[] = ["message"];
-const SECONDARY_COMPOSER_MODES: ComposerMode[] = ["question", "poll", "challenge"];
+const SECONDARY_COMPOSER_MODES: ComposerMode[] = ["question", "poll"];
 
 const COMPOSER_MODE_LABEL: Record<ComposerMode, string> = {
   message: "Nachricht",
   question: "Frage",
   poll: "Umfrage",
-  challenge: "Aufgabe",
 };
 
 interface UploadResponse {
@@ -91,8 +100,7 @@ const MESSAGE_PAGE_SIZE = 12;
 const SNAPSHOT_LIMIT = 40;
 const RECONCILE_INTERVAL_MS = 30_000;
 const PRESENCE_PING_INTERVAL_MS = 20_000;
-const NEAR_BOTTOM_PX = 80;
-const AUTO_SCROLL_ON_SEND_MAX_DISTANCE_PX = 420;
+const AUTO_SCROLL_NEAR_BOTTOM_PX = 600;
 const TOP_LOAD_TRIGGER_PX = 120;
 const ONBOARDING_KEY = "chatppc.onboarding.v1";
 const MAX_MESSAGE_INPUT_LINES = 10;
@@ -103,6 +111,8 @@ const SUPPORTED_CHAT_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "im
 const MEDIA_PAGE_SIZE = 3;
 const MEDIA_CACHE_KEY = "chatppc.media.cache.v1";
 const MEDIA_CACHE_TTL_MS = 5 * 60 * 1_000;
+const DEFAULT_COMPOSER_HEIGHT_PX = 208;
+const COMPOSER_BOTTOM_GAP_PX = 16;
 type NotificationState = NotificationPermission | "unsupported";
 
 function hasChatGptMention(message: string): boolean {
@@ -161,6 +171,18 @@ function mergeMediaItems(current: MediaItemDTO[], incoming: MediaItemDTO[]): Med
     merged.push(item);
   }
   return merged;
+}
+
+function normalizeProfilePictureUrl(value: string | null | undefined, fallback = getDefaultProfilePicture()): string {
+  const trimmed = value?.trim() || "";
+  if (!trimmed) return fallback;
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) return trimmed;
+  try {
+    new URL(trimmed);
+    return trimmed;
+  } catch {
+    return fallback;
+  }
 }
 
 function applyOptimisticPollVote(
@@ -234,17 +256,20 @@ function applyOptimisticPollVote(
 }
 
 function syncProfilePictureForUser(messages: MessageDTO[], user: UserPresenceDTO): MessageDTO[] {
+  const normalizedUserAvatar = normalizeProfilePictureUrl(user.profilePicture);
+  const normalizedUsername = user.username.trim().toLowerCase();
   let changed = false;
   const nextMessages = messages.map((message) => {
-    const matchesUser =
-      (message.authorId && message.authorId === user.id) ||
-      (!message.authorId && message.username === user.username);
+    const matchesUserByAuthor = Boolean(message.authorId) && message.authorId === user.id;
+    const matchesUserByUsername = message.username.trim().toLowerCase() === normalizedUsername;
+    const matchesUser = matchesUserByAuthor || matchesUserByUsername;
+    const normalizedMessageAvatar = normalizeProfilePictureUrl(message.profilePicture);
 
-    if (!matchesUser || message.profilePicture === user.profilePicture) {
+    if (!matchesUser || normalizedMessageAvatar === normalizedUserAvatar) {
       return message;
     }
     changed = true;
-    return { ...message, profilePicture: user.profilePicture };
+    return { ...message, profilePicture: normalizedUserAvatar };
   });
   return changed ? nextMessages : messages;
 }
@@ -289,13 +314,11 @@ function statusForComposer(input: {
   messageDraft: string;
   hasUploadedImages: boolean;
   questionDraft: string;
-  challengeDraft: string;
   pollQuestion: string;
   pollOptions: string[];
 }): string {
   if (input.mode === "message" && (input.messageDraft.trim() || input.hasUploadedImages)) return "schreibt…";
   if (input.mode === "question" && input.questionDraft.trim()) return "stellt eine Frage…";
-  if (input.mode === "challenge" && input.challengeDraft.trim()) return "erstellt eine Aufgabe…";
   if (input.mode === "poll") {
     const hasPollContent = input.pollQuestion.trim() || input.pollOptions.some((option) => option.trim());
     if (hasPollContent) return "erstellt eine Umfrage…";
@@ -496,6 +519,7 @@ const OnlineUsersList = memo(function OnlineUsersList({ users, avatarSizeClassNa
 export function ChatApp() {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
   const profileUploadRef = useRef<HTMLInputElement>(null);
   const chatUploadRef = useRef<HTMLInputElement>(null);
   const backgroundUploadRef = useRef<HTMLInputElement>(null);
@@ -567,7 +591,6 @@ export function ChatApp() {
   const [messageDraft, setMessageDraft] = useState("");
   const [uploadedDraftImages, setUploadedDraftImages] = useState<UploadedDraftImage[]>([]);
   const [questionDraft, setQuestionDraft] = useState("");
-  const [challengeDraft, setChallengeDraft] = useState("");
   const [answerDrafts, setAnswerDrafts] = useState<Record<string, string>>({});
   const [pollQuestion, setPollQuestion] = useState("");
   const [pollOptions, setPollOptions] = useState<string[]>(["", ""]);
@@ -587,7 +610,15 @@ export function ChatApp() {
   const [composerHistoryIndex, setComposerHistoryIndex] = useState(-1);
   const [isDraggingUpload, setIsDraggingUpload] = useState(false);
   const [viewportHeightPx, setViewportHeightPx] = useState<number | null>(null);
+  const [viewportOffsetTopPx, setViewportOffsetTopPx] = useState(0);
+  const [isTouchDevice, setIsTouchDevice] = useState(false);
+  const [composerHeightPx, setComposerHeightPx] = useState(DEFAULT_COMPOSER_HEIGHT_PX);
   const isDeveloperMode = Boolean(session?.devMode && session.devAuthToken);
+
+  const sessionProfilePicture = useMemo(
+    () => normalizeProfilePictureUrl(session?.profilePicture),
+    [session?.profilePicture],
+  );
 
   const onlineUsers = useMemo(
     () => [
@@ -595,7 +626,7 @@ export function ChatApp() {
         id: "chatgpt",
         clientId: "chatgpt",
         username: "ChatGPT",
-        profilePicture: chatgptAvatar.src,
+        profilePicture: normalizeProfilePictureUrl(chatgptAvatar.src),
         status: aiStatus.chatgpt,
         isOnline: true,
         lastSeenAt: aiStatus.updatedAt,
@@ -604,12 +635,18 @@ export function ChatApp() {
         id: "grok",
         clientId: "grok",
         username: "Grok",
-        profilePicture: grokAvatar.src,
+        profilePicture: normalizeProfilePictureUrl(grokAvatar.src),
         status: aiStatus.grok,
         isOnline: true,
         lastSeenAt: aiStatus.updatedAt,
       },
-      ...users.filter((user) => user.isOnline).sort((a, b) => a.username.localeCompare(b.username)),
+      ...users
+        .filter((user) => user.isOnline)
+        .sort((a, b) => a.username.localeCompare(b.username))
+        .map((user) => ({
+          ...user,
+          profilePicture: normalizeProfilePictureUrl(user.profilePicture),
+        })),
     ],
     [users, aiStatus],
   );
@@ -640,11 +677,10 @@ export function ChatApp() {
         messageDraft,
         hasUploadedImages: uploadedDraftImages.length > 0,
         questionDraft,
-        challengeDraft,
         pollQuestion,
         pollOptions,
       }),
-    [challengeDraft, composerMode, messageDraft, pollOptions, pollQuestion, questionDraft, uploadedDraftImages.length],
+    [composerMode, messageDraft, pollOptions, pollQuestion, questionDraft, uploadedDraftImages.length],
   );
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
@@ -701,7 +737,7 @@ export function ChatApp() {
       const distanceFromBottom = element
         ? element.scrollHeight - (element.scrollTop + element.clientHeight)
         : 0;
-      const shouldAutoScroll = distanceFromBottom <= AUTO_SCROLL_ON_SEND_MAX_DISTANCE_PX;
+      const shouldAutoScroll = distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX;
 
       setMessages((current) => limitVisibleMessages(mergeMessage(current, message)));
       if (!shouldAutoScroll) {
@@ -1057,7 +1093,7 @@ export function ChatApp() {
       body: JSON.stringify({
         username: session.username,
         clientId: session.clientId,
-        profilePicture: session.profilePicture || getDefaultProfilePicture(),
+        profilePicture: normalizeProfilePictureUrl(session.profilePicture),
       }),
     });
 
@@ -1171,20 +1207,41 @@ export function ChatApp() {
         `linear-gradient(rgba(248,250,252,0.15), rgba(248,250,252,0.15)), url("${escapedUrl}")`,
       backgroundSize: "cover",
       backgroundPosition: "center",
-      backgroundAttachment: "fixed",
+      backgroundAttachment: isTouchDevice ? "scroll" : "fixed",
     } as const;
-  }, [chatBackgroundUrl]);
+  }, [chatBackgroundUrl, isTouchDevice]);
 
-  const viewportAwareMainStyle = useMemo(() => {
-    if (!viewportHeightPx || !Number.isFinite(viewportHeightPx) || viewportHeightPx <= 0) {
-      return chatBackgroundStyle;
-    }
-
-    return {
+  const viewportAwareMainStyle = useMemo<CSSProperties>(() => {
+    const style: CSSProperties = {
       ...(chatBackgroundStyle || {}),
-      height: `${Math.round(viewportHeightPx)}px`,
     };
-  }, [chatBackgroundStyle, viewportHeightPx]);
+
+    if (isTouchDevice) {
+      style.position = "fixed";
+      style.inset = 0;
+      style.width = "100%";
+      style.overflow = "hidden";
+      if (viewportHeightPx && Number.isFinite(viewportHeightPx) && viewportHeightPx > 0) {
+        style.height = `${Math.round(viewportHeightPx)}px`;
+      }
+      if (viewportOffsetTopPx > 0) {
+        style.transform = `translateY(${viewportOffsetTopPx}px)`;
+      }
+    }
+    return style;
+  }, [chatBackgroundStyle, isTouchDevice, viewportHeightPx, viewportOffsetTopPx]);
+
+  const scrollContainerStyle = useMemo<CSSProperties>(() => {
+    return {
+      paddingBottom: `calc(${Math.round(composerHeightPx + COMPOSER_BOTTOM_GAP_PX)}px + env(safe-area-inset-bottom))`,
+    };
+  }, [composerHeightPx]);
+
+  const jumpToNewestStyle = useMemo<CSSProperties>(() => {
+    return {
+      bottom: `calc(env(safe-area-inset-bottom) + ${Math.round(composerHeightPx + COMPOSER_BOTTOM_GAP_PX)}px)`,
+    };
+  }, [composerHeightPx]);
 
   const refreshNotificationState = useCallback(() => {
     if (typeof window === "undefined" || !("Notification" in window)) {
@@ -1284,43 +1341,86 @@ export function ChatApp() {
   }, [messages.length]);
 
   useEffect(() => {
+    const element = composerRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+
+    const measure = () => {
+      const next = Math.round(element.getBoundingClientRect().height);
+      if (!Number.isFinite(next) || next <= 0) return;
+      setComposerHeightPx((current) => (current === next ? current : next));
+    };
+
+    measure();
+    const observer = new ResizeObserver(() => {
+      measure();
+    });
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!session) router.replace("/login");
   }, [router, session]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
+    const isTouchViewport = () => window.matchMedia("(pointer: coarse)").matches || window.navigator.maxTouchPoints > 0;
     let frame: number | null = null;
-    const updateViewportHeight = () => {
-      const next = Math.round(window.visualViewport?.height ?? window.innerHeight);
-      if (!Number.isFinite(next) || next <= 0) return;
-      setViewportHeightPx((current) => (current === next ? current : next));
+    const updateViewportMetrics = () => {
+      const touchViewport = isTouchViewport();
+      setIsTouchDevice((current) => (current === touchViewport ? current : touchViewport));
+
+      const viewport = window.visualViewport;
+      if (touchViewport) {
+        const nextHeight = Math.round(viewport?.height ?? window.innerHeight);
+        const nextOffsetTop = Math.max(0, Math.round(viewport?.offsetTop ?? 0));
+        if (Number.isFinite(nextHeight) && nextHeight > 0) {
+          setViewportHeightPx((current) => (current === nextHeight ? current : nextHeight));
+        }
+        setViewportOffsetTopPx((current) => (current === nextOffsetTop ? current : nextOffsetTop));
+      } else {
+        setViewportHeightPx((current) => (current === null ? current : null));
+        setViewportOffsetTopPx((current) => (current === 0 ? current : 0));
+      }
+
+      const element = scrollRef.current;
+      if (!element) return;
+      const distanceFromBottom = element.scrollHeight - (element.scrollTop + element.clientHeight);
+      if (distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX) {
+        isAtBottomRef.current = true;
+        setIsAtBottom(true);
+        scheduleBottomStick();
+      }
     };
 
-    const scheduleViewportHeightUpdate = () => {
+    const scheduleViewportUpdate = () => {
       if (frame !== null) return;
       frame = window.requestAnimationFrame(() => {
         frame = null;
-        updateViewportHeight();
+        updateViewportMetrics();
       });
     };
 
-    updateViewportHeight();
-    window.addEventListener("resize", scheduleViewportHeightUpdate);
-    window.addEventListener("orientationchange", scheduleViewportHeightUpdate);
-    window.visualViewport?.addEventListener("resize", scheduleViewportHeightUpdate);
-    window.visualViewport?.addEventListener("scroll", scheduleViewportHeightUpdate);
+    updateViewportMetrics();
+    window.addEventListener("resize", scheduleViewportUpdate);
+    window.addEventListener("orientationchange", scheduleViewportUpdate);
+    window.visualViewport?.addEventListener("resize", scheduleViewportUpdate);
+    window.visualViewport?.addEventListener("scroll", scheduleViewportUpdate);
 
     return () => {
       if (frame !== null) {
         window.cancelAnimationFrame(frame);
       }
-      window.removeEventListener("resize", scheduleViewportHeightUpdate);
-      window.removeEventListener("orientationchange", scheduleViewportHeightUpdate);
-      window.visualViewport?.removeEventListener("resize", scheduleViewportHeightUpdate);
-      window.visualViewport?.removeEventListener("scroll", scheduleViewportHeightUpdate);
+      window.removeEventListener("resize", scheduleViewportUpdate);
+      window.removeEventListener("orientationchange", scheduleViewportUpdate);
+      window.visualViewport?.removeEventListener("resize", scheduleViewportUpdate);
+      window.visualViewport?.removeEventListener("scroll", scheduleViewportUpdate);
     };
-  }, []);
+  }, [scheduleBottomStick]);
 
   useEffect(() => {
     return () => {
@@ -1701,7 +1801,7 @@ export function ChatApp() {
       lastKnownScrollHeightRef.current = element.scrollHeight;
 
       const distanceFromBottom = element.scrollHeight - (currentScrollTop + element.clientHeight);
-      const atBottom = distanceFromBottom <= NEAR_BOTTOM_PX;
+      const atBottom = distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX;
       isAtBottomRef.current = atBottom;
       setIsAtBottom((current) => (current === atBottom ? current : atBottom));
 
@@ -1848,7 +1948,7 @@ export function ChatApp() {
           type: "message",
           message: combinedMessage,
           username: session.username,
-          profilePicture: session.profilePicture,
+          profilePicture: sessionProfilePicture,
           createdAt: new Date().toISOString(),
           questionId: replyTarget?.id,
           oldusername: replyTarget?.username,
@@ -1885,39 +1985,13 @@ export function ChatApp() {
           type: "question",
           message: content,
           username: session.username,
-          profilePicture: session.profilePicture,
+          profilePicture: sessionProfilePicture,
           createdAt: new Date().toISOString(),
         });
         startPendingDelivery(tempMessageId);
         setQuestionDraft("");
 
         const created = await sendMessage({ clientId: session.clientId, type: "question", message: content });
-        clearPendingDelivery(tempMessageId);
-        removeOptimisticMessage(tempMessageId);
-        applyIncomingMessages([created], { notify: false });
-      } else if (composerMode === "challenge") {
-        const content = challengeDraft.trim();
-        if (!content) return;
-        const challengeMessage = `ChatPPC Aufgabe: ${content}`;
-
-        tempMessageId = createTempMessageId();
-        appendOptimisticMessage({
-          id: tempMessageId,
-          authorId: session.clientId,
-          type: "message",
-          message: challengeMessage,
-          username: session.username,
-          profilePicture: session.profilePicture,
-          createdAt: new Date().toISOString(),
-        });
-        startPendingDelivery(tempMessageId);
-        setChallengeDraft("");
-
-        const created = await sendMessage({
-          clientId: session.clientId,
-          type: "message",
-          message: challengeMessage,
-        });
         clearPendingDelivery(tempMessageId);
         removeOptimisticMessage(tempMessageId);
         applyIncomingMessages([created], { notify: false });
@@ -1944,7 +2018,7 @@ export function ChatApp() {
           type: "votingPoll",
           message: question,
           username: session.username,
-          profilePicture: session.profilePicture,
+          profilePicture: sessionProfilePicture,
           createdAt: new Date().toISOString(),
           poll: {
             options: options.map((option, index) => ({
@@ -1990,7 +2064,6 @@ export function ChatApp() {
   }, [
     appendOptimisticMessage,
     applyIncomingMessages,
-    challengeDraft,
     clearPendingDelivery,
     composerMode,
     createTempMessageId,
@@ -2004,6 +2077,7 @@ export function ChatApp() {
     kickOffAiWorker,
     sendMessage,
     session,
+    sessionProfilePicture,
     startPendingDelivery,
     uploadedDraftImages,
   ]);
@@ -2022,7 +2096,7 @@ export function ChatApp() {
         type: "answer",
         message: draft,
         username: session.username,
-        profilePicture: session.profilePicture,
+        profilePicture: sessionProfilePicture,
         createdAt: new Date().toISOString(),
         questionId: questionMessageId,
         oldusername: questionContext?.username,
@@ -2058,6 +2132,7 @@ export function ChatApp() {
       removeOptimisticMessage,
       sendMessage,
       session,
+      sessionProfilePicture,
       startPendingDelivery,
     ],
   );
@@ -2073,7 +2148,7 @@ export function ChatApp() {
           voter: {
             id: session.clientId,
             username: session.username,
-            profilePicture: session.profilePicture,
+            profilePicture: sessionProfilePicture,
           },
         });
         if (optimistic !== current) {
@@ -2103,7 +2178,7 @@ export function ChatApp() {
         setError(voteError instanceof Error ? voteError.message : "Stimme konnte nicht gespeichert werden.");
       }
     },
-    [applyIncomingMessages, session],
+    [applyIncomingMessages, session, sessionProfilePicture],
   );
 
   const handleDeleteMessage = useCallback(
@@ -2512,7 +2587,7 @@ export function ChatApp() {
               aria-label="Profilbild ändern"
             >
               <img
-                src={session.profilePicture}
+                src={sessionProfilePicture}
                 alt={`${session.username} avatar`}
                 className="h-14 w-14 rounded-full border border-slate-200 object-cover"
                 loading="lazy"
@@ -2769,14 +2844,14 @@ export function ChatApp() {
               <button
                 type="button"
                 onClick={openProfileEditor}
-                className="rounded-full transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 md:hidden"
+                className="shrink-0 rounded-full transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 md:hidden"
                 title="Profilbild ändern"
                 aria-label="Profilbild ändern"
               >
                 <img
-                  src={session.profilePicture}
+                  src={sessionProfilePicture}
                   alt={`${session.username} avatar`}
-                  className="h-10 w-10 rounded-full border border-slate-200 object-cover"
+                  className="h-10 w-10 shrink-0 rounded-full border border-slate-200 object-cover [aspect-ratio:1/1]"
                   loading="lazy"
                   decoding="async"
                 />
@@ -2811,7 +2886,8 @@ export function ChatApp() {
 
           <div
             ref={scrollRef}
-            className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 pb-40 sm:p-4 sm:pb-44"
+            className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3 sm:p-4"
+            style={scrollContainerStyle}
           >
             {loadingOlder ? (
               <p className="text-center text-xs text-slate-500">Ältere Nachrichten werden geladen…</p>
@@ -2834,7 +2910,10 @@ export function ChatApp() {
           </div>
 
           {!isAtBottom ? (
-            <div className="pointer-events-none fixed inset-x-0 bottom-[calc(env(safe-area-inset-bottom)+12.5rem)] z-50 flex justify-center md:absolute md:bottom-36 md:z-40">
+            <div
+              className="pointer-events-none fixed inset-x-0 z-50 flex justify-center md:absolute md:z-40"
+              style={jumpToNewestStyle}
+            >
               <button
                 type="button"
                 className="pointer-events-auto rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold text-white shadow-lg"
@@ -2850,8 +2929,9 @@ export function ChatApp() {
             </div>
           ) : null}
 
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center pb-[calc(env(safe-area-inset-bottom)+0.75rem)]">
+          <div className="pointer-events-none fixed inset-x-0 bottom-0 z-20 flex justify-center pb-[calc(env(safe-area-inset-bottom)+0.75rem)] md:absolute">
             <div
+              ref={composerRef}
               className={`pointer-events-auto w-[min(940px,94vw)] rounded-[2rem] border border-white/70 bg-white/90 p-3 shadow-[0_18px_50px_rgba(15,23,42,0.18)] backdrop-blur transition-all duration-300 ${
                 composerOpen ? "scale-100" : "scale-[0.98]"
               }`}
@@ -3111,22 +3191,6 @@ export function ChatApp() {
                   }}
                   placeholder="Stelle deiner Gruppe eine Frage…"
                   className="h-9 w-full rounded-xl border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
-                />
-              ) : null}
-
-              {composerMode === "challenge" ? (
-                <input
-                  value={challengeDraft}
-                  onFocus={() => setComposerOpen(true)}
-                  onChange={(event) => setChallengeDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      void submitComposer();
-                    }
-                  }}
-                  placeholder="Teile eine Aufgabe…"
-                  className="h-9 w-full rounded-xl border border-slate-200 px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-fuchsia-300"
                 />
               ) : null}
 
@@ -3438,7 +3502,7 @@ export function ChatApp() {
             </p>
             <h2 className="mt-3 text-2xl font-bold text-slate-900">Schnellstart in 30 Sekunden</h2>
             <div className="mt-4 space-y-2 text-sm text-slate-700">
-              <p>1. Schreibe Nachrichten, Fragen und Aufgaben im Composer.</p>
+              <p>1. Schreibe Nachrichten und Fragen im Composer.</p>
               <p>2. Erstelle Umfragen mit mehreren Optionen und sofortigen Updates.</p>
               <p>3. Teile Bilder und GIFs per Drag-and-drop.</p>
               <p>4. Erwähne <span className="font-semibold text-slate-900">@chatgpt</span> oder <span className="font-semibold text-slate-900">@grok</span>, wenn du KI-Antworten möchtest.</p>
