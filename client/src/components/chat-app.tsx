@@ -1222,7 +1222,7 @@ export function ChatApp() {
   }, [composerHeightPx]);
 
   const scrollContainerStyle = useMemo(() => {
-    const dynamicPadding = Math.round(composerHeightPx * 0.12) + LAST_MESSAGE_EXTRA_CLEARANCE_PX;
+    const dynamicPadding = Math.round(composerHeightPx * 0.78) + LAST_MESSAGE_EXTRA_CLEARANCE_PX + 40;
     return {
       paddingBottom: `${dynamicPadding}px`,
     };
@@ -2946,8 +2946,19 @@ export function ChatApp() {
             </div>
           ) : null}
 
-          <div className="sticky bottom-0 z-20 bg-transparent px-2 pb-[calc(env(safe-area-inset-bottom)+0.6rem)] pt-2 sm:px-3">
-            <div className="mx-auto w-full max-w-[960px]">
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-2 pb-[calc(env(safe-area-inset-bottom)+0.6rem)] pt-16 sm:px-3">
+            <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-36">
+              <div className="absolute inset-0 bg-gradient-to-t from-white/85 via-white/30 to-transparent" />
+              <div
+                className="absolute inset-0 backdrop-blur-md"
+                style={{
+                  maskImage: "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 100%)",
+                  WebkitMaskImage:
+                    "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 100%)",
+                }}
+              />
+            </div>
+            <div className="pointer-events-auto relative mx-auto w-full max-w-[960px]">
               <ChatComposer
                 composerRef={composerRef}
                 messageInputRef={messageInputRef}
