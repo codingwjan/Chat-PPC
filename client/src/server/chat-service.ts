@@ -749,6 +749,121 @@ function stripInlineImageMarkdownAndUrls(text: string): string {
   return kept.join("\n").trim();
 }
 
+interface AiPollPayload {
+  question: string;
+  options: string[];
+  multiSelect: boolean;
+}
+
+const AI_POLL_BLOCK_REGEX = /<POLL_JSON>([\s\S]*?)<\/POLL_JSON>/gi;
+const AI_POLL_OPTION_LINE_REGEX = /^\s*(?:\d{1,2}[.)]|[-*])\s+(.+)$/;
+const AI_POLL_HINT_REGEX = /\b(umfrage|survey|poll|abstimmen|vote|voting)\b/i;
+
+function normalizePollText(value: string): string {
+  return value
+    .trim()
+    .replace(/^[-*_`#\s]+/, "")
+    .replace(/[-*_`#\s]+$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractListPollPayload(rawText: string): AiPollPayload | null {
+  const text = stripAiPollBlocks(rawText);
+  if (!text || !AI_POLL_HINT_REGEX.test(text)) return null;
+
+  const lines = text
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+
+  const options: string[] = [];
+  let firstOptionIndex = -1;
+
+  lines.forEach((line, index) => {
+    const match = line.match(AI_POLL_OPTION_LINE_REGEX);
+    if (!match) return;
+    if (firstOptionIndex === -1) firstOptionIndex = index;
+    const label = normalizePollText(match[1] || "");
+    if (label) options.push(label);
+  });
+
+  if (options.length < 2 || options.length > 15) return null;
+  if (new Set(options.map((option) => option.toLowerCase())).size !== options.length) return null;
+
+  const headingLine = lines.find((line) => AI_POLL_HINT_REGEX.test(line) && !AI_POLL_OPTION_LINE_REGEX.test(line));
+  const headingQuestion = headingLine
+    ? normalizePollText(headingLine.includes(":") ? headingLine.split(":").slice(1).join(":") : headingLine)
+    : "";
+
+  const fallbackQuestion = firstOptionIndex > 0
+    ? normalizePollText(lines[firstOptionIndex - 1] || "")
+    : "";
+
+  const question = headingQuestion || fallbackQuestion || "Umfrage";
+  if (!question) return null;
+
+  const multiSelect = /\b(mehrfach|multiple\s+choice|multi[\s-]?select)\b/i.test(text);
+  return { question, options, multiSelect };
+}
+
+function stripAiPollBlocks(text: string): string {
+  return text.replace(/<POLL_JSON>[\s\S]*?<\/POLL_JSON>/gi, "").trim();
+}
+
+function extractAiPollPayload(rawText: string): AiPollPayload | null {
+  if (!rawText) return null;
+
+  const matches = [...rawText.matchAll(AI_POLL_BLOCK_REGEX)];
+  if (matches.length !== 1) {
+    return extractListPollPayload(rawText);
+  }
+
+  const jsonPayload = matches[0]?.[1]?.trim();
+  if (!jsonPayload) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(jsonPayload);
+  } catch {
+    return extractListPollPayload(rawText);
+  }
+
+  if (typeof parsed !== "object" || parsed === null) return null;
+
+  const question = typeof (parsed as { question?: unknown }).question === "string"
+    ? (parsed as { question: string }).question.trim()
+    : "";
+  const optionsRaw = Array.isArray((parsed as { options?: unknown }).options)
+    ? (parsed as { options: unknown[] }).options
+    : [];
+  const multiSelect = typeof (parsed as { multiSelect?: unknown }).multiSelect === "boolean"
+    ? (parsed as { multiSelect: boolean }).multiSelect
+    : false;
+
+  const options = optionsRaw
+    .filter((option): option is string => typeof option === "string")
+    .map((option) => option.trim())
+    .filter(Boolean);
+
+  if (!question || options.length < 2 || options.length > 15) {
+    return extractListPollPayload(rawText);
+  }
+
+  const uniqueOptions = new Set(options.map((option) => option.toLowerCase()));
+  if (uniqueOptions.size !== options.length) {
+    return extractListPollPayload(rawText);
+  }
+
+  return {
+    question,
+    options,
+    multiSelect,
+  };
+}
+
 function isContextWindowError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
@@ -838,6 +953,9 @@ async function buildAiInput(
         ? "Die Nachricht enthält Bild-Inputs. Nutze sie nur für textliche Analyse/Beschreibung, nicht für Bildgenerierung."
         : "Die Nachricht enthält Bild-Inputs. Falls ein Bild gewünscht ist, nutze sie als Referenz-/Bearbeitungsbilder."
       : "",
+    provider === "grok"
+      ? "Wenn der User eine Umfrage erstellen will, antworte ausschließlich mit genau einem Block in diesem Format: <POLL_JSON>{\"question\":\"<kurze Frage>\",\"options\":[\"<Option 1>\",\"<Option 2>\"],\"multiSelect\":false}</POLL_JSON>. Kein zusätzlicher Text davor oder danach. JSON muss gültig sein, mit 2 bis 15 eindeutigen Optionen."
+      : "",
     recentContext ? `Letzter Chat-Kontext:\n${recentContext}` : "",
     `Aktuelle Anfrage von ${payload.username}: ${userPrompt}`,
   ]
@@ -902,6 +1020,39 @@ async function createAiMessage(input: {
       questionMessageId: input.sourceMessageId,
       authorName: getAiProviderDisplayName(input.provider),
       authorProfilePicture: getAiProviderAvatar(input.provider),
+    },
+    include: { questionMessage: true, author: true, pollOptions: { include: { votes: { include: { user: true } } } } },
+  });
+  invalidateMediaCache();
+  publish("message.created", mapMessage(created));
+}
+
+async function createAiPollMessage(input: {
+  provider: AiProvider;
+  sourceMessageId: string;
+  question: string;
+  options: string[];
+  multiSelect: boolean;
+}): Promise<void> {
+  const created = await prisma.message.create({
+    data: {
+      type: MessageType.VOTING_POLL,
+      content: input.question,
+      questionMessageId: input.sourceMessageId,
+      authorName: getAiProviderDisplayName(input.provider),
+      authorProfilePicture: getAiProviderAvatar(input.provider),
+      optionOne: input.options[0] || null,
+      optionTwo: input.options[1] || null,
+      pollMultiSelect: input.multiSelect,
+      pollAllowVoteChange: true,
+      pollLeftCount: 0,
+      pollRightCount: 0,
+      pollOptions: {
+        create: input.options.map((label, sortOrder) => ({
+          label,
+          sortOrder,
+        })),
+      },
     },
     include: { questionMessage: true, author: true, pollOptions: { include: { votes: { include: { user: true } } } } },
   });
@@ -1116,9 +1267,23 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       }
 
       const rawOutputText = stripLeadingAiMentions(response.output_text?.trim() || "");
+      const pollPayload = extractAiPollPayload(rawOutputText);
+      if (pollPayload) {
+        publishAiStatus(payload.provider, "schreibt…");
+        await createAiPollMessage({
+          provider: payload.provider,
+          sourceMessageId: payload.sourceMessageId,
+          question: pollPayload.question,
+          options: pollPayload.options,
+          multiSelect: pollPayload.multiSelect,
+        });
+        return;
+      }
+
+      const outputWithoutPoll = stripAiPollBlocks(rawOutputText);
       const cleanedOutputText = imageMarkdown.length > 0
-        ? stripInlineImageMarkdownAndUrls(rawOutputText)
-        : rawOutputText;
+        ? stripInlineImageMarkdownAndUrls(outputWithoutPoll)
+        : outputWithoutPoll;
       const text = [cleanedOutputText, ...imageMarkdown].filter(Boolean).join("\n\n").trim();
 
       if (!text || text === "[NO_RESPONSE]") {
@@ -1181,7 +1346,20 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
     }
 
     const rawOutputText = stripLeadingAiMentions(response.output_text?.trim() || "");
-    const text = rawOutputText.trim();
+    const pollPayload = extractAiPollPayload(rawOutputText);
+    if (pollPayload) {
+      publishAiStatus(payload.provider, "schreibt…");
+      await createAiPollMessage({
+        provider: payload.provider,
+        sourceMessageId: payload.sourceMessageId,
+        question: pollPayload.question,
+        options: pollPayload.options,
+        multiSelect: pollPayload.multiSelect,
+      });
+      return;
+    }
+
+    const text = stripAiPollBlocks(rawOutputText).trim();
 
     if (!text || text === "[NO_RESPONSE]") {
       publishAiStatus(payload.provider, "schreibt…");
@@ -1441,6 +1619,10 @@ async function maybeRespondAsAi(payload: Omit<AiTriggerPayload, "provider">): Pr
 export function __resetAiQueueForTests(): void {
   aiQueueDrainScheduled = false;
   lastAiBusyNoticeAt = 0;
+}
+
+export function __extractAiPollPayloadForTests(rawText: string): AiPollPayload | null {
+  return extractAiPollPayload(rawText);
 }
 
 async function getUserByClientId(clientId: string) {
