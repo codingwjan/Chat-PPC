@@ -40,6 +40,7 @@ import type {
   AiStatusDTO,
   ChatBackgroundDTO,
   CreateMessageRequest,
+  ExtendPollRequest,
   LoginResponseDTO,
   MediaItemDTO,
   MediaPageDTO,
@@ -254,6 +255,11 @@ interface ReplyTargetState {
   message: string;
 }
 
+interface PollExtendDraftState {
+  pollMessageId: string;
+  existingOptions: string[];
+}
+
 async function uploadProfileImage(file: File): Promise<string> {
   const formData = new FormData();
   formData.set("file", file);
@@ -402,33 +408,6 @@ function createDefaultAiStatus(): AiStatusDTO {
   };
 }
 
-function compareOnlineUsersForSidebar(a: UserPresenceDTO, b: UserPresenceDTO): number {
-  const aAi = a.clientId === "chatgpt" || a.clientId === "grok";
-  const bAi = b.clientId === "chatgpt" || b.clientId === "grok";
-  if (aAi !== bAi) {
-    return aAi ? -1 : 1;
-  }
-  return a.username.localeCompare(b.username, "de-DE");
-}
-
-function compareOfflineUsersForSidebar(a: UserPresenceDTO, b: UserPresenceDTO): number {
-  const aLastSeen = a.lastSeenAt ? new Date(a.lastSeenAt).getTime() : 0;
-  const bLastSeen = b.lastSeenAt ? new Date(b.lastSeenAt).getTime() : 0;
-  if (aLastSeen !== bLastSeen) {
-    return bLastSeen - aLastSeen;
-  }
-  return a.username.localeCompare(b.username, "de-DE");
-}
-
-function isAiClient(clientId: string): boolean {
-  return clientId === "chatgpt" || clientId === "grok";
-}
-
-function isAiUsername(username: string): boolean {
-  const normalized = username.trim().toLowerCase();
-  return normalized === "chatgpt" || normalized === "grok";
-}
-
 interface MessageListProps {
   messages: MessageDTO[];
   currentUsername: string;
@@ -438,6 +417,7 @@ interface MessageListProps {
   onAnswerDraftChange: (messageId: string, value: string) => void;
   onSubmitAnswer: (messageId: string) => void;
   onVote: (messageId: string, optionIds: string[]) => void;
+  onExtendPoll: (message: MessageDTO) => void;
   onDeleteMessage: (messageId: string) => void;
   onStartReply: (message: MessageDTO) => void;
   onOpenLightbox: (url: string, alt?: string) => void;
@@ -453,6 +433,7 @@ const MessageList = memo(function MessageList({
   onAnswerDraftChange,
   onSubmitAnswer,
   onVote,
+  onExtendPoll,
   onDeleteMessage,
   onStartReply,
   onOpenLightbox,
@@ -475,6 +456,7 @@ const MessageList = memo(function MessageList({
           onAnswerDraftChange={onAnswerDraftChange}
           onSubmitAnswer={onSubmitAnswer}
           onVote={onVote}
+          onExtendPoll={onExtendPoll}
           onDeleteMessage={onDeleteMessage}
           onStartReply={onStartReply}
           onOpenLightbox={onOpenLightbox}
@@ -486,82 +468,61 @@ const MessageList = memo(function MessageList({
 });
 
 interface OnlineUsersListProps {
-  onlineUsers: UserPresenceDTO[];
-  offlineUsers: UserPresenceDTO[];
+  users: UserPresenceDTO[];
   avatarSizeClassName: string;
   onOpenLightbox: (url: string, alt?: string) => void;
 }
 
-const OnlineUsersList = memo(function OnlineUsersList({
-  onlineUsers,
-  offlineUsers,
-  avatarSizeClassName,
-  onOpenLightbox,
-}: OnlineUsersListProps) {
+const OnlineUsersList = memo(function OnlineUsersList({ users, avatarSizeClassName, onOpenLightbox }: OnlineUsersListProps) {
   const defaultProfilePicture = normalizeProfilePictureUrl(undefined);
-  const renderUser = (user: UserPresenceDTO) => {
-    const avatarUrl = normalizeProfilePictureUrl(user.profilePicture);
-    const isFallbackAvatar = avatarUrl === defaultProfilePicture;
-    return (
-      <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
-        {isFallbackAvatar ? (
-          <div className={`${avatarSizeClassName} shrink-0 overflow-hidden rounded-full border border-slate-200`}>
-            <img
-              src={avatarUrl}
-              alt={`${user.username} Profilbild`}
-              className="h-full w-full object-cover"
-              loading="lazy"
-              decoding="async"
-            />
-          </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => onOpenLightbox(avatarUrl, `Profilbild von ${user.username}`)}
-            className={`${avatarSizeClassName} shrink-0 cursor-zoom-in overflow-hidden rounded-full border border-slate-200 object-cover transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300`}
-            aria-label={`Profilbild von ${user.username} öffnen`}
-          >
-            <img
-              src={avatarUrl}
-              alt={`${user.username} Profilbild`}
-              className="h-full w-full object-cover"
-              loading="lazy"
-              decoding="async"
-            />
-          </button>
-        )}
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
-          <p className="truncate text-xs text-slate-500">{formatPresenceStatus(user)}</p>
-          {shouldShowAiProgress(user) ? (
-            <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
-              <div
-                className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out animate-pulse"
-                style={{ width: `${aiProgressForStatus(user.status)}%` }}
-              />
-            </div>
-          ) : null}
-        </div>
-      </div>
-    );
-  };
-
   return (
     <>
-      {onlineUsers.length > 0 ? (
-        <>
-          <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">Online</p>
-          <div className="space-y-2">{onlineUsers.map(renderUser)}</div>
-        </>
-      ) : null}
-      {offlineUsers.length > 0 ? (
-        <>
-          <p className={`${onlineUsers.length > 0 ? "mt-4" : ""} mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400`}>
-            Zuletzt online
-          </p>
-          <div className="space-y-2">{offlineUsers.map(renderUser)}</div>
-        </>
-      ) : null}
+      {users.map((user) => {
+        const avatarUrl = normalizeProfilePictureUrl(user.profilePicture);
+        const isFallbackAvatar = avatarUrl === defaultProfilePicture;
+        return (
+          <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
+            {isFallbackAvatar ? (
+              <div className={`${avatarSizeClassName} shrink-0 overflow-hidden rounded-full border border-slate-200`}>
+                <img
+                  src={avatarUrl}
+                  alt={`${user.username} Profilbild`}
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onOpenLightbox(avatarUrl, `Profilbild von ${user.username}`)}
+                className={`${avatarSizeClassName} shrink-0 cursor-zoom-in overflow-hidden rounded-full border border-slate-200 object-cover transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300`}
+                aria-label={`Profilbild von ${user.username} öffnen`}
+              >
+                <img
+                  src={avatarUrl}
+                  alt={`${user.username} Profilbild`}
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </button>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
+              <p className="truncate text-xs text-slate-500">{formatPresenceStatus(user)}</p>
+              {shouldShowAiProgress(user) ? (
+                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
+                  <div
+                    className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out animate-pulse"
+                    style={{ width: `${aiProgressForStatus(user.status)}%` }}
+                  />
+                </div>
+              ) : null}
+            </div>
+          </div>
+        );
+      })}
     </>
   );
 });
@@ -643,6 +604,7 @@ export function ChatApp() {
   const [pollQuestion, setPollQuestion] = useState("");
   const [pollOptions, setPollOptions] = useState<string[]>(["", ""]);
   const [pollMultiSelect, setPollMultiSelect] = useState(false);
+  const [pollExtendDraft, setPollExtendDraft] = useState<PollExtendDraftState | null>(null);
 
   const [editingProfile, setEditingProfile] = useState(false);
   const [uploadingProfile, setUploadingProfile] = useState(false);
@@ -667,8 +629,8 @@ export function ChatApp() {
     [session?.profilePicture],
   );
 
-  const onlineUsers = useMemo(() => {
-    const aiUsers: UserPresenceDTO[] = [
+  const onlineUsers = useMemo(
+    () => [
       {
         id: "chatgpt",
         clientId: "chatgpt",
@@ -687,85 +649,16 @@ export function ChatApp() {
         isOnline: true,
         lastSeenAt: aiStatus.updatedAt,
       },
-    ];
-
-    const humanOnlineUsers = users
-      .filter((user) => user.isOnline && !isAiClient(user.clientId))
-      .map((user) => ({
-        ...user,
-        profilePicture: normalizeProfilePictureUrl(user.profilePicture),
-      }));
-
-    return [...aiUsers, ...humanOnlineUsers].sort(compareOnlineUsersForSidebar);
-  }, [aiStatus, users]);
-
-  const offlineUsers = useMemo(() => {
-    const onlineClientIds = new Set(
-      users.filter((user) => user.isOnline).map((user) => user.clientId),
-    );
-    const onlineUsernames = new Set(
-      users.filter((user) => user.isOnline).map((user) => user.username.trim().toLowerCase()),
-    );
-
-    const offlineByUsername = new Map<string, UserPresenceDTO>();
-
-    for (const user of users) {
-      if (isAiClient(user.clientId) || user.isOnline) continue;
-      const key = user.username.trim().toLowerCase();
-      const normalizedUser = {
-        ...user,
-        isOnline: false,
-        profilePicture: normalizeProfilePictureUrl(user.profilePicture),
-      };
-      const current = offlineByUsername.get(key);
-      if (!current) {
-        offlineByUsername.set(key, normalizedUser);
-        continue;
-      }
-      const currentSeen = current.lastSeenAt ? new Date(current.lastSeenAt).getTime() : 0;
-      const nextSeen = normalizedUser.lastSeenAt ? new Date(normalizedUser.lastSeenAt).getTime() : 0;
-      if (nextSeen > currentSeen) {
-        offlineByUsername.set(key, normalizedUser);
-      }
-    }
-
-    for (const message of messages) {
-      const username = message.username.trim();
-      const normalizedName = username.toLowerCase();
-      if (!username || normalizedName === "system" || isAiUsername(username)) continue;
-      if (onlineUsernames.has(normalizedName)) continue;
-
-      const candidate: UserPresenceDTO = {
-        id: message.authorId || `offline:${normalizedName}`,
-        clientId: message.authorId || `offline:${normalizedName}`,
-        username,
-        profilePicture: normalizeProfilePictureUrl(message.profilePicture),
-        status: "",
-        isOnline: false,
-        lastSeenAt: message.createdAt,
-      };
-
-      const current = offlineByUsername.get(normalizedName);
-      if (!current) {
-        if (!onlineClientIds.has(candidate.clientId)) {
-          offlineByUsername.set(normalizedName, candidate);
-        }
-        continue;
-      }
-
-      const currentSeen = current.lastSeenAt ? new Date(current.lastSeenAt).getTime() : 0;
-      const nextSeen = candidate.lastSeenAt ? new Date(candidate.lastSeenAt).getTime() : 0;
-      if (nextSeen > currentSeen) {
-        offlineByUsername.set(normalizedName, {
-          ...candidate,
-          id: current.id || candidate.id,
-          clientId: current.clientId || candidate.clientId,
-        });
-      }
-    }
-
-    return Array.from(offlineByUsername.values()).sort(compareOfflineUsersForSidebar);
-  }, [messages, users]);
+      ...users
+        .filter((user) => user.isOnline)
+        .sort((a, b) => a.username.localeCompare(b.username))
+        .map((user) => ({
+          ...user,
+          profilePicture: normalizeProfilePictureUrl(user.profilePicture),
+        })),
+    ],
+    [users, aiStatus],
+  );
 
   const filteredMentionUsers = useMemo(() => {
     if (!mentionFilter) return onlineUsers;
@@ -2051,6 +1944,11 @@ export function ChatApp() {
 
   const updatePollOptionValue = useCallback((index: number, value: string) => {
     setPollOptions((current) => {
+      const lockedCount = pollExtendDraft?.existingOptions.length ?? 0;
+      if (index < lockedCount) {
+        return current;
+      }
+
       const next = current.map((option, optionIndex) => (optionIndex === index ? value : option));
       const allFieldsFilled = next.length > 0 && next.every((option) => option.trim().length > 0);
 
@@ -2060,7 +1958,7 @@ export function ChatApp() {
 
       return next;
     });
-  }, []);
+  }, [pollExtendDraft?.existingOptions.length]);
 
   const submitComposer = useCallback(async () => {
     if (!session) return;
@@ -2146,46 +2044,80 @@ export function ChatApp() {
           return;
         }
 
-        tempMessageId = createTempMessageId();
-        appendOptimisticMessage({
-          id: tempMessageId,
-          authorId: session.clientId,
-          type: "votingPoll",
-          message: question,
-          username: session.username,
-          profilePicture: sessionProfilePicture,
-          createdAt: new Date().toISOString(),
-          poll: {
-            options: options.map((option, index) => ({
-              id: `${tempMessageId}-opt-${index}`,
-              label: option,
-              votes: 0,
-              voters: [],
-            })),
-            settings: {
-              multiSelect: pollMultiSelect,
-              allowVoteChange: true,
+        if (pollExtendDraft) {
+          const normalizedExisting = pollExtendDraft.existingOptions.map((option) => option.trim()).filter(Boolean);
+          const existingOptionSet = new Set(normalizedExisting.map((option) => option.toLowerCase()));
+          const optionSet = new Set(options.map((option) => option.toLowerCase()));
+
+          const missingExistingOption = normalizedExisting.some(
+            (existingOption) => !optionSet.has(existingOption.toLowerCase()),
+          );
+          if (missingExistingOption) {
+            setError("Bestehende Umfrageoptionen können beim Erweitern nicht entfernt werden.");
+            return;
+          }
+
+          const newOptions = options.filter((option) => !existingOptionSet.has(option.toLowerCase()));
+          if (newOptions.length === 0) {
+            setError("Füge mindestens eine neue Umfrageoption hinzu.");
+            return;
+          }
+
+          const updated = await apiJson<MessageDTO>("/api/polls/extend", {
+            method: "POST",
+            body: JSON.stringify({
+              clientId: session.clientId,
+              pollMessageId: pollExtendDraft.pollMessageId,
+              pollOptions: newOptions,
+            } satisfies ExtendPollRequest),
+          });
+          applyIncomingMessages([updated], { notify: false });
+          setPollExtendDraft(null);
+          setPollQuestion("");
+          setPollOptions(["", ""]);
+          setPollMultiSelect(false);
+        } else {
+          tempMessageId = createTempMessageId();
+          appendOptimisticMessage({
+            id: tempMessageId,
+            authorId: session.clientId,
+            type: "votingPoll",
+            message: question,
+            username: session.username,
+            profilePicture: sessionProfilePicture,
+            createdAt: new Date().toISOString(),
+            poll: {
+              options: options.map((option, index) => ({
+                id: `${tempMessageId}-opt-${index}`,
+                label: option,
+                votes: 0,
+                voters: [],
+              })),
+              settings: {
+                multiSelect: pollMultiSelect,
+                allowVoteChange: true,
+              },
             },
-          },
-          resultone: "0",
-          resulttwo: "0",
-        });
-        startPendingDelivery(tempMessageId);
+            resultone: "0",
+            resulttwo: "0",
+          });
+          startPendingDelivery(tempMessageId);
 
-        const created = await sendMessage({
-          clientId: session.clientId,
-          type: "votingPoll",
-          message: question,
-          pollOptions: options,
-          pollMultiSelect,
-        });
-        clearPendingDelivery(tempMessageId);
-        removeOptimisticMessage(tempMessageId);
-        applyIncomingMessages([created], { notify: false });
+          const created = await sendMessage({
+            clientId: session.clientId,
+            type: "votingPoll",
+            message: question,
+            pollOptions: options,
+            pollMultiSelect,
+          });
+          clearPendingDelivery(tempMessageId);
+          removeOptimisticMessage(tempMessageId);
+          applyIncomingMessages([created], { notify: false });
 
-        setPollQuestion("");
-        setPollOptions(["", ""]);
-        setPollMultiSelect(false);
+          setPollQuestion("");
+          setPollOptions(["", ""]);
+          setPollMultiSelect(false);
+        }
       }
 
       setError(null);
@@ -2204,6 +2136,7 @@ export function ChatApp() {
     createTempMessageId,
     messageDraft,
     pollMultiSelect,
+    pollExtendDraft,
     pollOptions,
     pollQuestion,
     questionDraft,
@@ -2314,6 +2247,34 @@ export function ChatApp() {
       }
     },
     [applyIncomingMessages, session, sessionProfilePicture],
+  );
+
+  const handleExtendPoll = useCallback(
+    async (message: MessageDTO) => {
+      if (message.type !== "votingPoll") return;
+
+      const existingOptions = message.poll?.options.map((option) => option.label.trim()).filter(Boolean) ?? [];
+      if (existingOptions.length < 2) {
+        setError("Diese Umfrage kann nicht erweitert werden.");
+        return;
+      }
+
+      const prefilledOptions = [...existingOptions];
+      if (prefilledOptions.length < 15) {
+        prefilledOptions.push("");
+      }
+
+      setComposerMode("poll");
+      setPollExtendDraft({
+        pollMessageId: message.id,
+        existingOptions,
+      });
+      setPollQuestion(message.message);
+      setPollOptions(prefilledOptions);
+      setPollMultiSelect(Boolean(message.poll?.settings.multiSelect));
+      setError(null);
+    },
+    [],
   );
 
   const handleDeleteMessage = useCallback(
@@ -3004,14 +2965,7 @@ export function ChatApp() {
         statusLabel={isDeveloperMode ? "Entwicklermodus" : "online"}
         onOpenProfileEditor={openProfileEditor}
         onLogout={() => void logout()}
-        onlineUsersContent={(
-          <OnlineUsersList
-            onlineUsers={onlineUsers}
-            offlineUsers={offlineUsers}
-            avatarSizeClassName="h-11 w-11"
-            onOpenLightbox={handleOpenLightbox}
-          />
-        )}
+        onlineUsersContent={<OnlineUsersList users={onlineUsers} avatarSizeClassName="h-11 w-11" onOpenLightbox={handleOpenLightbox} />}
         notificationContent={notificationControls}
         backgroundContent={backgroundControls}
         developerContent={developerControls}
@@ -3084,6 +3038,7 @@ export function ChatApp() {
                 onAnswerDraftChange={handleAnswerDraftChange}
                 onSubmitAnswer={submitAnswer}
                 onVote={handleVote}
+                onExtendPoll={handleExtendPoll}
                 onDeleteMessage={handleDeleteMessage}
                 onStartReply={handleStartReply}
                 onOpenLightbox={handleOpenLightbox}
@@ -3143,6 +3098,9 @@ export function ChatApp() {
                 hasGrokMention={hasLeadingAiTag(messageDraft, "grok")}
                 onModeChange={(mode) => {
                   setComposerMode(mode);
+                  if (mode !== "poll" && pollExtendDraft) {
+                    setPollExtendDraft(null);
+                  }
                 }}
                 onAskChatGpt={activateAskChatGpt}
                 onAskGrok={activateAskGrok}
@@ -3155,7 +3113,19 @@ export function ChatApp() {
                 onPollQuestionChange={setPollQuestion}
                 onPollOptionChange={updatePollOptionValue}
                 onPollMultiSelectChange={setPollMultiSelect}
-                onRemovePollOption={() => setPollOptions((current) => (current.length <= 2 ? current : current.slice(0, -1)))}
+                onRemovePollOption={() =>
+                  setPollOptions((current) => {
+                    const minCount = Math.max(2, pollExtendDraft?.existingOptions.length ?? 0);
+                    return current.length <= minCount ? current : current.slice(0, -1);
+                  })}
+                pollExtending={Boolean(pollExtendDraft)}
+                pollLockedOptionCount={pollExtendDraft?.existingOptions.length ?? 0}
+                onCancelPollExtend={() => {
+                  setPollExtendDraft(null);
+                  setPollQuestion("");
+                  setPollOptions(["", ""]);
+                  setPollMultiSelect(false);
+                }}
                 onSelectMention={selectMentionUser}
                 onRemoveDraftImage={(imageId) =>
                   setUploadedDraftImages((current) => current.filter((uploadedImage) => uploadedImage.id !== imageId))

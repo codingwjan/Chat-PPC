@@ -3,6 +3,7 @@ import {
   parseAdminActionRequest,
   parseAdminOverviewRequest,
   parseCreateMessageRequest,
+  parseExtendPollRequest,
   parseLoginRequest,
   parseRenameUserRequest,
   parseUpdateChatBackgroundRequest,
@@ -112,6 +113,26 @@ describe("contracts", () => {
     });
 
     expect(parsed.side).toBe("left");
+  });
+
+  it("parses extend-poll request", () => {
+    const parsed = parseExtendPollRequest({
+      clientId: "client-1",
+      pollMessageId: "poll-1",
+      pollOptions: ["Neu 1", "Neu 2"],
+    });
+
+    expect(parsed.pollOptions).toEqual(["Neu 1", "Neu 2"]);
+  });
+
+  it("requires at least one new option for extend-poll", () => {
+    expect(() =>
+      parseExtendPollRequest({
+        clientId: "client-1",
+        pollMessageId: "poll-1",
+        pollOptions: [],
+      }),
+    ).toThrow("Mindestens eine Umfrageoption ist erforderlich");
   });
 
   it("parses admin overview request", () => {

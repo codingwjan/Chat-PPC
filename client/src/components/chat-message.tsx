@@ -24,6 +24,7 @@ interface ChatMessageProps {
   onAnswerDraftChange: (messageId: string, value: string) => void;
   onSubmitAnswer: (messageId: string) => void;
   onVote: (messageId: string, optionIds: string[]) => void;
+  onExtendPoll?: (message: MessageDTO) => void;
   onDeleteMessage?: (messageId: string) => void;
   onStartReply?: (message: MessageDTO) => void;
   onOpenLightbox?: (url: string, alt?: string) => void;
@@ -370,6 +371,7 @@ function ChatMessageComponent({
   onAnswerDraftChange,
   onSubmitAnswer,
   onVote,
+  onExtendPoll,
   onDeleteMessage,
   onStartReply,
   onOpenLightbox,
@@ -435,6 +437,15 @@ function ChatMessageComponent({
                 </div>
                 <time className="shrink-0 text-xs text-slate-400" dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
               </div>
+              {onExtendPoll ? (
+                <button
+                  type="button"
+                  onClick={() => onExtendPoll(message)}
+                  className="mt-2 rounded-lg border border-sky-200 bg-sky-50 px-2.5 py-1 text-xs font-semibold text-sky-700 transition hover:bg-sky-100"
+                >
+                  Umfrage erweitern
+                </button>
+              ) : null}
               <p className="text-xs text-slate-400">
                 {pollSettings?.multiSelect
                   ? "Mehrfachauswahl aktiv - Klick aktualisiert deine Stimme sofort"

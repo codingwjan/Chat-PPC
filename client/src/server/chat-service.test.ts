@@ -50,6 +50,7 @@ import {
   __extractAiPollPayloadForTests,
   __resetAiQueueForTests,
   createMessage,
+  extendPoll,
   getChatBackground,
   loginUser,
   markUserOffline,
@@ -1359,6 +1360,95 @@ Alles klar, wir machen das sauber.
 
     expect(result.poll?.options.find((option) => option.id === "o2")?.votes).toBe(1);
     expect(prismaMock.pollChoiceVote.deleteMany).toHaveBeenCalled();
+  });
+
+  it("extends existing polls with additional options", async () => {
+    prismaMock.message.findUnique.mockResolvedValueOnce({
+      ...baseMessage({
+        id: "poll-extend-1",
+        type: MessageType.VOTING_POLL,
+        content: "Welche Farbe?",
+      }),
+      pollOptions: [
+        { id: "o1", label: "Rot", sortOrder: 0, votes: [] },
+        { id: "o2", label: "Blau", sortOrder: 1, votes: [] },
+      ],
+    });
+    prismaMock.message.update.mockResolvedValueOnce(
+      baseMessage({
+        id: "poll-extend-1",
+        type: MessageType.VOTING_POLL,
+        content: "Welche Farbe?",
+        pollOptions: [
+          { id: "o1", label: "Rot", sortOrder: 0, votes: [] },
+          { id: "o2", label: "Blau", sortOrder: 1, votes: [] },
+          { id: "o3", label: "Grün", sortOrder: 2, votes: [] },
+        ],
+      }),
+    );
+
+    const result = await extendPoll({
+      clientId: "client-1",
+      pollMessageId: "poll-extend-1",
+      pollOptions: ["Grün"],
+    });
+
+    expect(prismaMock.message.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "poll-extend-1" },
+        data: expect.objectContaining({
+          pollOptions: {
+            create: [{ label: "Grün", sortOrder: 2 }],
+          },
+        }),
+      }),
+    );
+    expect(result.poll?.options.map((option) => option.label)).toEqual(["Rot", "Blau", "Grün"]);
+    expect(publishMock).toHaveBeenCalledWith("poll.updated", expect.objectContaining({ id: "poll-extend-1" }));
+  });
+
+  it("rejects extending a poll with duplicate existing options", async () => {
+    prismaMock.message.findUnique.mockResolvedValueOnce({
+      ...baseMessage({
+        id: "poll-extend-2",
+        type: MessageType.VOTING_POLL,
+        content: "Welche Farbe?",
+      }),
+      pollOptions: [
+        { id: "o1", label: "Rot", sortOrder: 0, votes: [] },
+        { id: "o2", label: "Blau", sortOrder: 1, votes: [] },
+      ],
+    });
+
+    await expect(
+      extendPoll({
+        clientId: "client-1",
+        pollMessageId: "poll-extend-2",
+        pollOptions: ["Rot"],
+      }),
+    ).rejects.toThrow("Mindestens eine Option existiert bereits in der Umfrage");
+    expect(prismaMock.message.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects extending incompatible legacy polls without modern options", async () => {
+    prismaMock.message.findUnique.mockResolvedValueOnce(
+      baseMessage({
+        id: "poll-legacy",
+        type: MessageType.VOTING_POLL,
+        optionOne: "A",
+        optionTwo: "B",
+        pollOptions: [],
+      }),
+    );
+
+    await expect(
+      extendPoll({
+        clientId: "client-1",
+        pollMessageId: "poll-legacy",
+        pollOptions: ["C"],
+      }),
+    ).rejects.toThrow("Diese Umfrage kann nicht erweitert werden");
+    expect(prismaMock.message.update).not.toHaveBeenCalled();
   });
 
   it('emits "hat den Chat verlassen" when stale users are cleaned', async () => {

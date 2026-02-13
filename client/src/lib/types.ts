@@ -59,6 +59,12 @@ export interface VotePollRequest {
   optionIds?: string[];
 }
 
+export interface ExtendPollRequest {
+  clientId: string;
+  pollMessageId: string;
+  pollOptions: string[];
+}
+
 export type AdminActionType =
   | "reset_all"
   | "delete_all_messages"

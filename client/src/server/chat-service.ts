@@ -2111,6 +2111,69 @@ export async function votePoll(input: {
   return dto;
 }
 
+export async function extendPoll(input: {
+  clientId: string;
+  pollMessageId: string;
+  pollOptions: string[];
+}): Promise<MessageDTO> {
+  await getUserByClientId(input.clientId);
+
+  const poll = await prisma.message.findUnique({
+    where: { id: input.pollMessageId },
+    include: { questionMessage: true, author: true, pollOptions: { include: { votes: { include: { user: true } } } } },
+  });
+
+  assert(poll, "Umfrage nicht gefunden", 404);
+  assert(poll.type === MessageType.VOTING_POLL, "Nachricht ist keine Umfrage", 400);
+  assert(poll.pollOptions.length > 0, "Diese Umfrage kann nicht erweitert werden", 400);
+
+  const normalizedIncomingOptions = input.pollOptions.map((option) => option.trim()).filter(Boolean);
+  assert(normalizedIncomingOptions.length > 0, "Mindestens eine Umfrageoption ist erforderlich", 400);
+  assert(normalizedIncomingOptions.length <= 15, "Umfragen unterstützen bis zu 15 neue Optionen", 400);
+
+  const uniqueIncomingOptions = new Set(normalizedIncomingOptions.map((option) => option.toLowerCase()));
+  assert(
+    uniqueIncomingOptions.size === normalizedIncomingOptions.length,
+    "Neue Umfrageoptionen müssen eindeutig sein",
+    400,
+  );
+
+  const sortedOptions = [...poll.pollOptions].sort((a, b) => a.sortOrder - b.sortOrder);
+  const existingOptionLabels = new Set(sortedOptions.map((option) => option.label.trim().toLowerCase()));
+  assert(
+    normalizedIncomingOptions.every((option) => !existingOptionLabels.has(option.toLowerCase())),
+    "Mindestens eine Option existiert bereits in der Umfrage",
+    400,
+  );
+
+  assert(
+    sortedOptions.length + normalizedIncomingOptions.length <= 15,
+    "Umfragen unterstützen maximal 15 Optionen",
+    400,
+  );
+
+  const nextSortOrder = sortedOptions.length > 0
+    ? Math.max(...sortedOptions.map((option) => option.sortOrder)) + 1
+    : 0;
+
+  const updated = await prisma.message.update({
+    where: { id: poll.id },
+    data: {
+      pollOptions: {
+        create: normalizedIncomingOptions.map((label, index) => ({
+          label,
+          sortOrder: nextSortOrder + index,
+        })),
+      },
+    },
+    include: { questionMessage: true, author: true, pollOptions: { include: { votes: { include: { user: true } } } } },
+  });
+
+  const dto = mapMessage(updated);
+  publish("poll.updated", dto);
+  return dto;
+}
+
 async function assertDeveloperMode(input: { clientId: string; devAuthToken: string }) {
   const tokenValid = verifyDevAuthToken(input.devAuthToken, input.clientId);
   assert(tokenValid, "Entwicklermodus-Authentifizierung fehlgeschlagen. Bitte mit dem 16-stelligen Code neu anmelden.", 403);

@@ -7,6 +7,7 @@ const serviceMock = vi.hoisted(() => ({
   createMessage: vi.fn(),
   getMessages: vi.fn(),
   votePoll: vi.fn(),
+  extendPoll: vi.fn(),
   getChatBackground: vi.fn(),
   setChatBackground: vi.fn(),
   getAdminOverview: vi.fn(),
@@ -158,6 +159,24 @@ describe("api routes", () => {
     );
 
     expect(response.status).toBe(409);
+  });
+
+  it("extends existing polls", async () => {
+    serviceMock.extendPoll.mockResolvedValue({ id: "poll-1", type: "votingPoll" });
+    const { POST } = await import("@/app/api/polls/extend/route");
+
+    const response = await POST(
+      new Request("http://localhost/api/polls/extend", {
+        method: "POST",
+        body: JSON.stringify({
+          clientId: "c1",
+          pollMessageId: "poll-1",
+          pollOptions: ["Option C"],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
   });
 
   it("gets admin overview for developer mode", async () => {
