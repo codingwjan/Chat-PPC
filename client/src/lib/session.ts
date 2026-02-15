@@ -3,9 +3,13 @@ import { getDefaultProfilePicture as getDefaultAvatar } from "@/lib/default-avat
 const SESSION_KEY = "chatppc.session";
 
 export interface SessionState {
+  id?: string;
   clientId: string;
+  loginName?: string;
   username: string;
   profilePicture: string;
+  sessionToken?: string;
+  sessionExpiresAt?: string;
   devMode?: boolean;
   devAuthToken?: string;
 }
@@ -26,7 +30,13 @@ export function loadSession(): SessionState | null {
 
   try {
     const parsed = JSON.parse(raw) as SessionState;
-    if (!parsed.clientId || !parsed.username) {
+    if (!parsed.clientId || !parsed.username || !parsed.sessionToken || !parsed.sessionExpiresAt) {
+      return null;
+    }
+
+    const expiresAt = new Date(parsed.sessionExpiresAt);
+    if (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() < Date.now()) {
+      window.localStorage.removeItem(SESSION_KEY);
       return null;
     }
 

@@ -27,11 +27,12 @@ export async function GET(request: Request): Promise<NextResponse> {
     const limit = parseLimit(searchParams.get("limit"));
     const before = parseDate(searchParams.get("before"));
     const after = parseDate(searchParams.get("after"));
+    const viewerClientId = searchParams.get("clientId") || undefined;
     if (before && after) {
       throw new AppError("Verwende entweder before oder after, nicht beides", 400);
     }
 
-    const messages = await getMessages({ limit, before, after });
+    const messages = await getMessages({ limit, before, after, viewerClientId });
     return NextResponse.json(messages);
   } catch (error) {
     return handleApiError(error);

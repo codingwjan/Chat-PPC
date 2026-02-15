@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { processAiQueue } from "@/server/chat-service";
+import { processAiQueue, processTaggingQueue } from "@/server/chat-service";
 import { handleApiError } from "@/server/http";
 
 export const runtime = "nodejs";
@@ -33,7 +33,11 @@ export async function GET(request: Request): Promise<NextResponse> {
 
     const { searchParams } = new URL(request.url);
     const maxJobs = parseMaxJobs(searchParams.get("maxJobs"));
-    const result = await processAiQueue({ maxJobs });
+    const [ai, tagging] = await Promise.all([
+      processAiQueue({ maxJobs }),
+      processTaggingQueue({ maxJobs }),
+    ]);
+    const result = { ai, tagging };
     return NextResponse.json(result, {
       headers: { "Cache-Control": "no-store" },
     });
@@ -52,7 +56,11 @@ export async function POST(request: Request): Promise<NextResponse> {
     const maxJobs = Number.isFinite(payload?.maxJobs)
       ? Math.max(1, Math.min(20, Number(payload?.maxJobs)))
       : undefined;
-    const result = await processAiQueue({ maxJobs });
+    const [ai, tagging] = await Promise.all([
+      processAiQueue({ maxJobs }),
+      processTaggingQueue({ maxJobs }),
+    ]);
+    const result = { ai, tagging };
     return NextResponse.json(result, {
       headers: { "Cache-Control": "no-store" },
     });

@@ -17,15 +17,22 @@ function parseSnapshotLimit(request: Request): number {
   return Math.max(1, Math.min(MAX_SNAPSHOT_LIMIT, parsed));
 }
 
+function parseViewerClientId(request: Request): string | undefined {
+  const { searchParams } = new URL(request.url);
+  const value = searchParams.get("clientId")?.trim();
+  return value || undefined;
+}
+
 export async function GET(request: Request): Promise<Response> {
   const snapshotLimit = parseSnapshotLimit(request);
+  const viewerClientId = parseViewerClientId(request);
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       const push = (payload: string) => {
         controller.enqueue(encoder.encode(payload));
       };
 
-      const snapshot = await getSnapshot({ limit: snapshotLimit });
+      const snapshot = await getSnapshot({ limit: snapshotLimit, viewerClientId });
       push(formatSseEvent({ id: `${Date.now()}-snapshot`, event: "snapshot", data: snapshot }));
 
       const unsubscribe = subscribe((event) => {
