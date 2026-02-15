@@ -4,21 +4,43 @@ export type SseEventName =
   | "snapshot"
   | "presence.updated"
   | "message.created"
+  | "message.updated"
+  | "taste.updated"
+  | "reaction.received"
+  | "notification.created"
+  | "notification.read"
   | "poll.updated"
   | "user.updated"
   | "chat.background.updated"
   | "ai.status";
 
-export interface LoginRequest {
-  username: string;
-  clientId: string;
+export interface AuthSignUpRequest {
+  loginName: string;
+  password: string;
+  displayName: string;
   profilePicture?: string;
 }
 
-export interface LoginResponseDTO extends UserPresenceDTO {
+export interface AuthSignInRequest {
+  loginName: string;
+  password: string;
+}
+
+export interface RestoreSessionRequest {
+  clientId: string;
+  sessionToken: string;
+}
+
+export interface AuthSessionDTO extends UserPresenceDTO {
+  loginName: string;
+  sessionToken: string;
+  sessionExpiresAt: string;
   devMode: boolean;
   devAuthToken?: string;
 }
+
+export type LoginRequest = RestoreSessionRequest;
+export type LoginResponseDTO = AuthSessionDTO;
 
 export interface RenameUserRequest {
   clientId: string;
@@ -57,6 +79,14 @@ export interface VotePollRequest {
   pollMessageId: string;
   side?: "left" | "right";
   optionIds?: string[];
+}
+
+export type ReactionType = "LOL" | "FIRE" | "BASED" | "WTF" | "BIG_BRAIN";
+
+export interface ReactMessageRequest {
+  clientId: string;
+  messageId: string;
+  reaction: ReactionType;
 }
 
 export interface ExtendPollRequest {
@@ -98,6 +128,22 @@ export interface AdminActionResponse {
   overview: AdminOverviewDTO;
 }
 
+export interface DeveloperUserTasteDTO {
+  userId: string;
+  clientId: string;
+  username: string;
+  profilePicture: string;
+  windowDays: number;
+  updatedAt: string;
+  reactionsReceived: number;
+  reactionDistribution: Array<{ reaction: ReactionType; count: number }>;
+  topTags: Array<{ tag: string; score: number }>;
+}
+
+export interface DeveloperUserTasteListDTO {
+  items: DeveloperUserTasteDTO[];
+}
+
 export interface UserPresenceDTO {
   id: string;
   clientId: string;
@@ -106,6 +152,62 @@ export interface UserPresenceDTO {
   status: string;
   isOnline: boolean;
   lastSeenAt: string | null;
+}
+
+export type MessageTaggingStatus = "pending" | "processing" | "completed" | "failed";
+
+export interface ScoredTagDTO {
+  tag: string;
+  score: number;
+}
+
+export interface MessageTagCategorySetDTO {
+  themes: ScoredTagDTO[];
+  humor: ScoredTagDTO[];
+  art: ScoredTagDTO[];
+  tone: ScoredTagDTO[];
+  topics: ScoredTagDTO[];
+}
+
+export interface ImageTagCategorySetDTO {
+  themes: ScoredTagDTO[];
+  humor: ScoredTagDTO[];
+  art: ScoredTagDTO[];
+  tone: ScoredTagDTO[];
+  objects: ScoredTagDTO[];
+}
+
+export interface ImageTaggingDTO {
+  imageUrl: string;
+  tags: ScoredTagDTO[];
+  categories: ImageTagCategorySetDTO;
+}
+
+export interface MessageTaggingDTO {
+  status: MessageTaggingStatus;
+  provider: "grok";
+  model: string;
+  language: "en";
+  generatedAt?: string;
+  error?: string;
+  messageTags: ScoredTagDTO[];
+  categories: MessageTagCategorySetDTO;
+  images: ImageTaggingDTO[];
+}
+
+export interface MessageReactionsDTO {
+  total: number;
+  score: number;
+  viewerReaction: ReactionType | null;
+  summary: Array<{
+    reaction: ReactionType;
+    count: number;
+    users: Array<{
+      id: string;
+      username: string;
+      profilePicture: string;
+    }>;
+  }>;
 }
 
 export interface MessageDTO {
@@ -123,6 +225,8 @@ export interface MessageDTO {
   questionId?: string;
   oldusername?: string;
   oldmessage?: string;
+  tagging?: MessageTaggingDTO;
+  reactions?: MessageReactionsDTO;
   poll?: {
     options: Array<{
       id: string;
@@ -160,6 +264,134 @@ export interface MediaPageDTO {
   total: number;
 }
 
+export interface NotificationDTO {
+  id: string;
+  userId: string;
+  actorUserId?: string;
+  actorUsername: string;
+  messageId: string;
+  reaction: ReactionType;
+  messagePreview: string;
+  isRead: boolean;
+  createdAt: string;
+  readAt?: string;
+}
+
+export interface NotificationPageDTO {
+  items: NotificationDTO[];
+  unreadCount: number;
+}
+
+export interface MarkNotificationsReadRequest {
+  clientId: string;
+  notificationIds?: string[];
+}
+
+export interface UserTasteProfileDTO {
+  userId: string;
+  windowDays: number;
+  updatedAt: string;
+  reactionsReceived: number;
+  reactionDistribution: Array<{ reaction: ReactionType; count: number }>;
+  topTags: Array<{ tag: string; score: number }>;
+}
+
+export type TasteWindowKey = "7d" | "30d" | "all";
+
+export type TasteProfileEventType =
+  | "MESSAGE_CREATED"
+  | "MESSAGE_TAGGING_COMPLETED"
+  | "MESSAGE_TAGGING_FAILED"
+  | "REACTION_GIVEN"
+  | "REACTION_RECEIVED"
+  | "POLL_CREATED"
+  | "POLL_EXTENDED"
+  | "POLL_VOTE_GIVEN"
+  | "AI_MENTION_SENT";
+
+export interface TasteProfileDetailedDTO {
+  userId: string;
+  generatedAt: string;
+  windows: Record<TasteWindowKey, TasteWindowStatsDTO>;
+  transparency: {
+    eventRetentionDays: number;
+    rawEventsAvailableSince?: string;
+    sources: string[];
+  };
+}
+
+export interface TasteWindowStatsDTO {
+  reactions: {
+    givenTotal: number;
+    receivedTotal: number;
+    givenByType: Array<{ reaction: ReactionType; count: number }>;
+    receivedByType: Array<{ reaction: ReactionType; count: number }>;
+  };
+  interests: {
+    topTags: Array<{ tag: string; score: number }>;
+    topMessageCategories: {
+      themes: Array<{ tag: string; score: number }>;
+      humor: Array<{ tag: string; score: number }>;
+      art: Array<{ tag: string; score: number }>;
+      tone: Array<{ tag: string; score: number }>;
+      topics: Array<{ tag: string; score: number }>;
+    };
+    topImageCategories: {
+      themes: Array<{ tag: string; score: number }>;
+      humor: Array<{ tag: string; score: number }>;
+      art: Array<{ tag: string; score: number }>;
+      tone: Array<{ tag: string; score: number }>;
+      objects: Array<{ tag: string; score: number }>;
+    };
+  };
+  activity: {
+    postsTotal: number;
+    postsByType: Array<{ type: ChatMessageType; count: number }>;
+    postsWithImages: number;
+    pollVotesGiven: number;
+    pollsCreated: number;
+    pollsExtended: number;
+    aiMentions: { chatgpt: number; grok: number };
+    activeDays: number;
+    activityByWeekday: Array<{ weekday: number; count: number }>;
+    activityByHour: Array<{ hour: number; count: number }>;
+    tagging: {
+      completed: number;
+      failed: number;
+      pending: number;
+      coverage: number;
+    };
+  };
+  social: {
+    topInteractedUsers: Array<{
+      userId: string;
+      username: string;
+      profilePicture: string;
+      given: number;
+      received: number;
+      total: number;
+    }>;
+  };
+}
+
+export interface TasteProfileEventDTO {
+  id: string;
+  type: TasteProfileEventType;
+  createdAt: string;
+  messageId?: string;
+  relatedUserId?: string;
+  relatedUsername?: string;
+  reaction?: ReactionType;
+  preview?: string;
+  meta?: Record<string, unknown>;
+}
+
+export interface TasteProfileEventPageDTO {
+  items: TasteProfileEventDTO[];
+  nextCursor: string | null;
+  hasMore: boolean;
+}
+
 export interface LinkPreviewDTO {
   url: string;
   title: string | null;
@@ -192,6 +424,23 @@ export interface SseEventPayloadMap {
   snapshot: SnapshotDTO;
   "presence.updated": UserPresenceDTO;
   "message.created": MessageDTO;
+  "message.updated": MessageDTO;
+  "taste.updated": {
+    userId: string;
+    updatedAt: string;
+    reason: "message" | "reaction" | "poll" | "tagging";
+  };
+  "reaction.received": {
+    targetUserId?: string;
+    targetUsername: string;
+    fromUsername: string;
+    messageId: string;
+    reaction: ReactionType;
+    messagePreview: string;
+    createdAt: string;
+  };
+  "notification.created": NotificationDTO;
+  "notification.read": { userId: string; notificationIds?: string[] };
   "poll.updated": MessageDTO;
   "user.updated": UserPresenceDTO;
   "chat.background.updated": ChatBackgroundDTO;

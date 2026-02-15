@@ -13,19 +13,17 @@ import {
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactElement,
 } from "react";
 import { ChatComposer, type ComposerMode } from "@/components/chat-composer";
 import { ChatMessage } from "@/components/chat-message";
 import { ChatShellHeader } from "@/components/chat-shell-header";
 import { ChatShellSidebar } from "@/components/chat-shell-sidebar";
 import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
+import { TasteProfileModal } from "@/components/taste-profile-modal";
 import { UiToast } from "@/components/ui-toast";
 import { hasLeadingAiTag, toggleLeadingAiTag } from "@/lib/composer-ai-tags";
 import { apiJson } from "@/lib/http";
-import {
-  detectBrowserNotificationCapability,
-  type NotificationCapability,
-} from "@/lib/notification-capability";
 import {
   clearSession,
   getDefaultProfilePicture,
@@ -40,14 +38,21 @@ import type {
   AiStatusDTO,
   ChatBackgroundDTO,
   CreateMessageRequest,
+  DeveloperUserTasteListDTO,
   ExtendPollRequest,
   LoginResponseDTO,
   MediaItemDTO,
   MediaPageDTO,
   MessageDTO,
   MessagePageDTO,
+  ReactMessageRequest,
+  ReactionType,
   RenameUserRequest,
   SnapshotDTO,
+  TasteProfileDetailedDTO,
+  TasteProfileEventDTO,
+  TasteProfileEventPageDTO,
+  TasteWindowKey,
   UserPresenceDTO,
   VotePollRequest,
 } from "@/lib/types";
@@ -83,17 +88,24 @@ const DEFAULT_COMPOSER_HEIGHT_PX = 208;
 const COMPOSER_BOTTOM_GAP_PX = 16;
 const LAST_MESSAGE_EXTRA_CLEARANCE_PX = 28;
 const HARD_BOTTOM_ATTACH_PX = 8;
+const REACTION_OPTIONS: Array<{ reaction: ReactionType; emoji: string; label: string }> = [
+  { reaction: "LOL", emoji: "😂", label: "LOL" },
+  { reaction: "FIRE", emoji: "🔥", label: "FIRE" },
+  { reaction: "BASED", emoji: "🫡", label: "BASED" },
+  { reaction: "WTF", emoji: "💀", label: "WTF" },
+  { reaction: "BIG_BRAIN", emoji: "🧠", label: "BIG BRAIN" },
+];
+const AI_ASSISTANT_USERNAMES = new Set(["chatgpt", "grok"]);
+const REACTION_SCORE_BY_TYPE: Record<ReactionType, number> = {
+  LOL: 1.4,
+  FIRE: 1.2,
+  BASED: 1.1,
+  WTF: 1.0,
+  BIG_BRAIN: 1.2,
+};
 
 function hasChatGptMention(message: string): boolean {
   return /(^|\s)@chatgpt\b/i.test(message);
-}
-
-function hasGrokMention(message: string): boolean {
-  return /(^|\s)@grok\b/i.test(message);
-}
-
-function hasAiMention(message: string): boolean {
-  return hasChatGptMention(message) || hasGrokMention(message);
 }
 
 function mergeUser(users: UserPresenceDTO[], next: UserPresenceDTO): UserPresenceDTO[] {
@@ -104,7 +116,11 @@ function mergeUser(users: UserPresenceDTO[], next: UserPresenceDTO): UserPresenc
   return copy;
 }
 
-function mergeMessage(messages: MessageDTO[], next: MessageDTO): MessageDTO[] {
+function mergeMessage(
+  messages: MessageDTO[],
+  next: MessageDTO,
+  options: { preserveViewerReaction?: boolean } = {},
+): MessageDTO[] {
   const index = messages.findIndex((message) => message.id === next.id);
   if (index === -1) {
     return [...messages, next].sort(
@@ -112,12 +128,33 @@ function mergeMessage(messages: MessageDTO[], next: MessageDTO): MessageDTO[] {
     );
   }
   const copy = [...messages];
+  const previous = copy[index];
+  const preserveViewerReaction =
+    Boolean(options.preserveViewerReaction) &&
+    previous?.reactions
+    && next.reactions
+    && next.reactions.viewerReaction === null
+    && previous.reactions.viewerReaction !== null;
+  if (preserveViewerReaction && previous.reactions && next.reactions) {
+    copy[index] = {
+      ...next,
+      reactions: {
+        ...next.reactions,
+        viewerReaction: previous.reactions.viewerReaction,
+      },
+    };
+    return copy;
+  }
   copy[index] = next;
   return copy;
 }
 
-function mergeMessages(messages: MessageDTO[], incoming: MessageDTO[]): MessageDTO[] {
-  return incoming.reduce((current, message) => mergeMessage(current, message), messages);
+function mergeMessages(
+  messages: MessageDTO[],
+  incoming: MessageDTO[],
+  options: { preserveViewerReaction?: boolean } = {},
+): MessageDTO[] {
+  return incoming.reduce((current, message) => mergeMessage(current, message, options), messages);
 }
 
 function limitVisibleMessages(messages: MessageDTO[]): MessageDTO[] {
@@ -218,22 +255,63 @@ function applyOptimisticPollVote(
   return changed ? nextMessages : messages;
 }
 
-function syncProfilePictureForUser(messages: MessageDTO[], user: UserPresenceDTO): MessageDTO[] {
-  const normalizedUserAvatar = normalizeProfilePictureUrl(user.profilePicture);
-  const normalizedUsername = user.username.trim().toLowerCase();
+function applyOptimisticReaction(
+  messages: MessageDTO[],
+  input: {
+    messageId: string;
+    reaction: ReactionType;
+  },
+): MessageDTO[] {
   let changed = false;
-  const nextMessages = messages.map((message) => {
-    const matchesUserByAuthor = Boolean(message.authorId) && message.authorId === user.id;
-    const matchesUserByUsername = message.username.trim().toLowerCase() === normalizedUsername;
-    const matchesUser = matchesUserByAuthor || matchesUserByUsername;
-    const normalizedMessageAvatar = normalizeProfilePictureUrl(message.profilePicture);
 
-    if (!matchesUser || normalizedMessageAvatar === normalizedUserAvatar) {
-      return message;
+  const nextMessages = messages.map((message) => {
+    if (message.id !== input.messageId || !message.reactions) return message;
+
+    const summaryMap = new Map<ReactionType, number>(
+      REACTION_OPTIONS.map((option) => [option.reaction, 0]),
+    );
+    const usersMap = new Map<
+      ReactionType,
+      Array<{ id: string; username: string; profilePicture: string }>
+    >(REACTION_OPTIONS.map((option) => [option.reaction, []]));
+    for (const entry of message.reactions.summary) {
+      summaryMap.set(entry.reaction, entry.count);
+      usersMap.set(entry.reaction, entry.users);
     }
+
+    const currentReaction = message.reactions.viewerReaction;
+    const nextReaction = currentReaction === input.reaction ? null : input.reaction;
+
+    if (currentReaction) {
+      summaryMap.set(currentReaction, Math.max(0, (summaryMap.get(currentReaction) || 0) - 1));
+    }
+    if (nextReaction) {
+      summaryMap.set(nextReaction, (summaryMap.get(nextReaction) || 0) + 1);
+    }
+
+    const summary = REACTION_OPTIONS.map((option) => ({
+      reaction: option.reaction,
+      count: summaryMap.get(option.reaction) || 0,
+      users: usersMap.get(option.reaction) || [],
+    }));
+    const total = summary.reduce((sum, entry) => sum + entry.count, 0);
+    const score = Math.round(
+      summary.reduce((sum, entry) => sum + entry.count * REACTION_SCORE_BY_TYPE[entry.reaction], 0) * 100,
+    ) / 100;
+
     changed = true;
-    return { ...message, profilePicture: normalizedUserAvatar };
+    return {
+      ...message,
+      reactions: {
+        ...message.reactions,
+        viewerReaction: nextReaction,
+        total,
+        score,
+        summary,
+      },
+    };
   });
+
   return changed ? nextMessages : messages;
 }
 
@@ -321,6 +399,12 @@ function formatLastSeenStatus(timestamp: string | Date): string {
   return `zuletzt aktiv ${date.toLocaleTimeString("de-DE", LAST_SEEN_TIME_OPTIONS)}`;
 }
 
+function formatUpdatedAtShort(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "unbekannt";
+  return date.toLocaleString("de-DE");
+}
+
 function formatPresenceStatus(user: UserPresenceDTO): string {
   const explicitStatusRaw = user.status.trim();
   const explicitStatus = explicitStatusRaw.toLowerCase();
@@ -335,42 +419,17 @@ function formatPresenceStatus(user: UserPresenceDTO): string {
   return "online";
 }
 
-function describeNotificationState(capability: NotificationCapability): string {
-  if (capability.kind === "ios_home_screen_required") {
-    return "Auf iPhone/iPad funktionieren Browser-Benachrichtigungen nur als Home-Bildschirm-App. Nutze Teilen -> Zum Home-Bildschirm.";
-  }
-  if (capability.kind === "insecure_context") {
-    return "Benachrichtigungen sind nur über HTTPS verfügbar. Öffne ChatPPC über eine sichere URL.";
-  }
-  if (capability.kind === "unsupported") {
-    return "Dieser Browser unterstützt Web-Benachrichtigungen nicht.";
-  }
-  if (capability.permission === "denied") {
-    return "Benachrichtigungen sind blockiert. Aktiviere sie in den Browser-Einstellungen und versuche es erneut.";
-  }
-  if (capability.permission === "granted") {
-    return "Desktop-Benachrichtigungen für neue Nachrichten und Beitritte sind aktiviert.";
-  }
-  return "Aktiviere Desktop-Benachrichtigungen für neue Nachrichten und wenn jemand dem Chat beitritt.";
-}
+function isRightAlignedMessage(message: MessageDTO, currentUsername: string, currentUserId?: string): boolean {
+  if (currentUserId && message.authorId === currentUserId) return true;
 
-function notificationButtonLabel(capability: NotificationCapability): string {
-  if (capability.kind === "ios_home_screen_required") return "Home-Bildschirm nötig";
-  if (capability.kind === "insecure_context") return "HTTPS erforderlich";
-  if (capability.kind === "unsupported") return "Nicht unterstützt";
-  if (capability.permission === "granted") return "Benachrichtigungen aktiv";
-  return "Benachrichtigungen aktivieren";
-}
+  const viewerUsernameNormalized = currentUsername.trim().toLowerCase();
+  if (!viewerUsernameNormalized) return false;
 
-function isJoinSystemMessage(message: MessageDTO): boolean {
-  if (message.type !== "message" || message.username !== "System") return false;
-  const content = message.message.trim().toLowerCase();
-  return content.endsWith("joined the chat") || content.endsWith("ist dem chat beigetreten");
-}
+  const authorNameNormalized = message.username.trim().toLowerCase();
+  if (authorNameNormalized === viewerUsernameNormalized) return true;
 
-function shouldNotifyMessage(message: MessageDTO): boolean {
-  if (isJoinSystemMessage(message)) return true;
-  return message.type === "message" && message.username !== "System";
+  return AI_ASSISTANT_USERNAMES.has(authorNameNormalized)
+    && message.oldusername?.trim().toLowerCase() === viewerUsernameNormalized;
 }
 
 function buildDownloadFileName(alt: string): string {
@@ -410,6 +469,7 @@ function createDefaultAiStatus(): AiStatusDTO {
 
 interface MessageListProps {
   messages: MessageDTO[];
+  currentUserId?: string;
   currentUsername: string;
   isDeveloperMode: boolean;
   pendingDeliveries: Record<string, true>;
@@ -417,6 +477,7 @@ interface MessageListProps {
   onAnswerDraftChange: (messageId: string, value: string) => void;
   onSubmitAnswer: (messageId: string) => void;
   onVote: (messageId: string, optionIds: string[]) => void;
+  onReact: (messageId: string, reaction: ReactionType) => void;
   onExtendPoll: (message: MessageDTO) => void;
   onDeleteMessage: (messageId: string) => void;
   onStartReply: (message: MessageDTO) => void;
@@ -426,6 +487,7 @@ interface MessageListProps {
 
 const MessageList = memo(function MessageList({
   messages,
+  currentUserId,
   currentUsername,
   isDeveloperMode,
   pendingDeliveries,
@@ -433,36 +495,99 @@ const MessageList = memo(function MessageList({
   onAnswerDraftChange,
   onSubmitAnswer,
   onVote,
+  onReact,
   onExtendPoll,
   onDeleteMessage,
   onStartReply,
   onOpenLightbox,
   onRemixImage,
 }: MessageListProps) {
+  const messageById = new Map(messages.map((message) => [message.id, message] as const));
+  const roots: MessageDTO[] = [];
+  const childrenByRoot = new Map<string, MessageDTO[]>();
+
+  const resolveThreadRootId = (message: MessageDTO): string | null => {
+    if (!message.questionId) return null;
+
+    const visited = new Set<string>([message.id]);
+    let currentParentId: string | undefined = message.questionId;
+
+    while (currentParentId) {
+      if (visited.has(currentParentId)) return null;
+      visited.add(currentParentId);
+
+      const parent = messageById.get(currentParentId);
+      if (!parent) return null;
+      if (!parent.questionId) return parent.id;
+      currentParentId = parent.questionId;
+    }
+
+    return null;
+  };
+
+  for (const message of messages) {
+    const rootId = resolveThreadRootId(message);
+    if (rootId && rootId !== message.id) {
+      const threadMessages = childrenByRoot.get(rootId) || [];
+      threadMessages.push(message);
+      childrenByRoot.set(rootId, threadMessages);
+      continue;
+    }
+    roots.push(message);
+  }
+
+  const renderMessage = (message: MessageDTO) => {
+    return (
+      <ChatMessage
+        message={message}
+        currentUserId={currentUserId}
+        currentUsername={currentUsername}
+        isDeveloperMode={isDeveloperMode}
+        delivery={
+          pendingDeliveries[message.id] !== undefined
+            ? { status: "sending" }
+            : undefined
+        }
+        answerDraft={answerDrafts[message.id] || ""}
+        onAnswerDraftChange={onAnswerDraftChange}
+        onSubmitAnswer={onSubmitAnswer}
+        onVote={onVote}
+        onReact={onReact}
+        onExtendPoll={onExtendPoll}
+        onDeleteMessage={onDeleteMessage}
+        onStartReply={onStartReply}
+        onOpenLightbox={onOpenLightbox}
+        onRemixImage={onRemixImage}
+      />
+    );
+  };
+
+  const renderThread = (message: MessageDTO): ReactElement => {
+    const children = childrenByRoot.get(message.id) || [];
+    const isRightAligned = isRightAlignedMessage(message, currentUsername, currentUserId);
+    const threadRailClassName = isRightAligned
+      ? "mr-6 space-y-2 border-r border-slate-200 pr-3"
+      : "ml-6 space-y-2 border-l border-slate-200 pl-3";
+
+    return (
+      <div key={`thread-${message.id}`} className="space-y-2">
+        {renderMessage(message)}
+        {children.length > 0 ? (
+          <div className={threadRailClassName}>
+            {children.map((child) => (
+              <div key={`thread-child-${child.id}`} className="space-y-2">
+                {renderMessage(child)}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
   return (
     <>
-      {messages.map((message) => (
-        <ChatMessage
-          key={message.id}
-          message={message}
-          currentUsername={currentUsername}
-          isDeveloperMode={isDeveloperMode}
-          delivery={
-            pendingDeliveries[message.id] !== undefined
-              ? { status: "sending" }
-              : undefined
-          }
-          answerDraft={answerDrafts[message.id] || ""}
-          onAnswerDraftChange={onAnswerDraftChange}
-          onSubmitAnswer={onSubmitAnswer}
-          onVote={onVote}
-          onExtendPoll={onExtendPoll}
-          onDeleteMessage={onDeleteMessage}
-          onStartReply={onStartReply}
-          onOpenLightbox={onOpenLightbox}
-          onRemixImage={onRemixImage}
-        />
-      ))}
+      {roots.map((message) => renderThread(message))}
     </>
   );
 });
@@ -546,22 +671,26 @@ export function ChatApp() {
   const lastSentStatusRef = useRef<string>("");
   const prependAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const optimisticVoteRollbackRef = useRef<MessageDTO[] | null>(null);
+  const optimisticReactionRollbackRef = useRef<MessageDTO[] | null>(null);
   const draftBeforeHistoryRef = useRef("");
   const dragDepthRef = useRef(0);
   const messageInputLineHeightRef = useRef<number | null>(null);
   const messageInputResizeFrameRef = useRef<number | null>(null);
   const lightboxCopyResetTimeoutRef = useRef<number | null>(null);
+  const validationToastResetTimeoutRef = useRef<number | null>(null);
   const bottomStickFrameRef = useRef<number | null>(null);
   const previousScrollTopRef = useRef(0);
   const lastKnownScrollHeightRef = useRef(0);
-  const notificationCapabilityLoggedRef = useRef(false);
   const userDetachedFromBottomRef = useRef(false);
+  const tasteModalRefetchTimeoutRef = useRef<number | null>(null);
+  const tasteModalOpenRef = useRef(false);
 
   const [session, setSession] = useState<SessionState | null>(() => loadSession());
   const [users, setUsers] = useState<UserPresenceDTO[]>([]);
   const [messages, setMessages] = useState<MessageDTO[]>([]);
   const [messageWindowSize, setMessageWindowSize] = useState(MESSAGE_RENDER_WINDOW);
   const [error, setError] = useState<string | null>(null);
+  const [validationNotice, setValidationNotice] = useState<{ title: string; message: string } | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatusDTO>(() => createDefaultAiStatus());
   const [uploadingChat, setUploadingChat] = useState(false);
   const [uploadingBackground, setUploadingBackground] = useState(false);
@@ -583,10 +712,18 @@ export function ChatApp() {
     return !document.hidden;
   });
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [notificationCapability, setNotificationCapability] = useState<NotificationCapability>(
-    () => detectBrowserNotificationCapability(),
-  );
   const [adminOverview, setAdminOverview] = useState<AdminOverviewDTO | null>(null);
+  const [showTasteProfileModal, setShowTasteProfileModal] = useState(false);
+  const [tasteWindow, setTasteWindow] = useState<TasteWindowKey>("30d");
+  const [tasteProfileDetailed, setTasteProfileDetailed] = useState<TasteProfileDetailedDTO | null>(null);
+  const [tasteProfileEvents, setTasteProfileEvents] = useState<TasteProfileEventDTO[]>([]);
+  const [tasteEventsCursor, setTasteEventsCursor] = useState<string | null>(null);
+  const [tasteEventsHasMore, setTasteEventsHasMore] = useState(false);
+  const [tasteProfileLoading, setTasteProfileLoading] = useState(false);
+  const [tasteEventsLoading, setTasteEventsLoading] = useState(false);
+  const [tasteEventsLoadingMore, setTasteEventsLoadingMore] = useState(false);
+  const [tasteProfileError, setTasteProfileError] = useState<string | null>(null);
+  const [developerTasteProfiles, setDeveloperTasteProfiles] = useState<DeveloperUserTasteListDTO>({ items: [] });
   const [adminBusy, setAdminBusy] = useState(false);
   const [adminNotice, setAdminNotice] = useState<string | null>(null);
   const [showAdminPanel, setShowAdminPanel] = useState(false);
@@ -622,7 +759,6 @@ export function ChatApp() {
   const [profileDropActive, setProfileDropActive] = useState(false);
   const [composerHeightPx, setComposerHeightPx] = useState(DEFAULT_COMPOSER_HEIGHT_PX);
   const isDeveloperMode = Boolean(session?.devMode && session.devAuthToken);
-  const showNotificationPrompt = notificationCapability.kind !== "available" || notificationCapability.permission !== "granted";
 
   const sessionProfilePicture = useMemo(
     () => normalizeProfilePictureUrl(session?.profilePicture),
@@ -658,6 +794,15 @@ export function ChatApp() {
         })),
     ],
     [users, aiStatus],
+  );
+
+  const sidebarOnlineUsers = useMemo(
+    () =>
+      onlineUsers.filter((user) => {
+        const normalized = user.username.trim().toLowerCase();
+        return !(normalized === "developer" || normalized.startsWith("developer-"));
+      }),
+    [onlineUsers],
   );
 
   const filteredMentionUsers = useMemo(() => {
@@ -850,35 +995,6 @@ export function ChatApp() {
     }
   }, []);
 
-  const notifyMessages = useCallback(
-    (incoming: MessageDTO[]) => {
-      if (
-        notificationCapability.kind !== "available"
-        || notificationCapability.permission !== "granted"
-        || isLeavingRef.current
-      ) return;
-
-      const currentUsername = session?.username?.trim().toLowerCase() ?? "";
-
-      for (const payload of incoming) {
-        const isOwnByClientId = Boolean(session?.clientId) && payload.authorId === session?.clientId;
-        const isOwnByUsername = currentUsername.length > 0 && payload.username.trim().toLowerCase() === currentUsername;
-        if (isOwnByClientId || isOwnByUsername) continue;
-        if (!shouldNotifyMessage(payload)) continue;
-
-        const compactMessage = payload.message.replace(/\s+/g, " ").trim();
-        const title = isJoinSystemMessage(payload)
-          ? "Neue Anmeldung"
-          : `${payload.username}: ${compactMessage || "Neue Nachricht"}`;
-        new window.Notification(title, {
-          body: isJoinSystemMessage(payload) ? compactMessage : undefined,
-          icon: payload.profilePicture,
-        });
-      }
-    },
-    [notificationCapability.kind, notificationCapability.permission, session?.clientId, session?.username],
-  );
-
   const fetchMessagePage = useCallback(async (params: {
     limit?: number;
     before?: string;
@@ -886,10 +1002,13 @@ export function ChatApp() {
   }): Promise<MessagePageDTO> => {
     const searchParams = new URLSearchParams();
     searchParams.set("limit", String(params.limit ?? MESSAGE_PAGE_SIZE));
+    if (session?.clientId) {
+      searchParams.set("clientId", session.clientId);
+    }
     if (params.before) searchParams.set("before", params.before);
     if (params.after) searchParams.set("after", params.after);
     return apiJson<MessagePageDTO>(`/api/messages?${searchParams.toString()}`);
-  }, []);
+  }, [session?.clientId]);
 
   const fetchPresence = useCallback(async (): Promise<UserPresenceDTO[]> => {
     return apiJson<UserPresenceDTO[]>("/api/presence");
@@ -902,6 +1021,47 @@ export function ChatApp() {
   const fetchChatBackground = useCallback(async (): Promise<ChatBackgroundDTO> => {
     return apiJson<ChatBackgroundDTO>("/api/chat/background");
   }, []);
+
+  const fetchTasteProfileDetailed = useCallback(async (): Promise<TasteProfileDetailedDTO | null> => {
+    if (!session?.clientId) return null;
+    return apiJson<TasteProfileDetailedDTO>(
+      `/api/me/taste/profile?clientId=${encodeURIComponent(session.clientId)}`,
+      { cache: "no-store" },
+    );
+  }, [session?.clientId]);
+
+  const fetchTasteEventsPage = useCallback(async (input: {
+    limit?: number;
+    before?: string | null;
+  } = {}): Promise<TasteProfileEventPageDTO> => {
+    if (!session?.clientId) {
+      return { items: [], hasMore: false, nextCursor: null };
+    }
+    const searchParams = new URLSearchParams({
+      clientId: session.clientId,
+      limit: String(Math.max(1, Math.min(200, input.limit ?? 50))),
+    });
+    if (input.before) {
+      searchParams.set("before", input.before);
+    }
+    return apiJson<TasteProfileEventPageDTO>(`/api/me/taste/events?${searchParams.toString()}`, {
+      cache: "no-store",
+    });
+  }, [session?.clientId]);
+
+  const fetchDeveloperTasteProfiles = useCallback(async (): Promise<DeveloperUserTasteListDTO> => {
+    if (!session?.clientId || !session.devAuthToken) {
+      return { items: [] };
+    }
+    const searchParams = new URLSearchParams({
+      clientId: session.clientId,
+      devAuthToken: session.devAuthToken,
+      limit: "40",
+    });
+    return apiJson<DeveloperUserTasteListDTO>(`/api/admin/tastes?${searchParams.toString()}`, {
+      cache: "no-store",
+    });
+  }, [session?.clientId, session?.devAuthToken]);
 
   const hydrateMediaCache = useCallback(() => {
     if (typeof window === "undefined") return false;
@@ -1011,7 +1171,7 @@ export function ChatApp() {
   );
 
   const applyIncomingMessages = useCallback(
-    (incoming: MessageDTO[], options: { notify: boolean }) => {
+    (incoming: MessageDTO[], options: { notify: boolean; preserveViewerReaction?: boolean }) => {
       if (incoming.length === 0) return;
 
       const shouldStickToBottom = isAtBottomRef.current;
@@ -1022,15 +1182,13 @@ export function ChatApp() {
         setMessageWindowSize((current) => Math.min(MAX_VISIBLE_MESSAGES, current + fresh.length));
       }
 
-      setMessages((current) => limitVisibleMessages(mergeMessages(current, incoming)));
+      setMessages((current) =>
+        limitVisibleMessages(mergeMessages(current, incoming, { preserveViewerReaction: options.preserveViewerReaction })),
+      );
       updateLatestMessageCursor(incoming);
 
       for (const message of fresh) {
         knownMessageIdsRef.current.add(message.id);
-      }
-
-      if (options.notify && fresh.length > 0) {
-        notifyMessages(fresh);
       }
 
       if (showMedia && fresh.length > 0) {
@@ -1041,7 +1199,7 @@ export function ChatApp() {
         scheduleBottomStick();
       }
     },
-    [captureScrollAnchor, fetchMediaItems, notifyMessages, scheduleBottomStick, showMedia, updateLatestMessageCursor],
+    [captureScrollAnchor, fetchMediaItems, scheduleBottomStick, showMedia, updateLatestMessageCursor],
   );
 
   const applySnapshot = useCallback(
@@ -1131,16 +1289,19 @@ export function ChatApp() {
     const restored = await apiJson<LoginResponseDTO>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({
-        username: session.username,
         clientId: session.clientId,
-        profilePicture: normalizeProfilePictureUrl(session.profilePicture),
+        sessionToken: session.sessionToken,
       }),
     });
 
     const nextSession: SessionState = {
+      id: restored.id,
       clientId: restored.clientId,
+      loginName: restored.loginName,
       username: restored.username,
       profilePicture: restored.profilePicture || getDefaultProfilePicture(),
+      sessionToken: restored.sessionToken,
+      sessionExpiresAt: restored.sessionExpiresAt,
       devMode: restored.devMode || Boolean(session.devMode && session.devAuthToken),
       devAuthToken: restored.devAuthToken || session.devAuthToken,
     };
@@ -1152,6 +1313,8 @@ export function ChatApp() {
         current.clientId === nextSession.clientId &&
         current.username === nextSession.username &&
         current.profilePicture === nextSession.profilePicture &&
+        (current.sessionToken || "") === (nextSession.sessionToken || "") &&
+        (current.sessionExpiresAt || "") === (nextSession.sessionExpiresAt || "") &&
         Boolean(current.devMode) === Boolean(nextSession.devMode) &&
         (current.devAuthToken || "") === (nextSession.devAuthToken || "")
       ) {
@@ -1195,6 +1358,63 @@ export function ChatApp() {
     const overview = await apiJson<AdminOverviewDTO>(`/api/admin?${searchParams.toString()}`);
     setAdminOverview(overview);
   }, [session?.clientId, session?.devAuthToken]);
+
+  const refreshDeveloperData = useCallback(async () => {
+    const [, tastes] = await Promise.all([
+      fetchAdminOverview(),
+      fetchDeveloperTasteProfiles(),
+    ]);
+    setDeveloperTasteProfiles(tastes);
+  }, [fetchAdminOverview, fetchDeveloperTasteProfiles]);
+
+  const loadTasteProfileModalData = useCallback(async (): Promise<void> => {
+    if (!session?.clientId) return;
+    setTasteProfileError(null);
+    setTasteProfileLoading(true);
+    setTasteEventsLoading(true);
+    try {
+      const [profile, eventsPage] = await Promise.all([
+        fetchTasteProfileDetailed(),
+        fetchTasteEventsPage({ limit: 50 }),
+      ]);
+      setTasteProfileDetailed(profile);
+      setTasteProfileEvents(eventsPage.items);
+      setTasteEventsCursor(eventsPage.nextCursor);
+      setTasteEventsHasMore(eventsPage.hasMore);
+      setError(null);
+    } catch (tasteError) {
+      setTasteProfileError(
+        tasteError instanceof Error ? tasteError.message : "Taste-Profil konnte nicht geladen werden.",
+      );
+    } finally {
+      setTasteProfileLoading(false);
+      setTasteEventsLoading(false);
+    }
+  }, [fetchTasteEventsPage, fetchTasteProfileDetailed, session?.clientId]);
+
+  const loadMoreTasteProfileEvents = useCallback(async (): Promise<void> => {
+    if (!session?.clientId || !tasteEventsHasMore || !tasteEventsCursor) return;
+    setTasteEventsLoadingMore(true);
+    try {
+      const nextPage = await fetchTasteEventsPage({ limit: 50, before: tasteEventsCursor });
+      setTasteProfileEvents((current) => {
+        const known = new Set(current.map((item) => item.id));
+        const merged = [...current];
+        for (const item of nextPage.items) {
+          if (known.has(item.id)) continue;
+          known.add(item.id);
+          merged.push(item);
+        }
+        return merged;
+      });
+      setTasteEventsCursor(nextPage.nextCursor);
+      setTasteEventsHasMore(nextPage.hasMore);
+    } catch {
+      // Best effort.
+    } finally {
+      setTasteEventsLoadingMore(false);
+    }
+  }, [fetchTasteEventsPage, session?.clientId, tasteEventsCursor, tasteEventsHasMore]);
 
   const runAdminAction = useCallback(
     async (
@@ -1263,22 +1483,6 @@ export function ChatApp() {
       paddingBottom: `${dynamicPadding}px`,
     };
   }, [composerHeightPx]);
-
-  const refreshNotificationState = useCallback(() => {
-    setNotificationCapability(detectBrowserNotificationCapability());
-  }, []);
-
-  const requestNotificationPermission = useCallback(async (): Promise<void> => {
-    const capability = detectBrowserNotificationCapability();
-    setNotificationCapability(capability);
-
-    if (typeof window === "undefined" || capability.kind !== "available" || !capability.canRequest) {
-      return;
-    }
-
-    await window.Notification.requestPermission();
-    setNotificationCapability(detectBrowserNotificationCapability());
-  }, []);
 
   const pushPresenceStatus = useCallback(
     async (status: string): Promise<void> => {
@@ -1446,27 +1650,6 @@ export function ChatApp() {
   }, []);
 
   useEffect(() => {
-    refreshNotificationState();
-    window.addEventListener("focus", refreshNotificationState);
-    document.addEventListener("visibilitychange", refreshNotificationState);
-    return () => {
-      window.removeEventListener("focus", refreshNotificationState);
-      document.removeEventListener("visibilitychange", refreshNotificationState);
-    };
-  }, [refreshNotificationState]);
-
-  useEffect(() => {
-    if (!isDeveloperMode || notificationCapabilityLoggedRef.current) return;
-    notificationCapabilityLoggedRef.current = true;
-    console.info("[notifications] capability", {
-      kind: notificationCapability.kind,
-      permission: notificationCapability.permission,
-      isSecureContext: notificationCapability.isSecureContext,
-      isStandalone: notificationCapability.isStandalone,
-    });
-  }, [isDeveloperMode, notificationCapability]);
-
-  useEffect(() => {
     if (!session) return;
 
     const applyFocusState = (focused: boolean) => {
@@ -1576,6 +1759,7 @@ export function ChatApp() {
   useEffect(() => {
     if (!isDeveloperMode) {
       setAdminOverview(null);
+      setDeveloperTasteProfiles({ items: [] });
       return;
     }
 
@@ -1583,7 +1767,9 @@ export function ChatApp() {
 
     const loadOverview = async () => {
       try {
-        await fetchAdminOverview();
+        const [, tastes] = await Promise.all([fetchAdminOverview(), fetchDeveloperTasteProfiles()]);
+        if (cancelled) return;
+        setDeveloperTasteProfiles(tastes);
       } catch (overviewError) {
         if (!cancelled) {
           setError(overviewError instanceof Error ? overviewError.message : "Entwicklerwerkzeuge konnten nicht geladen werden.");
@@ -1596,12 +1782,43 @@ export function ChatApp() {
     return () => {
       cancelled = true;
     };
-  }, [fetchAdminOverview, isDeveloperMode]);
+  }, [fetchAdminOverview, fetchDeveloperTasteProfiles, isDeveloperMode]);
+
+  useEffect(() => {
+    if (!session?.clientId) {
+      setShowTasteProfileModal(false);
+      setTasteProfileDetailed(null);
+      setTasteProfileEvents([]);
+      setTasteEventsCursor(null);
+      setTasteEventsHasMore(false);
+      setTasteProfileError(null);
+    }
+  }, [session?.clientId]);
+
+  useEffect(() => {
+    tasteModalOpenRef.current = showTasteProfileModal;
+  }, [showTasteProfileModal]);
+
+  useEffect(() => {
+    if (!showTasteProfileModal || !session?.clientId) return;
+    void loadTasteProfileModalData();
+  }, [loadTasteProfileModalData, session?.clientId, showTasteProfileModal]);
+
+  useEffect(() => {
+    return () => {
+      if (tasteModalRefetchTimeoutRef.current !== null) {
+        window.clearTimeout(tasteModalRefetchTimeoutRef.current);
+        tasteModalRefetchTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!session) return;
 
-    const stream = new EventSource(`/api/stream?limit=${SNAPSHOT_LIMIT}`);
+    const stream = new EventSource(
+      `/api/stream?limit=${SNAPSHOT_LIMIT}&clientId=${encodeURIComponent(session.clientId)}`,
+    );
 
     const parseEvent = <TValue,>(event: MessageEvent<string>): TValue | null => {
       try {
@@ -1628,7 +1845,6 @@ export function ChatApp() {
       const parsed = parseEvent<UserPresenceDTO>(event as MessageEvent<string>);
       if (!parsed || isLeavingRef.current) return;
       setUsers((current) => mergeUser(current, parsed));
-      setMessages((current) => limitVisibleMessages(syncProfilePictureForUser(current, parsed)));
     };
 
     const onMessageCreated = (event: Event) => {
@@ -1637,10 +1853,68 @@ export function ChatApp() {
       applyIncomingMessages([parsed], { notify: true });
     };
 
+    const onMessageUpdated = (event: Event) => {
+      const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
+      if (!parsed || isLeavingRef.current) return;
+      applyIncomingMessages([parsed], { notify: false, preserveViewerReaction: true });
+    };
+
+    const onReactionReceived = (event: Event) => {
+      const parsed = parseEvent<{
+        targetUserId?: string;
+        targetUsername: string;
+        fromUsername: string;
+        messageId: string;
+        reaction: ReactionType;
+        messagePreview: string;
+        createdAt: string;
+      }>(event as MessageEvent<string>);
+      if (!parsed || isLeavingRef.current) return;
+
+      const currentUsername = session.username.trim().toLowerCase();
+      if (!currentUsername) return;
+      if (parsed.targetUserId && session.id && parsed.targetUserId !== session.id) return;
+      if (parsed.targetUsername.trim().toLowerCase() !== currentUsername) return;
+
+      const reactionMeta = REACTION_OPTIONS.find((entry) => entry.reaction === parsed.reaction);
+      const reactionLabel = reactionMeta ? `${reactionMeta.emoji} ${reactionMeta.label}` : parsed.reaction;
+      const message = `${parsed.fromUsername} hat mit ${reactionLabel} reagiert`;
+
+      setValidationNotice({
+        title: "Neue Reaktion",
+        message,
+      });
+
+      if (validationToastResetTimeoutRef.current !== null) {
+        window.clearTimeout(validationToastResetTimeoutRef.current);
+      }
+      validationToastResetTimeoutRef.current = window.setTimeout(() => {
+        setValidationNotice(null);
+        validationToastResetTimeoutRef.current = null;
+      }, 4_000);
+    };
+
+    const onTasteUpdated = (event: Event) => {
+      const parsed = parseEvent<{ userId: string; updatedAt: string; reason: "message" | "reaction" | "poll" | "tagging" }>(
+        event as MessageEvent<string>,
+      );
+      if (!parsed || !session.id) return;
+      if (parsed.userId !== session.id) return;
+
+      if (!tasteModalOpenRef.current) return;
+      if (tasteModalRefetchTimeoutRef.current !== null) {
+        window.clearTimeout(tasteModalRefetchTimeoutRef.current);
+      }
+      tasteModalRefetchTimeoutRef.current = window.setTimeout(() => {
+        void loadTasteProfileModalData();
+        tasteModalRefetchTimeoutRef.current = null;
+      }, 350);
+    };
+
     const onPollUpdated = (event: Event) => {
       const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
       if (!parsed || isLeavingRef.current) return;
-      applyIncomingMessages([parsed], { notify: false });
+      applyIncomingMessages([parsed], { notify: false, preserveViewerReaction: true });
     };
 
     const onAiStatus = (event: Event) => {
@@ -1667,6 +1941,9 @@ export function ChatApp() {
     stream.addEventListener("presence.updated", onPresenceUpdated);
     stream.addEventListener("user.updated", onUserUpdated);
     stream.addEventListener("message.created", onMessageCreated);
+    stream.addEventListener("message.updated", onMessageUpdated);
+    stream.addEventListener("reaction.received", onReactionReceived);
+    stream.addEventListener("taste.updated", onTasteUpdated);
     stream.addEventListener("poll.updated", onPollUpdated);
     stream.addEventListener("ai.status", onAiStatus);
     stream.addEventListener("chat.background.updated", onBackgroundUpdated);
@@ -1676,9 +1953,18 @@ export function ChatApp() {
     };
 
     return () => {
+      if (tasteModalRefetchTimeoutRef.current !== null) {
+        window.clearTimeout(tasteModalRefetchTimeoutRef.current);
+        tasteModalRefetchTimeoutRef.current = null;
+      }
       stream.close();
     };
-  }, [applyIncomingMessages, applySnapshot, session]);
+  }, [
+    applyIncomingMessages,
+    applySnapshot,
+    loadTasteProfileModalData,
+    session,
+  ]);
 
   useEffect(() => {
     if (!session) return;
@@ -1905,7 +2191,6 @@ export function ChatApp() {
       });
 
       setUsers((current) => mergeUser(current, user));
-      setMessages((current) => limitVisibleMessages(syncProfilePictureForUser(current, user)));
 
       const nextSession = {
         ...session,
@@ -1920,6 +2205,13 @@ export function ChatApp() {
 
   const sendMessage = useCallback(async (payload: CreateMessageRequest) => {
     return apiJson<MessageDTO>("/api/messages", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }, []);
+
+  const sendReaction = useCallback(async (payload: ReactMessageRequest) => {
+    return apiJson<MessageDTO>("/api/messages/react", {
       method: "POST",
       body: JSON.stringify(payload),
     });
@@ -1972,12 +2264,11 @@ export function ChatApp() {
           .join("\n");
         const combinedMessage = [content, uploadedImageMarkdown].filter(Boolean).join("\n\n");
         if (!combinedMessage) return;
-        const shouldTriggerAiWorker = hasAiMention(combinedMessage);
 
         tempMessageId = createTempMessageId();
         appendOptimisticMessage({
           id: tempMessageId,
-          authorId: session.clientId,
+          authorId: session.id,
           type: "message",
           message: combinedMessage,
           username: session.username,
@@ -2003,9 +2294,6 @@ export function ChatApp() {
         clearPendingDelivery(tempMessageId);
         removeOptimisticMessage(tempMessageId);
         applyIncomingMessages([created], { notify: false });
-        if (shouldTriggerAiWorker) {
-          kickOffAiWorker();
-        }
         setReplyTarget(null);
       } else if (composerMode === "question") {
         const content = questionDraft.trim();
@@ -2014,7 +2302,7 @@ export function ChatApp() {
         tempMessageId = createTempMessageId();
         appendOptimisticMessage({
           id: tempMessageId,
-          authorId: session.clientId,
+          authorId: session.id,
           type: "question",
           message: content,
           username: session.username,
@@ -2080,7 +2368,7 @@ export function ChatApp() {
           tempMessageId = createTempMessageId();
           appendOptimisticMessage({
             id: tempMessageId,
-            authorId: session.clientId,
+            authorId: session.id,
             type: "votingPoll",
             message: question,
             username: session.username,
@@ -2120,6 +2408,7 @@ export function ChatApp() {
         }
       }
 
+      kickOffAiWorker();
       setError(null);
     } catch (submitError) {
       if (tempMessageId) {
@@ -2160,7 +2449,7 @@ export function ChatApp() {
       const questionContext = messages.find((message) => message.id === questionMessageId);
       appendOptimisticMessage({
         id: tempMessageId,
-        authorId: session.clientId,
+        authorId: session.id,
         type: "answer",
         message: draft,
         username: session.username,
@@ -2247,6 +2536,40 @@ export function ChatApp() {
       }
     },
     [applyIncomingMessages, session, sessionProfilePicture],
+  );
+
+  const handleReact = useCallback(
+    async (messageId: string, reaction: ReactionType) => {
+      if (!session) return;
+      optimisticReactionRollbackRef.current = null;
+
+      setMessages((current) => {
+        const optimistic = applyOptimisticReaction(current, { messageId, reaction });
+        if (optimistic !== current) {
+          optimisticReactionRollbackRef.current = current;
+        }
+        return limitVisibleMessages(optimistic);
+      });
+
+      try {
+        const payload: ReactMessageRequest = {
+          clientId: session.clientId,
+          messageId,
+          reaction,
+        };
+        const updated = await sendReaction(payload);
+        optimisticReactionRollbackRef.current = null;
+        setMessages((current) => limitVisibleMessages(mergeMessage(current, updated)));
+      } catch (reactionError) {
+        const rollback = optimisticReactionRollbackRef.current;
+        if (rollback) {
+          setMessages(limitVisibleMessages(rollback));
+        }
+        optimisticReactionRollbackRef.current = null;
+        setError(reactionError instanceof Error ? reactionError.message : "Reaktion konnte nicht gespeichert werden.");
+      }
+    },
+    [sendReaction, session],
   );
 
   const handleExtendPoll = useCallback(
@@ -2460,6 +2783,10 @@ export function ChatApp() {
       if (lightboxCopyResetTimeoutRef.current !== null) {
         window.clearTimeout(lightboxCopyResetTimeoutRef.current);
         lightboxCopyResetTimeoutRef.current = null;
+      }
+      if (validationToastResetTimeoutRef.current !== null) {
+        window.clearTimeout(validationToastResetTimeoutRef.current);
+        validationToastResetTimeoutRef.current = null;
       }
     };
   }, []);
@@ -2744,6 +3071,10 @@ export function ChatApp() {
       keepalive: true,
     }).catch(() => {});
 
+    await fetch("/api/auth/session", {
+      method: "DELETE",
+    }).catch(() => {});
+
     clearSession();
     router.replace("/login");
   }
@@ -2753,13 +3084,10 @@ export function ChatApp() {
     setShowOnboarding(false);
   }
 
-  async function enableNotificationsFromOnboarding(): Promise<void> {
-    await requestNotificationPermission();
-    finishOnboarding();
-  }
-
-  async function enableNotificationsFromSidebar(): Promise<void> {
-    await requestNotificationPermission();
+  function openTasteProfileModal(): void {
+    setMobileSidebarOpen(false);
+    setTasteProfileError(null);
+    setShowTasteProfileModal(true);
   }
 
   function openProfileEditor(): void {
@@ -2803,21 +3131,6 @@ export function ChatApp() {
     </div>
   );
 
-  const notificationControls = showNotificationPrompt ? (
-    <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
-      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Benachrichtigungen</p>
-      <p className="mt-1 text-xs text-slate-600">{describeNotificationState(notificationCapability)}</p>
-      <button
-        type="button"
-        onClick={() => void enableNotificationsFromSidebar()}
-        disabled={!notificationCapability.canRequest}
-        className="mt-2 h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 disabled:opacity-60"
-      >
-        {notificationButtonLabel(notificationCapability)}
-      </button>
-    </div>
-  ) : undefined;
-
   const developerControls = isDeveloperMode ? (
     <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
       <div className="flex items-center justify-between gap-2">
@@ -2849,7 +3162,7 @@ export function ChatApp() {
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => void fetchAdminOverview()}
+              onClick={() => void refreshDeveloperData()}
               disabled={adminBusy}
               className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
             >
@@ -2944,6 +3257,49 @@ export function ChatApp() {
               </button>
             </div>
           </div>
+          <div className="rounded-lg border border-amber-200 bg-white p-2">
+            <p className="text-[11px] font-semibold text-amber-900">Interessen anderer Nutzer</p>
+            {developerTasteProfiles.items.length === 0 ? (
+              <p className="mt-1 text-[11px] text-amber-900/80">Noch keine Daten vorhanden.</p>
+            ) : (
+              <div className="mt-2 max-h-56 space-y-2 overflow-y-auto pr-1">
+                {developerTasteProfiles.items.map((item) => (
+                  <div key={item.userId} className="rounded-md border border-amber-100 bg-amber-50/40 p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="truncate text-[11px] font-semibold text-amber-900">{item.username}</p>
+                      <p className="text-[10px] text-amber-900/80">{item.reactionsReceived} Reaktionen</p>
+                    </div>
+                    <p className="mt-0.5 text-[10px] text-amber-900/80">
+                      Aktualisiert: {formatUpdatedAtShort(item.updatedAt)}
+                    </p>
+                    {item.topTags.length > 0 ? (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {item.topTags.slice(0, 8).map((tag) => (
+                          <span key={`${item.userId}-${tag.tag}`} className="rounded-full border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] text-amber-900">
+                            {tag.tag}
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-1 text-[10px] text-amber-900/80">Noch keine Top-Tags.</p>
+                    )}
+                    {item.reactionDistribution.length > 0 ? (
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        {item.reactionDistribution.map((entry) => (
+                          <span
+                            key={`${item.userId}-${entry.reaction}`}
+                            className="rounded-full border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] text-amber-900"
+                          >
+                            {entry.reaction}: {entry.count}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           {adminNotice ? <p className="text-[11px] font-medium text-amber-900">{adminNotice}</p> : null}
         </div>
       ) : null}
@@ -2965,8 +3321,9 @@ export function ChatApp() {
         statusLabel={isDeveloperMode ? "Entwicklermodus" : "online"}
         onOpenProfileEditor={openProfileEditor}
         onLogout={() => void logout()}
-        onlineUsersContent={<OnlineUsersList users={onlineUsers} avatarSizeClassName="h-11 w-11" onOpenLightbox={handleOpenLightbox} />}
-        notificationContent={notificationControls}
+        onlineUsersContent={
+          <OnlineUsersList users={sidebarOnlineUsers} avatarSizeClassName="h-11 w-11" onOpenLightbox={handleOpenLightbox} />
+        }
         backgroundContent={backgroundControls}
         developerContent={developerControls}
       />
@@ -2981,6 +3338,7 @@ export function ChatApp() {
           onOpenProfileEditor={openProfileEditor}
           onOpenSidebar={() => setMobileSidebarOpen(true)}
           onOpenMedia={() => setShowMedia(true)}
+          onOpenTasteProfile={openTasteProfileModal}
         />
 
         <section
@@ -3031,6 +3389,7 @@ export function ChatApp() {
             <div className="space-y-3">
               <MessageList
                 messages={visibleMessages}
+                currentUserId={session.id}
                 currentUsername={session.username}
                 isDeveloperMode={isDeveloperMode}
                 pendingDeliveries={pendingDeliveries}
@@ -3038,6 +3397,7 @@ export function ChatApp() {
                 onAnswerDraftChange={handleAnswerDraftChange}
                 onSubmitAnswer={submitAnswer}
                 onVote={handleVote}
+                onReact={handleReact}
                 onExtendPoll={handleExtendPoll}
                 onDeleteMessage={handleDeleteMessage}
                 onStartReply={handleStartReply}
@@ -3145,6 +3505,35 @@ export function ChatApp() {
         message={error || ""}
         tone="error"
         onClose={() => setError(null)}
+      />
+
+      <UiToast
+        show={Boolean(validationNotice)}
+        title={validationNotice?.title}
+        message={validationNotice?.message || ""}
+        tone="info"
+        onClose={() => {
+          if (validationToastResetTimeoutRef.current !== null) {
+            window.clearTimeout(validationToastResetTimeoutRef.current);
+            validationToastResetTimeoutRef.current = null;
+          }
+          setValidationNotice(null);
+        }}
+      />
+
+      <TasteProfileModal
+        open={showTasteProfileModal}
+        onClose={() => setShowTasteProfileModal(false)}
+        profile={tasteProfileDetailed}
+        events={tasteProfileEvents}
+        selectedWindow={tasteWindow}
+        onWindowChange={setTasteWindow}
+        loadingProfile={tasteProfileLoading}
+        loadingEvents={tasteEventsLoading}
+        loadingMoreEvents={tasteEventsLoadingMore}
+        hasMoreEvents={tasteEventsHasMore}
+        onLoadMoreEvents={() => void loadMoreTasteProfileEvents()}
+        error={tasteProfileError}
       />
 
       <input
@@ -3345,27 +3734,15 @@ export function ChatApp() {
               <p>3. Teile Bilder und GIFs per Drag-and-drop.</p>
               <p>4. Erwähne <span className="font-semibold text-slate-900">@chatgpt</span> oder <span className="font-semibold text-slate-900">@grok</span>, wenn du KI-Antworten möchtest.</p>
             </div>
-            <div className="mt-5 rounded-2xl border border-sky-100 bg-sky-50 p-3 text-sm text-sky-900">
-              Nächster Schritt: Benachrichtigungen aktivieren, damit du nichts verpasst.
-            </div>
             <div className="mt-5 flex flex-wrap gap-2">
               <button
                 type="button"
-                onClick={() => void enableNotificationsFromOnboarding()}
-                disabled={!notificationCapability.canRequest}
+                onClick={finishOnboarding}
                 className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
               >
-                {notificationButtonLabel(notificationCapability)}
-              </button>
-              <button
-                type="button"
-                onClick={finishOnboarding}
-                className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-              >
-                Jetzt ohne Benachrichtigungen fortfahren
+                Los geht&apos;s
               </button>
             </div>
-            <p className="mt-3 text-xs text-slate-500">{describeNotificationState(notificationCapability)}</p>
           </div>
         </div>
       ) : null}

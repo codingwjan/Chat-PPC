@@ -13,7 +13,6 @@ interface ChatShellSidebarProps {
   statusLabel: string;
   onOpenProfileEditor: () => void;
   onlineUsersContent: ReactNode;
-  notificationContent?: ReactNode;
   backgroundContent?: ReactNode;
   developerContent?: ReactNode;
   onLogout: () => void;
@@ -25,7 +24,6 @@ function SidebarBody({
   statusLabel,
   onOpenProfileEditor,
   onlineUsersContent,
-  notificationContent,
   backgroundContent,
   developerContent,
   onLogout,
@@ -63,7 +61,6 @@ function SidebarBody({
       </button>
 
       {backgroundContent}
-      {notificationContent}
       {developerContent}
 
       <div className="mt-1 min-h-0 flex-1 overflow-y-auto [overscroll-behavior:contain] [scrollbar-gutter:stable]">
@@ -89,7 +86,6 @@ export function ChatShellSidebar({
   statusLabel,
   onOpenProfileEditor,
   onlineUsersContent,
-  notificationContent,
   backgroundContent,
   developerContent,
   onLogout,
@@ -123,7 +119,6 @@ export function ChatShellSidebar({
                 statusLabel={statusLabel}
                 onOpenProfileEditor={onOpenProfileEditor}
                 onlineUsersContent={onlineUsersContent}
-                notificationContent={notificationContent}
                 backgroundContent={backgroundContent}
                 developerContent={developerContent}
                 onLogout={onLogout}
@@ -140,7 +135,6 @@ export function ChatShellSidebar({
           statusLabel={statusLabel}
           onOpenProfileEditor={onOpenProfileEditor}
           onlineUsersContent={onlineUsersContent}
-          notificationContent={notificationContent}
           backgroundContent={backgroundContent}
           developerContent={developerContent}
           onLogout={onLogout}

@@ -2,10 +2,14 @@ import { z } from "zod";
 import type {
   AdminActionRequest,
   AdminOverviewRequest,
+  AuthSignInRequest,
+  AuthSignUpRequest,
   CreateMessageRequest,
   ExtendPollRequest,
   LoginRequest,
+  MarkNotificationsReadRequest,
   PresencePingRequest,
+  ReactMessageRequest,
   RenameUserRequest,
   TypingRequest,
   UpdateChatBackgroundRequest,
@@ -55,9 +59,24 @@ function externalUrl(field: string) {
 }
 
 const loginSchema = z.object({
-  username: text("username").min(3, "username muss mindestens 3 Zeichen lang sein"),
   clientId: text("clientId"),
+  sessionToken: text("sessionToken"),
+});
+
+const authSignUpSchema = z.object({
+  loginName: text("loginName")
+    .toLowerCase()
+    .regex(/^[a-z0-9._-]{3,32}$/, "loginName muss 3-32 Zeichen haben (a-z, 0-9, ., _, -)"),
+  password: text("password").min(8, "password muss mindestens 8 Zeichen lang sein"),
+  displayName: text("displayName").min(3, "displayName muss mindestens 3 Zeichen lang sein"),
   profilePicture: profilePictureUrl("profilePicture").optional(),
+});
+
+const authSignInSchema = z.object({
+  loginName: text("loginName")
+    .toLowerCase()
+    .regex(/^[a-z0-9._-]{3,32}$/, "loginName muss 3-32 Zeichen haben (a-z, 0-9, ., _, -)"),
+  password: text("password").min(8, "password muss mindestens 8 Zeichen lang sein"),
 });
 
 const renameSchema = z.object({
@@ -176,9 +195,34 @@ const extendPollSchema = z.object({
     .max(15, "Umfragen unterstützen bis zu 15 neue Optionen"),
 });
 
+const reactMessageSchema = z.object({
+  clientId: text("clientId"),
+  messageId: text("messageId"),
+  reaction: z.enum(["LOL", "FIRE", "BASED", "WTF", "BIG_BRAIN"]),
+});
+
+const markNotificationsReadSchema = z.object({
+  clientId: text("clientId"),
+  notificationIds: z.array(text("notificationIds[]")).max(100).optional(),
+});
+
+const tasteProfileQuerySchema = z.object({
+  clientId: text("clientId"),
+});
+
+const tasteEventsQuerySchema = z.object({
+  clientId: text("clientId"),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  before: z.string().trim().optional(),
+});
+
 const adminOverviewSchema = z.object({
   clientId: text("clientId"),
   devAuthToken: text("devAuthToken"),
+});
+
+const adminTasteQuerySchema = adminOverviewSchema.extend({
+  limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
 const adminActionSchema = adminOverviewSchema
@@ -225,6 +269,14 @@ export function parseLoginRequest(payload: unknown): LoginRequest {
   return parseOrThrow(loginSchema, payload);
 }
 
+export function parseAuthSignUpRequest(payload: unknown): AuthSignUpRequest {
+  return parseOrThrow(authSignUpSchema, payload);
+}
+
+export function parseAuthSignInRequest(payload: unknown): AuthSignInRequest {
+  return parseOrThrow(authSignInSchema, payload);
+}
+
 export function parseRenameUserRequest(payload: unknown): RenameUserRequest {
   return parseOrThrow(renameSchema, payload);
 }
@@ -253,8 +305,36 @@ export function parseExtendPollRequest(payload: unknown): ExtendPollRequest {
   return parseOrThrow(extendPollSchema, payload);
 }
 
+export function parseReactMessageRequest(payload: unknown): ReactMessageRequest {
+  return parseOrThrow(reactMessageSchema, payload);
+}
+
+export function parseMarkNotificationsReadRequest(payload: unknown): MarkNotificationsReadRequest {
+  return parseOrThrow(markNotificationsReadSchema, payload);
+}
+
+export function parseTasteProfileQueryRequest(payload: unknown): { clientId: string } {
+  return parseOrThrow(tasteProfileQuerySchema, payload);
+}
+
+export function parseTasteEventsQueryRequest(payload: unknown): {
+  clientId: string;
+  limit?: number;
+  before?: string;
+} {
+  return parseOrThrow(tasteEventsQuerySchema, payload);
+}
+
 export function parseAdminOverviewRequest(payload: unknown): AdminOverviewRequest {
   return parseOrThrow(adminOverviewSchema, payload);
+}
+
+export function parseAdminTasteQueryRequest(payload: unknown): {
+  clientId: string;
+  devAuthToken: string;
+  limit?: number;
+} {
+  return parseOrThrow(adminTasteQuerySchema, payload);
 }
 
 export function parseAdminActionRequest(payload: unknown): AdminActionRequest {
