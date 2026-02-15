@@ -21,6 +21,7 @@ interface TasteProfileModalProps {
 type TasteTabKey = "overview" | "interests" | "activity" | "raw";
 
 const REACTION_LABELS: Record<ReactionType, string> = {
+  LIKE: "❤️ Like",
   LOL: "😂 LOL",
   FIRE: "🔥 FIRE",
   BASED: "🫡 BASED",

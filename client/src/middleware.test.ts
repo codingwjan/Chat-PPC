@@ -6,8 +6,8 @@ describe("middleware auth routing", () => {
     expect(resolveAuthRedirect("/", true)).toBe("/chat");
   });
 
-  it("redirects root to login when auth cookie is missing", () => {
-    expect(resolveAuthRedirect("/", false)).toBe("/login");
+  it("redirects root to signup when auth cookie is missing", () => {
+    expect(resolveAuthRedirect("/", false)).toBe("/signup");
   });
 
   it("redirects chat routes to login when auth cookie is missing", () => {

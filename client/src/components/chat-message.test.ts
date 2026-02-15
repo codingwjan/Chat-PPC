@@ -17,6 +17,7 @@ function createBaseMessage(overrides: Partial<MessageDTO> = {}): MessageDTO {
       score: 0,
       viewerReaction: null,
       summary: [
+        { reaction: "LIKE", count: 0, users: [] },
         { reaction: "LOL", count: 0, users: [] },
         { reaction: "FIRE", count: 0, users: [] },
         { reaction: "BASED", count: 0, users: [] },
@@ -74,6 +75,7 @@ describe("ChatMessage rendering", () => {
 
     const html = renderMessage(systemMessage, { withReactions: true });
     expect(html).toContain("alice ist dem Chat beigetreten");
+    expect(html).toContain("Like");
     expect(html).toContain("LOL");
     expect(html).toContain("FIRE");
     expect(html).toContain("BASED");
@@ -90,6 +92,7 @@ describe("ChatMessage rendering", () => {
         score: 2,
         viewerReaction: "LOL",
         summary: [
+          { reaction: "LIKE", count: 0, users: [] },
           { reaction: "LOL", count: 2, users: [{ id: "u1", username: "bob", profilePicture: "/bob.png" }] },
           { reaction: "FIRE", count: 0, users: [] },
           { reaction: "BASED", count: 0, users: [] },
@@ -126,6 +129,30 @@ describe("ChatMessage rendering", () => {
     expect(html).toContain("justify-end");
   });
 
+  it("zeigt Reply-Kontext bei gethreadeten Umfragen", () => {
+    const pollMessage = createBaseMessage({
+      type: "votingPoll",
+      message: "Team-Lunch?",
+      questionId: "root-1",
+      oldusername: "alice",
+      oldmessage: "Lass uns abstimmen",
+      poll: {
+        options: [
+          { id: "o1", label: "Pizza", votes: 0, voters: [] },
+          { id: "o2", label: "Sushi", votes: 0, voters: [] },
+        ],
+        settings: {
+          multiSelect: false,
+          allowVoteChange: true,
+        },
+      },
+    });
+    const html = renderMessage(pollMessage, { withReactions: true });
+    expect(html).toContain("Antwort auf");
+    expect(html).toContain("Lass uns abstimmen");
+    expect(html).toContain("von alice");
+  });
+
   it("keeps other AI replies on the left", () => {
     const aiReply = createBaseMessage({
       username: "ChatGPT",
@@ -146,6 +173,68 @@ describe("ChatMessage rendering", () => {
     });
     const html = renderMessage(renamedOldMessage);
     expect(html).toContain("justify-end");
+  });
+
+  it("zeigt Reaktions-Namen nur auf eigenen Nachrichten", () => {
+    const ownMessage = createBaseMessage({
+      authorId: "user-bob",
+      username: "bob",
+      reactions: {
+        total: 2,
+        score: 2,
+        viewerReaction: null,
+        summary: [
+          { reaction: "LIKE", count: 0, users: [] },
+          {
+            reaction: "LOL",
+            count: 2,
+            users: [
+              { id: "u1", username: "bob", profilePicture: "/bob.png" },
+              { id: "u2", username: "alice", profilePicture: "/alice.png" },
+            ],
+          },
+          { reaction: "FIRE", count: 0, users: [] },
+          { reaction: "BASED", count: 0, users: [] },
+          { reaction: "WTF", count: 0, users: [] },
+          { reaction: "BIG_BRAIN", count: 0, users: [] },
+        ],
+      },
+    });
+
+    const html = renderMessage(ownMessage, { withReactions: true });
+    expect(html).toContain("LOL: bob, alice");
+  });
+
+  it("blendet Reaktions-Namen auf fremden Nachrichten aus, zeigt aber die Anzahl", () => {
+    const foreignMessage = createBaseMessage({
+      authorId: "user-alice",
+      username: "alice",
+      reactions: {
+        total: 17,
+        score: 17,
+        viewerReaction: null,
+        summary: [
+          { reaction: "LIKE", count: 0, users: [] },
+          {
+            reaction: "LOL",
+            count: 17,
+            users: [
+              { id: "u1", username: "bob", profilePicture: "/bob.png" },
+              { id: "u2", username: "carol", profilePicture: "/carol.png" },
+            ],
+          },
+          { reaction: "FIRE", count: 0, users: [] },
+          { reaction: "BASED", count: 0, users: [] },
+          { reaction: "WTF", count: 0, users: [] },
+          { reaction: "BIG_BRAIN", count: 0, users: [] },
+        ],
+      },
+    });
+
+    const html = renderMessage(foreignMessage, { withReactions: true });
+    expect(html).toContain(">17<");
+    expect(html).not.toContain("LOL: bob");
+    expect(html).not.toContain("LOL: bob, carol");
   });
 
   it("begrenzt Kategorie-Tags in der Dev-Ansicht auf maximal 8", () => {

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   parseAdminActionRequest,
   parseAdminOverviewRequest,
+  parseAdminResetUserPasswordRequest,
   parseAdminTasteQueryRequest,
+  parseAdminUsersQueryRequest,
   parseAuthSignInRequest,
   parseAuthSignUpRequest,
   parseCreateMessageRequest,
@@ -215,5 +217,25 @@ describe("contracts", () => {
         action: "delete_user",
       }),
     ).toThrow("targetUsername ist für delete_user erforderlich");
+  });
+
+  it("parses admin users query request", () => {
+    const parsed = parseAdminUsersQueryRequest({
+      clientId: "client-1",
+      devAuthToken: "dev-token",
+    });
+
+    expect(parsed.clientId).toBe("client-1");
+  });
+
+  it("parses admin password reset request", () => {
+    const parsed = parseAdminResetUserPasswordRequest({
+      clientId: "client-1",
+      devAuthToken: "dev-token",
+      targetUserId: "user-1",
+      newPassword: "supersecure123",
+    });
+
+    expect(parsed.targetUserId).toBe("user-1");
   });
 });

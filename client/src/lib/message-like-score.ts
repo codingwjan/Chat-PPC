@@ -240,6 +240,7 @@ export function createEmptyReactionSummary(): Array<{
   users: Array<{ id: string; username: string; profilePicture: string }>;
 }> {
   return [
+    { reaction: "LIKE", count: 0, users: [] },
     { reaction: "LOL", count: 0, users: [] },
     { reaction: "FIRE", count: 0, users: [] },
     { reaction: "BASED", count: 0, users: [] },

@@ -1,5 +1,7 @@
 import { MessageType } from "@prisma/client";
+import { scryptSync } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { encryptLoginName, hashLoginNameLookup } from "@/server/login-name-crypto";
 
 const prismaMock = vi.hoisted(() => ({
   blacklistEntry: { findUnique: vi.fn() },
@@ -92,6 +94,8 @@ import {
   pingPresence,
   reactToMessage,
   renameUser,
+  restoreSession,
+  signInAccount,
   setChatBackground,
   votePoll,
 } from "@/server/chat-service";
@@ -147,6 +151,12 @@ function baseReaction(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function makePasswordHash(password: string): string {
+  const salt = "testsalt";
+  const hash = scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
+}
+
 describe("chat service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -183,6 +193,7 @@ describe("chat service", () => {
       lastSeenAt: null,
     });
     prismaMock.message.create.mockResolvedValue(baseMessage());
+    prismaMock.message.findUnique.mockResolvedValue(null);
     prismaMock.message.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.message.findMany.mockResolvedValue([]);
     prismaMock.pollChoiceVote.findMany.mockResolvedValue([]);
@@ -352,7 +363,7 @@ Abstimmen und begründen.
     );
   });
 
-  it('posts "ist dem Chat beigetreten" system message on login', async () => {
+  it('posts "ist dem Chat beigetreten" system message when legacy account is created', async () => {
     prismaMock.user.findUnique.mockResolvedValueOnce(null);
     prismaMock.user.upsert.mockResolvedValue({
       id: "user-id",
@@ -378,9 +389,51 @@ Abstimmen und begründen.
         data: expect.objectContaining({
           content: "tester ist dem Chat beigetreten",
           authorName: "System",
+          authorId: "user-id",
         }),
       }),
     );
+  });
+
+  it("continues legacy login when system message columns are missing", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce(null);
+    prismaMock.user.upsert.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.message.create
+      .mockRejectedValueOnce(new Error("The column `(not available)` does not exist in the current database."))
+      .mockResolvedValueOnce({ id: "sys-join-fallback" });
+
+    await expect(loginUser({ username: "tester", clientId: "client-1" })).resolves.toMatchObject({
+      username: "tester",
+      clientId: "client-1",
+    });
+    expect(prismaMock.message.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not post system message on legacy login of an existing account", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      isOnline: false,
+    });
+    prismaMock.user.upsert.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+
+    await loginUser({ username: "tester", clientId: "client-1" });
+
+    expect(prismaMock.message.create).not.toHaveBeenCalled();
   });
 
   it("allows username reuse when previous owner is offline", async () => {
@@ -439,6 +492,207 @@ Abstimmen und begründen.
     );
   });
 
+  it("signs in with encrypted login lookup", async () => {
+    const encrypted = encryptLoginName("alice.login");
+    const lookup = hashLoginNameLookup("alice.login");
+    prismaMock.user.findFirst.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: null,
+      loginNameEncrypted: encrypted,
+      loginNameLookup: lookup,
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: false,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: null,
+      loginNameEncrypted: encrypted,
+      loginNameLookup: lookup,
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+      createdAt: new Date("2026-02-10T09:00:00.000Z"),
+      updatedAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    const result = await signInAccount({
+      loginName: "alice.login",
+      password: "supersecure123",
+    });
+
+    expect(result.clientId).toBe("client-1");
+    expect(result.loginName).toBe("alice.login");
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.not.objectContaining({
+          loginName: null,
+        }),
+      }),
+    );
+  });
+
+  it("falls back to legacy sign-in when encrypted login columns are missing", async () => {
+    prismaMock.user.findFirst
+      .mockRejectedValueOnce(new Error("The column `(not available)` does not exist in the current database."))
+      .mockResolvedValueOnce({
+        id: "legacy-account-user",
+        clientId: "client-legacy-2",
+        loginName: "legacy.only",
+        passwordHash: makePasswordHash("supersecure123"),
+        sessionToken: "old-token",
+        sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+        username: "Legacy Only",
+        profilePicture: "https://example.com/avatar.png",
+        status: "",
+        isOnline: false,
+        lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+      });
+
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "legacy-account-user",
+      clientId: "client-legacy-2",
+      loginName: "legacy.only",
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Legacy Only",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+      createdAt: new Date("2026-02-10T09:00:00.000Z"),
+      updatedAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    const result = await signInAccount({
+      loginName: "legacy.only",
+      password: "supersecure123",
+    });
+
+    expect(result.clientId).toBe("client-legacy-2");
+    expect(result.loginName).toBe("legacy.only");
+  });
+
+  it("falls back to legacy update when encrypted columns are missing during sign-in update", async () => {
+    const encrypted = encryptLoginName("legacy.update");
+    const lookup = hashLoginNameLookup("legacy.update");
+    prismaMock.user.findFirst.mockResolvedValueOnce({
+      id: "legacy-update-user",
+      clientId: "client-legacy-update",
+      loginName: "legacy.update",
+      loginNameEncrypted: encrypted,
+      loginNameLookup: lookup,
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Legacy Update",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: false,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.update
+      .mockRejectedValueOnce(new Error("The column `(not available)` does not exist in the current database."))
+      .mockResolvedValueOnce({
+        id: "legacy-update-user",
+        clientId: "client-legacy-update",
+        loginName: "legacy.update",
+        passwordHash: makePasswordHash("supersecure123"),
+        sessionToken: "new-token",
+        sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+        username: "Legacy Update",
+        profilePicture: "https://example.com/avatar.png",
+        status: "",
+        isOnline: true,
+        lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+        createdAt: new Date("2026-02-10T09:00:00.000Z"),
+        updatedAt: new Date("2026-02-10T10:30:00.000Z"),
+      });
+
+    const result = await signInAccount({
+      loginName: "legacy.update",
+      password: "supersecure123",
+    });
+
+    expect(result.clientId).toBe("client-legacy-update");
+    expect(result.loginName).toBe("legacy.update");
+    expect(prismaMock.user.update).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        data: expect.not.objectContaining({
+          loginNameEncrypted: expect.any(String),
+          loginNameLookup: expect.any(String),
+          loginName: null,
+        }),
+      }),
+    );
+  });
+
+  it("migrates legacy plain loginName to encrypted fields on sign-in", async () => {
+    const migratedEncrypted = encryptLoginName("legacy.user");
+    const migratedLookup = hashLoginNameLookup("legacy.user");
+    prismaMock.user.findFirst.mockResolvedValueOnce({
+      id: "legacy-account-user",
+      clientId: "client-legacy-1",
+      loginName: "legacy.user",
+      loginNameEncrypted: null,
+      loginNameLookup: null,
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Legacy User",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: false,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "legacy-account-user",
+      clientId: "client-legacy-1",
+      loginName: null,
+      loginNameEncrypted: migratedEncrypted,
+      loginNameLookup: migratedLookup,
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Legacy User",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+      createdAt: new Date("2026-02-10T09:00:00.000Z"),
+      updatedAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    await signInAccount({
+      loginName: "legacy.user",
+      password: "supersecure123",
+    });
+
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          loginName: null,
+          loginNameEncrypted: expect.any(String),
+          loginNameLookup: expect.any(String),
+        }),
+      }),
+    );
+  });
+
   it("enables developer mode when unlock code is used as username", async () => {
     const previousUnlock = process.env.CHAT_DEV_UNLOCK_CODE;
     const previousSecret = process.env.CHAT_DEV_TOKEN_SECRET;
@@ -451,7 +705,7 @@ Abstimmen und begründen.
       prismaMock.user.upsert.mockResolvedValueOnce({
         id: "dev-user",
         clientId: "dev-client",
-        username: "Developer",
+        username: "1234567890123456",
         profilePicture: "https://example.com/avatar.png",
         status: "",
         isOnline: true,
@@ -465,7 +719,58 @@ Abstimmen und begründen.
 
       expect(result.devMode).toBe(true);
       expect(result.devAuthToken).toBeTruthy();
-      expect(result.username.toLowerCase()).toContain("developer");
+      expect(result.username).toBe("1234567890123456");
+    } finally {
+      process.env.CHAT_DEV_UNLOCK_CODE = previousUnlock;
+      process.env.CHAT_DEV_TOKEN_SECRET = previousSecret;
+    }
+  });
+
+  it("enables developer mode on restore when login-name matches unlock code without renaming user", async () => {
+    const previousUnlock = process.env.CHAT_DEV_UNLOCK_CODE;
+    const previousSecret = process.env.CHAT_DEV_TOKEN_SECRET;
+    process.env.CHAT_DEV_UNLOCK_CODE = "1234567890123456";
+    process.env.CHAT_DEV_TOKEN_SECRET = "test-dev-secret";
+
+    try {
+      const now = new Date("2026-02-10T10:00:00.000Z");
+      const refreshed = new Date("2026-02-10T11:00:00.000Z");
+
+      prismaMock.user.findFirst.mockResolvedValueOnce({
+        id: "dev-user",
+        clientId: "dev-client",
+        loginName: "1234567890123456",
+        passwordHash: "hash",
+        sessionToken: "session-token",
+        sessionExpiresAt: now,
+        username: "Chosen Display Name",
+        profilePicture: "https://example.com/avatar.png",
+        status: "",
+        isOnline: true,
+        lastSeenAt: now,
+      });
+      prismaMock.user.update.mockResolvedValueOnce({
+        id: "dev-user",
+        clientId: "dev-client",
+        loginName: "1234567890123456",
+        passwordHash: "hash",
+        sessionToken: "session-token",
+        sessionExpiresAt: refreshed,
+        username: "Chosen Display Name",
+        profilePicture: "https://example.com/avatar.png",
+        status: "",
+        isOnline: true,
+        lastSeenAt: refreshed,
+      });
+
+      const result = await restoreSession({
+        clientId: "dev-client",
+        sessionToken: "session-token",
+      });
+
+      expect(result.devMode).toBe(true);
+      expect(result.devAuthToken).toBeTruthy();
+      expect(result.username).toBe("Chosen Display Name");
     } finally {
       process.env.CHAT_DEV_UNLOCK_CODE = previousUnlock;
       process.env.CHAT_DEV_TOKEN_SECRET = previousSecret;
@@ -587,6 +892,56 @@ Abstimmen und begründen.
     );
   });
 
+  it("threads newly created polls to a referenced message", async () => {
+    prismaMock.message.findUnique.mockResolvedValueOnce(
+      baseMessage({
+        id: "parent-1",
+        type: MessageType.MESSAGE,
+        content: "Original thread start",
+        authorName: "alice",
+      }),
+    );
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({
+        id: "poll-reply-1",
+        type: MessageType.VOTING_POLL,
+        content: "Was sollen wir machen?",
+        questionMessageId: "parent-1",
+        questionMessage: baseMessage({
+          id: "parent-1",
+          type: MessageType.MESSAGE,
+          content: "Original thread start",
+          authorName: "alice",
+        }),
+        pollMultiSelect: false,
+        pollAllowVoteChange: true,
+        pollOptions: [
+          { id: "o1", label: "Option A", sortOrder: 0, votes: [] },
+          { id: "o2", label: "Option B", sortOrder: 1, votes: [] },
+        ],
+      }),
+    );
+
+    const created = await createMessage({
+      clientId: "client-1",
+      type: "votingPoll",
+      message: "Was sollen wir machen?",
+      pollOptions: ["Option A", "Option B"],
+      questionId: "parent-1",
+    });
+
+    expect(prismaMock.message.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          questionMessageId: "parent-1",
+        }),
+      }),
+    );
+    expect(created.questionId).toBe("parent-1");
+    expect(created.oldusername).toBe("alice");
+    expect(created.oldmessage).toBe("Original thread start");
+  });
+
   it('posts "new_name ist dem Chat beigetreten" system message on rename', async () => {
     prismaMock.user.update.mockResolvedValueOnce({
       id: "user-id",
@@ -612,6 +967,7 @@ Abstimmen und begründen.
         data: expect.objectContaining({
           content: "newname ist dem Chat beigetreten",
           authorName: "System",
+          authorId: "user-id",
         }),
       }),
     );
@@ -957,7 +1313,7 @@ Abstimmen und begründen.
     }
   });
 
-  it("fills empty message categories from messageTags", async () => {
+  it("derives precise structured message categories from messageTags", async () => {
     const previousGrokKey = process.env.GROK_API_KEY;
     process.env.GROK_API_KEY = "test-grok-key";
     prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
@@ -974,11 +1330,11 @@ Abstimmen und begründen.
     openAiCreateMock.mockResolvedValueOnce({
       output_text: JSON.stringify({
         messageTags: [
-          { tag: "school life", score: 0.9 },
-          { tag: "meme", score: 0.88 },
+          { tag: "survey", score: 0.9 },
+          { tag: "sarcasm", score: 0.88 },
           { tag: "illustration", score: 0.85 },
-          { tag: "happy", score: 0.81 },
-          { tag: "weird story", score: 0.7 },
+          { tag: "german", score: 0.81 },
+          { tag: "schweine", score: 0.8 },
         ],
         categories: {
           themes: [],
@@ -1000,11 +1356,60 @@ Abstimmen und begründen.
       const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
         categories?: Record<string, Array<{ tag: string; score: number }>>;
       } | undefined;
-      expect(payload?.categories?.themes?.length || 0).toBeGreaterThan(0);
-      expect(payload?.categories?.humor?.length || 0).toBeGreaterThan(0);
-      expect(payload?.categories?.art?.length || 0).toBeGreaterThan(0);
-      expect(payload?.categories?.tone?.length || 0).toBeGreaterThan(0);
-      expect(payload?.categories?.topics?.length || 0).toBeGreaterThan(0);
+      expect(payload?.categories?.themes?.some((entry) => entry.tag === "theme:poll")).toBe(true);
+      expect(payload?.categories?.humor?.some((entry) => entry.tag === "humor:sarcasm")).toBe(true);
+      expect(payload?.categories?.art?.some((entry) => entry.tag === "art:illustration")).toBe(true);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag === "language:german")).toBe(true);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag.startsWith("complexity:"))).toBe(true);
+      expect(payload?.categories?.topics?.some((entry) => entry.tag === "topic:animals")).toBe(true);
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("allows empty non-tone message categories when no reliable evidence exists", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-cats-empty-1",
+        sourceMessageId: "msg-tag-cats-empty-1",
+        username: "tester",
+        message: "Nur ein kurzer Text ohne viele Signale",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [],
+        categories: {
+          themes: [],
+          humor: [],
+          art: [],
+          tone: [],
+          topics: [],
+        },
+        images: [],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        categories?: Record<string, Array<{ tag: string; score: number }>>;
+      } | undefined;
+      expect(payload?.categories?.themes || []).toEqual([]);
+      expect(payload?.categories?.humor || []).toEqual([]);
+      expect(payload?.categories?.art || []).toEqual([]);
+      expect(payload?.categories?.topics || []).toEqual([]);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag === "language:german")).toBe(true);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag.startsWith("complexity:"))).toBe(true);
     } finally {
       process.env.GROK_API_KEY = previousGrokKey;
     }
@@ -1027,10 +1432,10 @@ Abstimmen und begründen.
     openAiCreateMock.mockResolvedValueOnce({
       output_text: JSON.stringify({
         messageTags: [
-          { tag: "meme illustration", score: 0.95 },
-          { tag: "school class", score: 0.9 },
-          { tag: "happy chill", score: 0.85 },
-          { tag: "quantenkeks", score: 0.8 },
+          { tag: "poll", score: 0.95 },
+          { tag: "sarcasm", score: 0.9 },
+          { tag: "illustration", score: 0.85 },
+          { tag: "pigs", score: 0.8 },
         ],
         categories: {
           themes: [],
@@ -1062,10 +1467,11 @@ Abstimmen und begründen.
       ].map((entry) => entry.tag);
 
       expect(new Set(allCategoryTags).size).toBe(allCategoryTags.length);
-      expect(categories?.humor.some((entry) => entry.tag === "meme illustration")).toBe(true);
-      expect(categories?.art.some((entry) => entry.tag === "meme illustration")).toBe(false);
-      expect(categories?.topics.some((entry) => entry.tag === "quantenkeks")).toBe(true);
-      expect(categories?.topics.some((entry) => entry.tag === "school class")).toBe(false);
+      expect(categories?.themes.some((entry) => entry.tag === "theme:poll")).toBe(true);
+      expect(categories?.humor.some((entry) => entry.tag === "humor:sarcasm")).toBe(true);
+      expect(categories?.art.some((entry) => entry.tag === "art:illustration")).toBe(true);
+      expect(categories?.topics.some((entry) => entry.tag === "topic:animals")).toBe(true);
+      expect(categories?.topics.some((entry) => entry.tag === "theme:poll")).toBe(false);
     } finally {
       process.env.GROK_API_KEY = previousGrokKey;
     }
@@ -1129,6 +1535,66 @@ Abstimmen und begründen.
       expect(imageCategories?.objects?.length || 0).toBeGreaterThan(0);
       expect(imageCategories?.art?.length || 0).toBeGreaterThan(0);
       expect(imageCategories?.tone?.length || 0).toBeGreaterThan(0);
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("fills all image categories including objects when image tags are empty", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-cats-img-empty-1",
+        sourceMessageId: "msg-tag-cats-img-empty-1",
+        username: "tester",
+        message: "Image mit wenig Infos",
+        imageUrls: ["https://example.com/empty-scene.png"],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [],
+        categories: {
+          themes: [],
+          humor: [],
+          art: [],
+          tone: [],
+          topics: [],
+        },
+        images: [
+          {
+            imageUrl: "https://example.com/empty-scene.png",
+            tags: [],
+            categories: {
+              themes: [],
+              humor: [],
+              art: [],
+              tone: [],
+              objects: [],
+            },
+          },
+        ],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        images?: Array<{ categories?: Record<string, Array<{ tag: string; score: number }>> }>;
+      } | undefined;
+      const imageCategories = payload?.images?.[0]?.categories;
+      expect(imageCategories?.themes?.length || 0).toBeGreaterThan(0);
+      expect(imageCategories?.humor?.length || 0).toBeGreaterThan(0);
+      expect(imageCategories?.art?.length || 0).toBeGreaterThan(0);
+      expect(imageCategories?.tone?.length || 0).toBeGreaterThan(0);
+      expect(imageCategories?.objects?.length || 0).toBeGreaterThan(0);
     } finally {
       process.env.GROK_API_KEY = previousGrokKey;
     }
@@ -1223,10 +1689,10 @@ Abstimmen und begründen.
       output_text: JSON.stringify({
         messageTags: [
           { tag: "school", score: 0.9 },
-          { tag: "meme", score: 0.88 },
+          { tag: "sarcasm", score: 0.88 },
         ],
         categories: {
-          themes: [{ tag: "model-theme", score: 0.93 }],
+          themes: [{ tag: "theme:poll", score: 0.93 }],
           humor: [],
           art: [],
           tone: [],
@@ -1245,14 +1711,14 @@ Abstimmen und begründen.
       const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
         categories?: Record<string, Array<{ tag: string; score: number }>>;
       } | undefined;
-      expect(payload?.categories?.themes?.[0]?.tag).toBe("model-theme");
-      expect(payload?.categories?.humor?.length || 0).toBeGreaterThan(0);
+      expect(payload?.categories?.themes?.[0]?.tag).toBe("theme:poll");
+      expect(payload?.categories?.humor?.some((entry) => entry.tag === "humor:sarcasm")).toBe(true);
     } finally {
       process.env.GROK_API_KEY = previousGrokKey;
     }
   });
 
-  it("handles umlauts in tags while filling categories", async () => {
+  it("handles umlauts while mapping to broad topics", async () => {
     const previousGrokKey = process.env.GROK_API_KEY;
     process.env.GROK_API_KEY = "test-grok-key";
     prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
@@ -1270,7 +1736,7 @@ Abstimmen und begründen.
       output_text: JSON.stringify({
         messageTags: [
           { tag: "Frühstück ÄÖÜß", score: 0.9 },
-          { tag: "schule", score: 0.8 },
+          { tag: "schweine", score: 0.8 },
         ],
         categories: {
           themes: [],
@@ -1294,7 +1760,86 @@ Abstimmen und begründen.
         categories?: Record<string, Array<{ tag: string; score: number }>>;
       } | undefined;
       const topicTags = payload?.categories?.topics?.map((entry) => entry.tag) || [];
-      expect(topicTags).toContain("frühstück äöüß");
+      expect(topicTags).toContain("topic:food");
+      expect(topicTags).toContain("topic:animals");
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("filters meta noise, applies confidence floors, and caps messageTags at 16", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-quality-1",
+        sourceMessageId: "msg-tag-quality-1",
+        username: "tester",
+        message: "Bitte mach eine Umfrage über Schweine auf Deutsch",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [
+          { tag: "request", score: 0.95 },
+          { tag: "create", score: 0.95 },
+          { tag: "command", score: 0.95 },
+          { tag: "no image", score: 0.95 },
+          { tag: "username", score: 0.95 },
+          { tag: "funny", score: 0.95 },
+          { tag: "neutral", score: 0.95 },
+          { tag: "poll", score: 0.92 },
+          { tag: "sarcasm", score: 0.9 },
+          { tag: "illustration", score: 0.88 },
+          { tag: "deutsch", score: 0.87 },
+          { tag: "schweine", score: 0.86 },
+          { tag: "technology", score: 0.85 },
+          { tag: "school", score: 0.84 },
+          { tag: "entertainment", score: 0.83 },
+          { tag: "relationships", score: 0.82 },
+          { tag: "food", score: 0.81 },
+          { tag: "animals", score: 0.8 },
+          { tag: "travel", score: 0.79 },
+          { tag: "gaming", score: 0.78 },
+        ],
+        categories: {
+          themes: [{ tag: "theme:request", score: 0.4 }],
+          humor: [{ tag: "humor:sarcasm", score: 0.4 }],
+          art: [],
+          tone: [],
+          topics: [{ tag: "topic:food", score: 0.4 }],
+        },
+        images: [],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        messageTags?: Array<{ tag: string; score: number }>;
+        categories?: Record<string, Array<{ tag: string; score: number }>>;
+      } | undefined;
+      const messageTags = payload?.messageTags?.map((entry) => entry.tag) || [];
+      expect(messageTags.length).toBeLessThanOrEqual(16);
+      expect(messageTags).not.toContain("request");
+      expect(messageTags).not.toContain("create");
+      expect(messageTags).not.toContain("command");
+      expect(messageTags).not.toContain("no image");
+      expect(messageTags).not.toContain("username");
+      expect(messageTags).not.toContain("funny");
+      expect(messageTags).not.toContain("neutral");
+      expect((payload?.categories?.themes || []).every((entry) => entry.score >= 0.55)).toBe(true);
+      expect((payload?.categories?.humor || []).every((entry) => entry.score >= 0.55)).toBe(true);
+      expect((payload?.categories?.topics || []).every((entry) => entry.score >= 0.55)).toBe(true);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag === "language:german")).toBe(true);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag.startsWith("complexity:"))).toBe(true);
     } finally {
       process.env.GROK_API_KEY = previousGrokKey;
     }
@@ -1656,6 +2201,62 @@ Abstimmen und begründen.
             content: "Best day?",
             pollMultiSelect: false,
             authorName: "ChatGPT",
+          }),
+        }),
+      );
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+    }
+  });
+
+  it("threads AI-created polls to the root message when mention is inside a reply", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-chatgpt-poll-thread-1",
+        sourceMessageId: "msg-reply",
+        username: "tester",
+        message: "@chatgpt create a poll",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.message.findUnique
+      .mockResolvedValueOnce({ id: "msg-reply", questionMessageId: "msg-root" })
+      .mockResolvedValueOnce({ id: "msg-root", questionMessageId: null });
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({
+        id: "msg-chatgpt-poll-threaded",
+        type: MessageType.VOTING_POLL,
+        content: "Root poll question?",
+        authorName: "ChatGPT",
+        questionMessageId: "msg-root",
+        pollMultiSelect: false,
+        pollAllowVoteChange: true,
+        pollOptions: [
+          { id: "o1", label: "Yes", sortOrder: 0, votes: [] },
+          { id: "o2", label: "No", sortOrder: 1, votes: [] },
+        ],
+      }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: '<POLL_JSON>{"question":"Root poll question?","options":["Yes","No"],"multiSelect":false}</POLL_JSON>',
+      output: [],
+    });
+
+    try {
+      await processAiQueue({ maxJobs: 1 });
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            type: MessageType.VOTING_POLL,
+            questionMessageId: "msg-root",
           }),
         }),
       );
@@ -2563,6 +3164,60 @@ Alles klar, wir machen das sauber.
       }),
     );
     expect(result.reactions?.viewerReaction).toBe("LOL");
+  });
+
+  it("attributes reactions on legacy join system messages to the joined user", async () => {
+    prismaMock.message.findUnique
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-system-join-legacy",
+          authorId: null,
+          authorName: "System",
+          content: "alice ist dem Chat beigetreten",
+          reactions: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-system-join-legacy",
+          authorId: "author-join-1",
+          authorName: "System",
+          content: "alice ist dem Chat beigetreten",
+          reactions: [baseReaction({ messageId: "msg-system-join-legacy", reaction: "FIRE" })],
+        }),
+      );
+    prismaMock.user.findFirst.mockResolvedValueOnce({
+      id: "author-join-1",
+      clientId: "client-join-1",
+      username: "alice",
+      profilePicture: "https://example.com/alice.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.messageReaction.findUnique.mockResolvedValueOnce(null);
+
+    await reactToMessage({
+      clientId: "client-1",
+      messageId: "msg-system-join-legacy",
+      reaction: "FIRE",
+    });
+
+    expect(prismaMock.message.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "msg-system-join-legacy",
+          authorId: null,
+        },
+        data: {
+          authorId: "author-join-1",
+        },
+      }),
+    );
+    expect(publishMock).toHaveBeenCalledWith(
+      "taste.updated",
+      expect.objectContaining({ userId: "author-join-1", reason: "reaction" }),
+    );
   });
 
   it("rejects reactions on non-join system messages", async () => {

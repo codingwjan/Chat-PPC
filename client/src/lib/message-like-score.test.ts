@@ -27,6 +27,7 @@ function createBaseProfile(overrides: Partial<UserTasteProfileDTO> = {}): UserTa
     updatedAt: new Date("2026-02-14T18:00:00.000Z").toISOString(),
     reactionsReceived: 0,
     reactionDistribution: [
+      { reaction: "LIKE", count: 0 },
       { reaction: "LOL", count: 6 },
       { reaction: "FIRE", count: 3 },
       { reaction: "BASED", count: 1 },
@@ -150,6 +151,7 @@ describe("computeMessageLikeScore", () => {
     const profile = createBaseProfile({
       topTags: [{ tag: "komplett anders", score: 1 }],
       reactionDistribution: [
+        { reaction: "LIKE", count: 0 },
         { reaction: "LOL", count: 0 },
         { reaction: "FIRE", count: 0 },
         { reaction: "BASED", count: 0 },
@@ -188,6 +190,7 @@ describe("computeMessageLikeScore", () => {
         score: 12,
         viewerReaction: null,
         summary: [
+          { reaction: "LIKE", count: 0, users: [] },
           { reaction: "LOL", count: 8, users: [] },
           { reaction: "FIRE", count: 2, users: [] },
           { reaction: "BASED", count: 0, users: [] },
@@ -202,6 +205,7 @@ describe("computeMessageLikeScore", () => {
         score: 10,
         viewerReaction: null,
         summary: [
+          { reaction: "LIKE", count: 0, users: [] },
           { reaction: "LOL", count: 0, users: [] },
           { reaction: "FIRE", count: 0, users: [] },
           { reaction: "BASED", count: 0, users: [] },

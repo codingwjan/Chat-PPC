@@ -20,6 +20,8 @@ const serviceMock = vi.hoisted(() => ({
   setChatBackground: vi.fn(),
   getAdminOverview: vi.fn(),
   getDeveloperTasteProfiles: vi.fn(),
+  getAdminUsers: vi.fn(),
+  adminResetUserPassword: vi.fn(),
   runAdminAction: vi.fn(),
   getMediaItems: vi.fn(),
   processAiQueue: vi.fn(),
@@ -531,6 +533,58 @@ describe("api routes", () => {
     expect(response.status).toBe(200);
     const payload = await response.json();
     expect(payload.items).toEqual([]);
+  });
+
+  it("liefert Admin-Userliste für den Entwicklermodus", async () => {
+    serviceMock.getAdminUsers.mockResolvedValue({
+      items: [
+        {
+          userId: "u1",
+          clientId: "c1",
+          username: "alice",
+          profilePicture: "/avatar.png",
+          loginName: "alice.login",
+          hasAccount: true,
+          canResetPassword: true,
+          isOnline: false,
+        },
+      ],
+    });
+    const { GET } = await import("@/app/api/admin/users/route");
+
+    const response = await GET(
+      new Request("http://localhost/api/admin/users?clientId=c1&devAuthToken=token-1", {
+        method: "GET",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.items[0]?.loginName).toBe("alice.login");
+  });
+
+  it("setzt Passwort über Admin-Route zurück", async () => {
+    serviceMock.adminResetUserPassword.mockResolvedValue({
+      ok: true,
+      message: "Passwort für alice wurde zurückgesetzt.",
+    });
+    const { POST } = await import("@/app/api/admin/users/reset-password/route");
+
+    const response = await POST(
+      new Request("http://localhost/api/admin/users/reset-password", {
+        method: "POST",
+        body: JSON.stringify({
+          clientId: "c1",
+          devAuthToken: "token-1",
+          targetUserId: "u1",
+          newPassword: "supersecure123",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.ok).toBe(true);
   });
 
   it("gets media from full chat history", async () => {

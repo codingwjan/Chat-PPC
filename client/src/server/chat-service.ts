@@ -12,6 +12,8 @@ import type {
   AdminActionRequest,
   AdminActionResponse,
   AdminOverviewDTO,
+  AdminResetUserPasswordResponse,
+  AdminUserListResponseDTO,
   AiStatusDTO,
   AuthSessionDTO,
   AuthSignInRequest,
@@ -37,6 +39,12 @@ import type {
 } from "@/lib/types";
 import { AppError, assert } from "@/server/errors";
 import { issueDevAuthToken, isDevUnlockUsername, verifyDevAuthToken } from "@/server/dev-mode";
+import {
+  decryptLoginName,
+  encryptLoginName,
+  hashLoginNameLookup,
+  normalizeLoginName,
+} from "@/server/login-name-crypto";
 import { getChatOpenAiConfig } from "@/server/openai-config";
 import chatgptProfilePicture from "@/resources/chatgpt.png";
 import grokProfilePicture from "@/resources/grokAvatar.png";
@@ -81,11 +89,21 @@ const TAGGING_QUEUE_CONCURRENCY = 2;
 const TAGGING_LANGUAGE = "en";
 const TAGGING_PROVIDER = "grok";
 const TAGGING_MAX_TAG_LENGTH = 48;
-const TAGGING_MAX_MESSAGE_TAGS = 30;
+const TAGGING_MAX_MESSAGE_TAGS = 16;
 const TAGGING_MAX_IMAGE_TAGS = 20;
 const TAGGING_GIF_FRAME_COUNT = 3;
-const MESSAGE_REACTION_TYPES: readonly ReactionType[] = ["LOL", "FIRE", "BASED", "WTF", "BIG_BRAIN"] as const;
+const TAGGING_MIN_MESSAGE_SCORE = 0.5;
+const TAGGING_MIN_CATEGORY_SCORE = 0.55;
+const TAGGING_MESSAGE_TARGET_MIN = 10;
+const TAGGING_MESSAGE_TARGET_MAX = 16;
+const TAGGING_MAX_THEME_TAGS = 4;
+const TAGGING_MAX_HUMOR_TAGS = 3;
+const TAGGING_MAX_ART_TAGS = 3;
+const TAGGING_MAX_TONE_TAGS = 5;
+const TAGGING_MAX_TOPIC_TAGS = 4;
+const MESSAGE_REACTION_TYPES: readonly ReactionType[] = ["LIKE", "LOL", "FIRE", "BASED", "WTF", "BIG_BRAIN"] as const;
 const MESSAGE_REACTION_SCORES: Record<ReactionType, number> = {
+  LIKE: 1.0,
   LOL: 1.4,
   FIRE: 1.2,
   BASED: 1.1,
@@ -97,8 +115,15 @@ const TAGGING_MODEL_PROMPT = [
   "Return JSON only. No markdown. No prose.",
   "All tags must be english, lowercase, concise, and normalized.",
   "Always include confidence scores between 0 and 1.",
+  "Do not invent tags. If a category has no evidence, leave it empty.",
+  "Use machine-readable category tags.",
+  'Humor tags must use only these values: "humor:sarcasm", "humor:irony", "humor:absurdism", "humor:wordplay", "humor:dark-humor", "humor:satire", "humor:self-deprecating", "humor:playful-banter".',
+  'Theme tags must describe format/intent only: e.g. "theme:poll", "theme:question", "theme:request", "theme:opinion", "theme:comparison".',
+  'Topic tags must be broad domains only: e.g. "topic:animals", "topic:food", "topic:relationships", "topic:technology", "topic:school", "topic:entertainment".',
+  'Tone tags must include at least one "language:<...>" and one "complexity:<...>" marker when inferable.',
+  "Avoid generic/meta noise tags such as funny, humor, theme, topic, casual, neutral, request, create, command, no image, username.",
   "Target density:",
-  "- messageTags: 20-30 (target 24)",
+  `- messageTags: ${TAGGING_MESSAGE_TARGET_MIN}-${TAGGING_MESSAGE_TARGET_MAX} (target 12)`,
   "- image tags per image: 12-20 (target 16)",
   "Schema:",
   "{",
@@ -228,6 +253,8 @@ let aiQueueDrainScheduled = false;
 let lastAiBusyNoticeAt = 0;
 let taggingQueueDrainScheduled = false;
 let lastBehaviorEventCleanupAt = 0;
+let canPersistAiStatusRow = true;
+let encryptedLoginColumnsAvailable: boolean | null = null;
 
 let mediaItemsCache:
   | {
@@ -249,10 +276,6 @@ function normalizeUsername(username: string): string {
   return username.trim().toLowerCase();
 }
 
-function normalizeLoginName(loginName: string): string {
-  return loginName.trim().toLowerCase();
-}
-
 function hashPassword(password: string): string {
   const salt = randomBytes(16).toString("hex");
   const hash = scryptSync(password, salt, 64).toString("hex");
@@ -271,6 +294,32 @@ function verifyPassword(password: string, stored: string): boolean {
 
 function createSessionToken(): string {
   return randomBytes(32).toString("hex");
+}
+
+function canUseEncryptedLoginColumns(): boolean {
+  return encryptedLoginColumnsAvailable !== false;
+}
+
+function markEncryptedLoginColumnsUnavailable(): void {
+  encryptedLoginColumnsAvailable = false;
+}
+
+function markEncryptedLoginColumnsAvailableIfUnknown(): void {
+  if (encryptedLoginColumnsAvailable === null) {
+    encryptedLoginColumnsAvailable = true;
+  }
+}
+
+function isMissingColumnError(error: unknown): boolean {
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2022") {
+    return true;
+  }
+
+  if (error instanceof Error && error.message.toLowerCase().includes("does not exist")) {
+    return true;
+  }
+
+  return false;
 }
 
 function toChatMessageType(type: MessageType): MessageDTO["type"] {
@@ -308,10 +357,44 @@ function mapUser(user: {
 }
 
 const MESSAGE_INCLUDE = Prisma.validator<Prisma.MessageInclude>()({
-  questionMessage: true,
-  author: true,
-  pollOptions: { include: { votes: { include: { user: true } } } },
-  reactions: { include: { user: true } },
+  questionMessage: {
+    select: {
+      id: true,
+      authorName: true,
+      content: true,
+    },
+  },
+  author: {
+    select: {
+      profilePicture: true,
+    },
+  },
+  pollOptions: {
+    include: {
+      votes: {
+        include: {
+          user: {
+            select: {
+              id: true,
+              username: true,
+              profilePicture: true,
+            },
+          },
+        },
+      },
+    },
+  },
+  reactions: {
+    include: {
+      user: {
+        select: {
+          id: true,
+          username: true,
+          profilePicture: true,
+        },
+      },
+    },
+  },
 });
 
 type MessageRow = Prisma.MessageGetPayload<{ include: typeof MESSAGE_INCLUDE }>;
@@ -535,6 +618,24 @@ function extractSystemJoinUsername(content: string): string | null {
 
 function isSystemJoinContent(content: string): boolean {
   return extractSystemJoinUsername(content) !== null;
+}
+
+async function resolveJoinMessageTargetUserId(content: string): Promise<string | null> {
+  const username = extractSystemJoinUsername(content);
+  if (!username) return null;
+
+  const user = await prisma.user.findFirst({
+    where: {
+      username: {
+        equals: username,
+        mode: "insensitive",
+      },
+    },
+    orderBy: [{ isOnline: "desc" }, { updatedAt: "desc" }],
+    select: { id: true },
+  });
+
+  return user?.id || null;
 }
 
 function isReactableSystemMessage(input: { authorName: string; content: string }): boolean {
@@ -949,6 +1050,7 @@ async function assertUsernameAvailable(username: string, exceptClientId?: string
       },
       ...(exceptClientId ? { clientId: { not: exceptClientId } } : {}),
     },
+    select: { id: true },
   });
 
   if (existing) {
@@ -956,47 +1058,45 @@ async function assertUsernameAvailable(username: string, exceptClientId?: string
   }
 }
 
-async function resolveDeveloperUsername(clientId: string): Promise<string> {
-  const existing = await prisma.user.findUnique({
-    where: { clientId },
-    select: { username: true },
-  });
+async function emitSystemMessage(
+  content: string,
+  options: {
+    authorId?: string | null;
+  } = {},
+): Promise<void> {
+  const baseData = {
+    type: MessageType.MESSAGE,
+    content,
+    authorName: "System",
+    authorProfilePicture: getDefaultProfilePicture(),
+    ...(options.authorId ? { authorId: options.authorId } : {}),
+  } satisfies Prisma.MessageCreateInput;
 
-  if (existing?.username && existing.username.toLowerCase().startsWith(DEVELOPER_USERNAME.toLowerCase())) {
-    return existing.username;
+  try {
+    const created = await prisma.message.create({
+      data: baseData,
+      include: MESSAGE_INCLUDE,
+    });
+    publish("message.created", mapMessage(created));
+    return;
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
   }
 
-  const baseTaken = await prisma.user.findFirst({
-    where: {
-      isOnline: true,
-      clientId: { not: clientId },
-      username: {
-        equals: DEVELOPER_USERNAME,
-        mode: "insensitive",
+  try {
+    await prisma.message.create({
+      data: {
+        type: MessageType.MESSAGE,
+        content,
+        authorName: "System",
+        authorProfilePicture: getDefaultProfilePicture(),
       },
-    },
-    select: { id: true },
-  });
-
-  if (!baseTaken) {
-    return DEVELOPER_USERNAME;
+      select: { id: true },
+    });
+  } catch (legacyError) {
+    if (!isMissingColumnError(legacyError)) throw legacyError;
+    console.warn("Skipping system message emission because message table columns are out of date.");
   }
-
-  return `${DEVELOPER_USERNAME}-${clientId.slice(0, 6)}`;
-}
-
-async function emitSystemMessage(content: string): Promise<void> {
-  const created = await prisma.message.create({
-    data: {
-      type: MessageType.MESSAGE,
-      content,
-      authorName: "System",
-      authorProfilePicture: getDefaultProfilePicture(),
-    },
-    include: MESSAGE_INCLUDE,
-  });
-
-  publish("message.created", mapMessage(created));
 }
 
 async function cleanupOfflineUsers(): Promise<void> {
@@ -1007,6 +1107,15 @@ async function cleanupOfflineUsers(): Promise<void> {
       OR: [{ lastSeenAt: null }, { lastSeenAt: { lt: threshold } }],
     },
     orderBy: [{ lastSeenAt: "asc" }],
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+    },
   });
 
   for (const user of staleUsers) {
@@ -1036,6 +1145,15 @@ export async function getOnlineUsers(): Promise<UserPresenceDTO[]> {
   const users = await prisma.user.findMany({
     where: { isOnline: true },
     orderBy: [{ username: "asc" }],
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+    },
   });
 
   return users.map(mapUser);
@@ -1211,6 +1329,8 @@ function publishAiStatus(provider: AiProvider, status: string): void {
 }
 
 async function persistAiStatusToDatabase(payload: AiStatusDTO): Promise<void> {
+  if (!canPersistAiStatusRow) return;
+
   try {
     await prisma.user.upsert({
       where: { clientId: AI_STATUS_CLIENT_ID },
@@ -1229,8 +1349,13 @@ async function persistAiStatusToDatabase(payload: AiStatusDTO): Promise<void> {
         isOnline: false,
         lastSeenAt: new Date(payload.updatedAt),
       },
+      select: { id: true },
     });
   } catch (error) {
+    if (isMissingColumnError(error)) {
+      canPersistAiStatusRow = false;
+      return;
+    }
     console.error("Failed to persist AI status:", error);
   }
 }
@@ -1238,6 +1363,7 @@ async function persistAiStatusToDatabase(payload: AiStatusDTO): Promise<void> {
 interface AiTriggerPayload {
   provider: AiProvider;
   sourceMessageId: string;
+  threadMessageId?: string;
   username: string;
   message: string;
   imageUrls: string[];
@@ -1261,8 +1387,13 @@ const IMAGE_GENERATION_NOUN_REGEX =
   /\b(image|images|bild|bilder|grafik|illustration|photo|foto|picture|pictures|pic|drawing|drawings|art|artwork|poster|logo|wallpaper|meme|avatar|thumbnail)\b/i;
 const IMAGE_GENERATION_CONTEXT_REGEX =
   /\b(scene|character|monster|animal|portrait|landscape|banner|cover|icon)\b/i;
+const POLL_INTENT_REGEX = /\b(poll|umfrage|abstimmung|vote|voting)\b/i;
 function shouldUseWebSearchTool(message: string): boolean {
   return WEB_SEARCH_HINT_REGEX.test(message);
+}
+
+function isLikelyPollIntent(message: string): boolean {
+  return POLL_INTENT_REGEX.test(message);
 }
 
 function shouldUseImageGenerationTool(
@@ -1278,7 +1409,7 @@ function shouldUseImageGenerationTool(
     return hasActionHint;
   }
 
-  if (hasActionHint && hasImageNoun) {
+  if (hasActionHint && (hasImageNoun || hasImageContext)) {
     return true;
   }
 
@@ -1342,37 +1473,269 @@ function appendUniqueTags(
 }
 
 const SYNTHETIC_CATEGORY_SCORE_FACTOR = 0.92;
+const MESSAGE_CATEGORY_LIMITS: Record<keyof MessageTaggingDTOValue["categories"], number> = {
+  themes: TAGGING_MAX_THEME_TAGS,
+  humor: TAGGING_MAX_HUMOR_TAGS,
+  art: TAGGING_MAX_ART_TAGS,
+  tone: TAGGING_MAX_TONE_TAGS,
+  topics: TAGGING_MAX_TOPIC_TAGS,
+};
+const HUMOR_TAG_VALUES = new Set([
+  "humor:sarcasm",
+  "humor:irony",
+  "humor:absurdism",
+  "humor:wordplay",
+  "humor:dark-humor",
+  "humor:satire",
+  "humor:self-deprecating",
+  "humor:playful-banter",
+]);
+const THEME_TAG_VALUES = new Set([
+  "theme:poll",
+  "theme:question",
+  "theme:request",
+  "theme:opinion",
+  "theme:comparison",
+  "theme:instruction",
+  "theme:announcement",
+  "theme:story",
+]);
+const ART_TAG_VALUES = new Set([
+  "art:illustration",
+  "art:photo",
+  "art:cinematic",
+  "art:anime",
+  "art:pixel-art",
+  "art:graphic-design",
+  "art:visual-style",
+]);
+const TONE_TAG_PREFIXES = ["language:", "complexity:", "register:", "directness:", "affect:"] as const;
+const GENERIC_LOW_INFO_TAGS = new Set([
+  "funny",
+  "humor",
+  "theme",
+  "topic",
+  "casual",
+  "neutral",
+  "request",
+  "short",
+  "simple",
+  "message",
+  "text",
+  "content",
+]);
+const INSTRUCTIONAL_NOISE_TAG_PATTERNS = [
+  /^(request|create|command|username|at mention|user instruction|ai prompt|topic [\w-]+)$/i,
+  /^(no image|single select|multiple choice|poll option)$/i,
+];
+const TOPIC_BROAD_MAPPINGS: Array<{ topic: string; patterns: RegExp[] }> = [
+  {
+    topic: "topic:animals",
+    patterns: [/\b(animal|animals|pet|pets|pig|pigs|schwein|schweine|dog|dogs|cat|cats)\b/i],
+  },
+  {
+    topic: "topic:food",
+    patterns: [/\b(food|meal|eat|eating|cooking|recipe|dish|tasty|burger|pizza|drink|breakfast|frühstück|fruehstueck)\b/i],
+  },
+  {
+    topic: "topic:relationships",
+    patterns: [/\b(friend|friends|best friend|relationship|dating|love|partner)\b/i],
+  },
+  {
+    topic: "topic:technology",
+    patterns: [/\b(technology|tech|software|hardware|ai|chatgpt|grok|model|coding|programming)\b/i],
+  },
+  {
+    topic: "topic:school",
+    patterns: [/\b(school|class|classes|homework|exam|teacher|student|university)\b/i],
+  },
+  {
+    topic: "topic:entertainment",
+    patterns: [/\b(entertainment|movie|film|music|song|game|gaming|meme|show|series)\b/i],
+  },
+];
+const TAG_CANONICAL_SYNONYMS: Record<string, string> = {
+  umfrage: "theme:poll",
+  survey: "theme:poll",
+  "single select": "theme:poll",
+  "multiple choice": "theme:poll",
+  quiz: "theme:poll",
+  frage: "theme:question",
+  "sarkasmus": "humor:sarcasm",
+  sarcastic: "humor:sarcasm",
+  ironisch: "humor:irony",
+  ironic: "humor:irony",
+  absurd: "humor:absurdism",
+  witz: "humor:wordplay",
+  pun: "humor:wordplay",
+  "dark humor": "humor:dark-humor",
+  "dunkler humor": "humor:dark-humor",
+  satire: "humor:satire",
+  banter: "humor:playful-banter",
+  deutsch: "language:german",
+  german: "language:german",
+  englisch: "language:english",
+  english: "language:english",
+  einfach: "complexity:simple",
+  simple: "complexity:simple",
+  komplex: "complexity:complex",
+  complex: "complexity:complex",
+  intellektuell: "complexity:complex",
+  informal: "register:informal",
+  locker: "register:informal",
+  formal: "register:formal",
+  direct: "directness:direct",
+  direkt: "directness:direct",
+  indirect: "directness:indirect",
+  serious: "affect:serious",
+  freundlich: "affect:friendly",
+  friendly: "affect:friendly",
+  aggressiv: "affect:aggressive",
+  aggressive: "affect:aggressive",
+  playful: "affect:playful",
+};
 const MESSAGE_THEME_PATTERNS = [
-  /\b(school|class|friend|relationship|game|movie|film|family|party|sport|food|travel|tech|technology|chat|group|quiz|survey|poll)\b/i,
+  /\b(theme:(poll|question|request|opinion|comparison|instruction|announcement|story)|poll|survey|umfrage|question|frage|opinion|meinung|comparison|vergleich|instruction|anweisung|announcement|story|geschichte)\b/i,
 ];
 const MESSAGE_HUMOR_PATTERNS = [
-  /\b(meme|funny|joke|sarcasm|ironic|absurd|cringe|roast|chaos|satire|humor|wtf)\b/i,
+  /\b(humor:(sarcasm|irony|absurdism|wordplay|dark-humor|satire|self-deprecating|playful-banter)|sarcasm|sarkasmus|irony|ironisch|absurd|wordplay|pun|witz|satire|dark humor|banter)\b/i,
 ];
 const MESSAGE_ART_PATTERNS = [
-  /\b(drawing|design|style|aesthetic|color|composition|cinematic|anime|pixelart|illustration|photo|photography|visual)\b/i,
+  /\b(art:(illustration|photo|cinematic|anime|pixel-art|graphic-design|visual-style)|drawing|illustration|photo|cinematic|anime|pixelart|design|visual style)\b/i,
 ];
 const MESSAGE_TONE_PATTERNS = [
-  /\b(happy|sad|angry|chill|aggressive|neutral|wholesome|toxic|dramatic|serious|casual|excited)\b/i,
+  /\b(language:|complexity:|register:|directness:|affect:|german|english|deutsch|englisch|simple|einfach|complex|intellektuell|formal|informal|direct|indirect|friendly|aggressive|serious|playful)\b/i,
 ];
 const IMAGE_THEME_PATTERNS = [
-  /\b(game|movie|food|travel|sport|nature|portrait|meme|animation|scene|landscape)\b/i,
+  /\b(game|spiel|movie|film|food|essen|travel|reise|sport|nature|natur|portrait|porträt|portraet|meme|animation|scene|szene|landscape|landschaft)\b/i,
 ];
 const IMAGE_HUMOR_PATTERNS = [
-  /\b(meme|funny|joke|absurd|sarcasm|wtf|chaos|comedic)\b/i,
+  /\b(meme|funny|lustig|joke|witz|absurd|sarcasm|sarkasmus|wtf|chaos|comedic|humor|lol)\b/i,
 ];
 const IMAGE_ART_PATTERNS = [
-  /\b(drawing|design|style|aesthetic|color|composition|cinematic|anime|pixelart|illustration|photo|render|graphic)\b/i,
+  /\b(drawing|zeichnung|design|style|stil|aesthetic|ästhetik|aesthetik|color|farbe|composition|komposition|cinematic|anime|pixelart|illustration|photo|foto|render|graphic|grafik)\b/i,
 ];
 const IMAGE_TONE_PATTERNS = [
-  /\b(happy|sad|angry|chill|aggressive|neutral|wholesome|toxic|dramatic|dark|bright)\b/i,
+  /\b(happy|glücklich|gluecklich|sad|traurig|angry|wütend|wuetend|chill|chillig|aggressive|aggressiv|neutral|wholesome|toxic|toxisch|dramatic|dramatisch|dark|dunkel|bright|hell)\b/i,
 ];
 const IMAGE_OBJECT_PATTERNS = [
-  /\b(person|people|man|woman|face|head|hand|dog|cat|animal|car|truck|bike|bus|train|plane|tree|flower|house|building|road|phone|computer|screen|table|chair|door|window|shirt|hat|food|burger|pizza|drink|ball|book|bag|glasses|logo)\b/i,
+  /\b(person|people|mensch|man|woman|face|gesicht|head|kopf|hand|dog|hund|cat|katze|animal|tier|car|auto|truck|lkw|bike|fahrrad|bus|train|zug|plane|flugzeug|tree|baum|flower|blume|house|haus|building|gebäude|gebaeude|road|straße|strasse|phone|handy|computer|screen|bildschirm|table|tisch|chair|stuhl|door|tür|tuer|window|fenster|shirt|hemd|hat|mütze|muetze|food|essen|burger|pizza|drink|getränk|getraenk|ball|book|buch|bag|tasche|glasses|brille|logo)\b/i,
 ];
+
+function canonicalizeTag(raw: unknown): string {
+  const normalized = normalizeTagLabel(raw);
+  if (!normalized) return "";
+  const deUnderscored = normalized.replace(/_/g, " ").replace(/\s+/g, " ");
+  return TAG_CANONICAL_SYNONYMS[deUnderscored] || deUnderscored;
+}
+
+function isInstructionalNoiseTag(tag: string): boolean {
+  if (!tag) return true;
+  return INSTRUCTIONAL_NOISE_TAG_PATTERNS.some((pattern) => pattern.test(tag));
+}
+
+function isGenericLowInformationTag(
+  tag: string,
+  category?: keyof MessageTaggingDTOValue["categories"],
+): boolean {
+  if (!tag) return true;
+  if (GENERIC_LOW_INFO_TAGS.has(tag)) return true;
+  if (category === "themes") return tag === "theme:general";
+  if (category === "humor") return tag === "humor";
+  if (category === "tone") return tag === "tone";
+  if (category === "topics") return tag === "topic:general";
+  return false;
+}
+
+function canonicalizeThemeTag(tag: string): string {
+  const normalized = canonicalizeTag(tag);
+  if (!normalized) return "";
+  if (THEME_TAG_VALUES.has(normalized)) return normalized;
+  if (/\b(poll|survey|umfrage|quiz|vote)\b/i.test(normalized)) return "theme:poll";
+  if (/\b(question|frage)\b/i.test(normalized)) return "theme:question";
+  if (/\b(request|ask|bitte)\b/i.test(normalized)) return "theme:request";
+  if (/\b(opinion|stance|meinung)\b/i.test(normalized)) return "theme:opinion";
+  if (/\b(compare|comparison|vergleich|versus|vs)\b/i.test(normalized)) return "theme:comparison";
+  if (/\b(instruction|anweisung|how to)\b/i.test(normalized)) return "theme:instruction";
+  if (/\b(announcement|ankuendigung|ankündigung)\b/i.test(normalized)) return "theme:announcement";
+  if (/\b(story|geschichte|anecdote)\b/i.test(normalized)) return "theme:story";
+  return "";
+}
+
+function canonicalizeHumorTag(tag: string): string {
+  const normalized = canonicalizeTag(tag);
+  if (!normalized) return "";
+  if (HUMOR_TAG_VALUES.has(normalized)) return normalized;
+  if (/\b(sarcasm|sarkasmus)\b/i.test(normalized)) return "humor:sarcasm";
+  if (/\b(irony|ironisch|ironic)\b/i.test(normalized)) return "humor:irony";
+  if (/\b(absurd|absurdism|wtf|chaos)\b/i.test(normalized)) return "humor:absurdism";
+  if (/\b(wordplay|pun|witz)\b/i.test(normalized)) return "humor:wordplay";
+  if (/\b(dark humor|dark-humor)\b/i.test(normalized)) return "humor:dark-humor";
+  if (/\b(satire)\b/i.test(normalized)) return "humor:satire";
+  if (/\b(self[- ]deprecating|self[- ]deprecation)\b/i.test(normalized)) return "humor:self-deprecating";
+  if (/\b(banter|playful banter)\b/i.test(normalized)) return "humor:playful-banter";
+  return "";
+}
+
+function canonicalizeArtTag(tag: string): string {
+  const normalized = canonicalizeTag(tag);
+  if (!normalized) return "";
+  if (ART_TAG_VALUES.has(normalized)) return normalized;
+  if (/\b(illustration|drawing)\b/i.test(normalized)) return "art:illustration";
+  if (/\b(photo|photography)\b/i.test(normalized)) return "art:photo";
+  if (/\b(cinematic)\b/i.test(normalized)) return "art:cinematic";
+  if (/\b(anime)\b/i.test(normalized)) return "art:anime";
+  if (/\b(pixelart|pixel art)\b/i.test(normalized)) return "art:pixel-art";
+  if (/\b(graphic design|design)\b/i.test(normalized)) return "art:graphic-design";
+  if (/\b(visual style|aesthetic|style)\b/i.test(normalized)) return "art:visual-style";
+  return "";
+}
+
+function canonicalizeToneTag(tag: string): string {
+  const normalized = canonicalizeTag(tag);
+  if (!normalized) return "";
+  if (TONE_TAG_PREFIXES.some((prefix) => normalized.startsWith(prefix))) return normalized;
+  if (/\b(german|deutsch)\b/i.test(normalized)) return "language:german";
+  if (/\b(english|englisch)\b/i.test(normalized)) return "language:english";
+  if (/\b(simple|einfach|leicht)\b/i.test(normalized)) return "complexity:simple";
+  if (/\b(complex|komplex|intellektuell|technical)\b/i.test(normalized)) return "complexity:complex";
+  if (/\b(informal|locker|casual)\b/i.test(normalized)) return "register:informal";
+  if (/\b(formal)\b/i.test(normalized)) return "register:formal";
+  if (/\b(direct|direkt)\b/i.test(normalized)) return "directness:direct";
+  if (/\b(indirect)\b/i.test(normalized)) return "directness:indirect";
+  if (/\b(friendly|freundlich)\b/i.test(normalized)) return "affect:friendly";
+  if (/\b(playful)\b/i.test(normalized)) return "affect:playful";
+  if (/\b(serious|ernst)\b/i.test(normalized)) return "affect:serious";
+  if (/\b(aggressive|aggressiv)\b/i.test(normalized)) return "affect:aggressive";
+  return "";
+}
+
+function canonicalizeTopicTag(tag: string): string {
+  const normalized = canonicalizeTag(tag);
+  if (!normalized) return "";
+  if (normalized.startsWith("topic:")) return normalized;
+  for (const mapping of TOPIC_BROAD_MAPPINGS) {
+    if (mapping.patterns.some((pattern) => pattern.test(normalized))) {
+      return mapping.topic;
+    }
+  }
+  return "";
+}
+
+function canonicalizeTagForCategory(
+  tag: string,
+  category: keyof MessageTaggingDTOValue["categories"],
+): string {
+  if (category === "themes") return canonicalizeThemeTag(tag);
+  if (category === "humor") return canonicalizeHumorTag(tag);
+  if (category === "art") return canonicalizeArtTag(tag);
+  if (category === "tone") return canonicalizeToneTag(tag);
+  return canonicalizeTopicTag(tag);
+}
 
 function scoreTagForSyntheticCategory(tag: ScoredTagDTOValue): ScoredTagDTOValue {
   return {
-    tag: normalizeTagLabel(tag.tag),
+    tag: canonicalizeTag(tag.tag),
     score: Math.round(clampNumber(tag.score * SYNTHETIC_CATEGORY_SCORE_FACTOR, 0, 1) * 1000) / 1000,
   };
 }
@@ -1397,6 +1760,34 @@ function dedupeScoredTags(tags: ScoredTagDTOValue[], maxCount: number): ScoredTa
   return [...bestScoreByTag.entries()]
     .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
     .slice(0, maxCount)
+    .map(([tag, score]) => ({ tag, score }));
+}
+
+function filterTagSet(input: {
+  tags: ScoredTagDTOValue[];
+  maxCount: number;
+  minScore: number;
+  category?: keyof MessageTaggingDTOValue["categories"];
+}): ScoredTagDTOValue[] {
+  const bestByTag = new Map<string, number>();
+  for (const entry of input.tags) {
+    const score = normalizeTagScore(entry.score);
+    if (score < input.minScore) continue;
+    const canonical = input.category
+      ? canonicalizeTagForCategory(entry.tag, input.category)
+      : canonicalizeTag(entry.tag);
+    if (!canonical) continue;
+    if (isInstructionalNoiseTag(canonical)) continue;
+    if (isGenericLowInformationTag(canonical, input.category)) continue;
+    const previous = bestByTag.get(canonical) ?? -1;
+    if (score > previous) {
+      bestByTag.set(canonical, score);
+    }
+  }
+
+  return [...bestByTag.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, input.maxCount)
     .map(([tag, score]) => ({ tag, score }));
 }
 
@@ -1443,13 +1834,13 @@ function enforceExclusiveMessageCategories(
   const seen = new Set<string>();
 
   for (const key of MESSAGE_CATEGORY_ORDER) {
-    const uniqueByScore = dedupeScoredTags(categories[key], TAGGING_MAX_MESSAGE_TAGS);
+    const uniqueByScore = dedupeScoredTags(categories[key], MESSAGE_CATEGORY_LIMITS[key]);
     const filtered: ScoredTagDTOValue[] = [];
     for (const entry of uniqueByScore) {
       if (seen.has(entry.tag)) continue;
       seen.add(entry.tag);
       filtered.push(entry);
-      if (filtered.length >= TAGGING_MAX_MESSAGE_TAGS) break;
+      if (filtered.length >= MESSAGE_CATEGORY_LIMITS[key]) break;
     }
     next[key] = filtered;
   }
@@ -1493,17 +1884,46 @@ function classifyMessageTagsToCategories(tags: ScoredTagDTOValue[]): MessageTagg
 
     const category = pickBestCategoryFromPatterns(tag.tag, MESSAGE_PRIMARY_CATEGORY_ORDER, patternMap);
     if (category) {
-      categories[category].push(tag);
+      const canonical = canonicalizeTagForCategory(tag.tag, category);
+      if (!canonical) continue;
+      categories[category].push({ ...tag, tag: canonical });
       continue;
     }
-    categories.topics.push(tag);
+    const broadTopic = canonicalizeTopicTag(tag.tag);
+    if (!broadTopic) continue;
+    categories.topics.push({ ...tag, tag: broadTopic });
   }
 
-  categories.themes = dedupeScoredTags(categories.themes, TAGGING_MAX_MESSAGE_TAGS);
-  categories.humor = dedupeScoredTags(categories.humor, TAGGING_MAX_MESSAGE_TAGS);
-  categories.art = dedupeScoredTags(categories.art, TAGGING_MAX_MESSAGE_TAGS);
-  categories.tone = dedupeScoredTags(categories.tone, TAGGING_MAX_MESSAGE_TAGS);
-  categories.topics = dedupeScoredTags(categories.topics, TAGGING_MAX_MESSAGE_TAGS);
+  categories.themes = filterTagSet({
+    tags: categories.themes,
+    maxCount: MESSAGE_CATEGORY_LIMITS.themes,
+    minScore: TAGGING_MIN_CATEGORY_SCORE,
+    category: "themes",
+  });
+  categories.humor = filterTagSet({
+    tags: categories.humor,
+    maxCount: MESSAGE_CATEGORY_LIMITS.humor,
+    minScore: TAGGING_MIN_CATEGORY_SCORE,
+    category: "humor",
+  });
+  categories.art = filterTagSet({
+    tags: categories.art,
+    maxCount: MESSAGE_CATEGORY_LIMITS.art,
+    minScore: TAGGING_MIN_CATEGORY_SCORE,
+    category: "art",
+  });
+  categories.tone = filterTagSet({
+    tags: categories.tone,
+    maxCount: MESSAGE_CATEGORY_LIMITS.tone,
+    minScore: TAGGING_MIN_CATEGORY_SCORE,
+    category: "tone",
+  });
+  categories.topics = filterTagSet({
+    tags: categories.topics,
+    maxCount: MESSAGE_CATEGORY_LIMITS.topics,
+    minScore: TAGGING_MIN_CATEGORY_SCORE,
+    category: "topics",
+  });
   return enforceExclusiveMessageCategories(categories);
 }
 
@@ -1546,10 +1966,165 @@ function mergeAndFillCategoryLists(
   synthesized: ScoredTagDTOValue[],
   maxCount: number,
 ): ScoredTagDTOValue[] {
-  if (existing.length > 0) {
-    return existing.slice(0, maxCount);
+  return dedupeScoredTags([...existing, ...synthesized], maxCount);
+}
+
+function createFallbackCategoryTag(
+  label: string,
+  used: Set<string>,
+  score = 0.34,
+): ScoredTagDTOValue {
+  const normalizedBase = normalizeTagLabel(label) || "general";
+  let next = normalizedBase;
+  let index = 2;
+  while (used.has(next)) {
+    next = normalizeTagLabel(`${normalizedBase} ${index}`) || `${normalizedBase}-${index}`;
+    index += 1;
   }
-  return synthesized.slice(0, maxCount);
+  return {
+    tag: next,
+    score: normalizeTagScore(score),
+  };
+}
+
+function pickCategoryFallbackTag(input: {
+  candidates: ScoredTagDTOValue[];
+  used: Set<string>;
+  preferredPatterns?: RegExp[];
+  fallbackLabel: string;
+  fallbackScore?: number;
+}): ScoredTagDTOValue {
+  if (input.preferredPatterns && input.preferredPatterns.length > 0) {
+    const matched = input.candidates.find((entry) =>
+      !input.used.has(entry.tag) && matchesAnyPattern(entry.tag, input.preferredPatterns!));
+    if (matched) return matched;
+  }
+
+  const nextUnused = input.candidates.find((entry) => !input.used.has(entry.tag));
+  if (nextUnused) return nextUnused;
+
+  return createFallbackCategoryTag(input.fallbackLabel, input.used, input.fallbackScore);
+}
+
+function ensureMessageCategoriesPopulated(
+  categories: MessageTaggingDTOValue["categories"],
+  sourceMessage: string,
+): MessageTaggingDTOValue["categories"] {
+  const next: MessageTaggingDTOValue["categories"] = {
+    themes: filterTagSet({
+      tags: categories.themes,
+      maxCount: MESSAGE_CATEGORY_LIMITS.themes,
+      minScore: TAGGING_MIN_CATEGORY_SCORE,
+      category: "themes",
+    }),
+    humor: filterTagSet({
+      tags: categories.humor,
+      maxCount: MESSAGE_CATEGORY_LIMITS.humor,
+      minScore: TAGGING_MIN_CATEGORY_SCORE,
+      category: "humor",
+    }),
+    art: filterTagSet({
+      tags: categories.art,
+      maxCount: MESSAGE_CATEGORY_LIMITS.art,
+      minScore: TAGGING_MIN_CATEGORY_SCORE,
+      category: "art",
+    }),
+    tone: filterTagSet({
+      tags: categories.tone,
+      maxCount: MESSAGE_CATEGORY_LIMITS.tone,
+      minScore: TAGGING_MIN_CATEGORY_SCORE,
+      category: "tone",
+    }),
+    topics: filterTagSet({
+      tags: categories.topics,
+      maxCount: MESSAGE_CATEGORY_LIMITS.topics,
+      minScore: TAGGING_MIN_CATEGORY_SCORE,
+      category: "topics",
+    }),
+  };
+
+  const tone = [...next.tone];
+  const hasLanguageMarker = tone.some((entry) => entry.tag.startsWith("language:"));
+  const hasComplexityMarker = tone.some((entry) => entry.tag.startsWith("complexity:"));
+  const normalizedMessage = sourceMessage.toLowerCase();
+  const germanSignals = (normalizedMessage.match(/\b(der|die|das|und|nicht|ist|ein|eine)\b/g) || []).length
+    + (/[äöüß]/i.test(sourceMessage) ? 1 : 0);
+  const englishSignals = (normalizedMessage.match(/\b(the|and|is|are|this|that|with)\b/g) || []).length;
+
+  if (!hasLanguageMarker) {
+    if (germanSignals > englishSignals && germanSignals > 0) {
+      tone.push({ tag: "language:german", score: TAGGING_MIN_CATEGORY_SCORE });
+    } else if (englishSignals > 0) {
+      tone.push({ tag: "language:english", score: TAGGING_MIN_CATEGORY_SCORE });
+    }
+  }
+
+  if (!hasComplexityMarker) {
+    const words = sourceMessage
+      .replace(/@\w+/g, " ")
+      .replace(/https?:\/\/\S+/g, " ")
+      .replace(/[^\p{L}\p{N}\s-]+/gu, " ")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
+    if (words.length > 0) {
+      const avgWordLength = words.reduce((sum, word) => sum + word.length, 0) / words.length;
+      tone.push({
+        tag: avgWordLength >= 6 ? "complexity:complex" : "complexity:simple",
+        score: TAGGING_MIN_CATEGORY_SCORE,
+      });
+    }
+  }
+
+  next.tone = filterTagSet({
+    tags: tone,
+    maxCount: MESSAGE_CATEGORY_LIMITS.tone,
+    minScore: TAGGING_MIN_CATEGORY_SCORE,
+    category: "tone",
+  });
+  return enforceExclusiveMessageCategories(next);
+}
+
+function ensureImageCategoriesPopulated(
+  categories: MessageTaggingDTOValue["images"][number]["categories"],
+  imageTags: ScoredTagDTOValue[],
+): MessageTaggingDTOValue["images"][number]["categories"] {
+  const next = createEmptyImageTagCategories();
+  for (const key of IMAGE_CATEGORY_ORDER) {
+    next[key] = categories[key].slice(0, TAGGING_MAX_IMAGE_TAGS);
+  }
+
+  const used = new Set(
+    [...next.themes, ...next.humor, ...next.art, ...next.tone, ...next.objects]
+      .map((entry) => entry.tag),
+  );
+  const candidates = dedupeScoredTags(imageTags, TAGGING_MAX_IMAGE_TAGS);
+
+  const fillIfEmpty = (
+    key: keyof MessageTaggingDTOValue["images"][number]["categories"],
+    patterns: RegExp[] | undefined,
+    fallbackLabel: string,
+    fallbackScore?: number,
+  ) => {
+    if (next[key].length > 0) return;
+    const picked = pickCategoryFallbackTag({
+      candidates,
+      used,
+      preferredPatterns: patterns,
+      fallbackLabel,
+      fallbackScore,
+    });
+    used.add(picked.tag);
+    next[key] = [picked];
+  };
+
+  fillIfEmpty("themes", IMAGE_THEME_PATTERNS, "szene", 0.36);
+  fillIfEmpty("humor", IMAGE_HUMOR_PATTERNS, "leichter humor", 0.32);
+  fillIfEmpty("art", IMAGE_ART_PATTERNS, "visueller stil", 0.32);
+  fillIfEmpty("tone", IMAGE_TONE_PATTERNS, "neutraler ton", 0.32);
+  fillIfEmpty("objects", IMAGE_OBJECT_PATTERNS, "objekt", 0.38);
+
+  return enforceExclusiveImageCategories(next);
 }
 
 function collectImageUrlsForTagging(imageUrls: string[]): string[] {
@@ -1738,6 +2313,7 @@ function normalizeGeneratedTaggingPayload(input: {
   rawText: string;
   sourceImageUrls: string[];
   model: string;
+  message: string;
 }): StoredTaggingPayload {
   const normalizedText = input.rawText
     .trim()
@@ -1758,7 +2334,39 @@ function normalizeGeneratedTaggingPayload(input: {
     throw new Error("Tagging response JSON must be an object");
   }
 
-  const modelCategories = normalizeMessageTagCategories(record.categories);
+  const normalizedModelCategories = normalizeMessageTagCategories(record.categories);
+  const modelCategories: MessageTaggingDTOValue["categories"] = {
+    themes: filterTagSet({
+      tags: normalizedModelCategories.themes,
+      maxCount: MESSAGE_CATEGORY_LIMITS.themes,
+      minScore: TAGGING_MIN_CATEGORY_SCORE,
+      category: "themes",
+    }),
+    humor: filterTagSet({
+      tags: normalizedModelCategories.humor,
+      maxCount: MESSAGE_CATEGORY_LIMITS.humor,
+      minScore: TAGGING_MIN_CATEGORY_SCORE,
+      category: "humor",
+    }),
+    art: filterTagSet({
+      tags: normalizedModelCategories.art,
+      maxCount: MESSAGE_CATEGORY_LIMITS.art,
+      minScore: TAGGING_MIN_CATEGORY_SCORE,
+      category: "art",
+    }),
+    tone: filterTagSet({
+      tags: normalizedModelCategories.tone,
+      maxCount: MESSAGE_CATEGORY_LIMITS.tone,
+      minScore: TAGGING_MIN_CATEGORY_SCORE,
+      category: "tone",
+    }),
+    topics: filterTagSet({
+      tags: normalizedModelCategories.topics,
+      maxCount: MESSAGE_CATEGORY_LIMITS.topics,
+      minScore: TAGGING_MIN_CATEGORY_SCORE,
+      category: "topics",
+    }),
+  };
   const modelCategoryTags = [
     ...modelCategories.themes,
     ...modelCategories.humor,
@@ -1767,38 +2375,52 @@ function normalizeGeneratedTaggingPayload(input: {
     ...modelCategories.topics,
   ];
 
-  let messageTags = normalizeScoredTags(record.messageTags, TAGGING_MAX_MESSAGE_TAGS);
-  if (messageTags.length < 20) {
+  let messageTags = filterTagSet({
+    tags: normalizeScoredTags(record.messageTags, TAGGING_MAX_MESSAGE_TAGS),
+    maxCount: TAGGING_MAX_MESSAGE_TAGS,
+    minScore: TAGGING_MIN_MESSAGE_SCORE,
+  });
+  if (messageTags.length < TAGGING_MESSAGE_TARGET_MIN) {
     messageTags = appendUniqueTags(messageTags, modelCategoryTags, TAGGING_MAX_MESSAGE_TAGS);
   }
 
   const synthesizedMessageCategories = classifyMessageTagsToCategories(messageTags);
-  const categories = enforceExclusiveMessageCategories({
+  const mergedMessageCategories = enforceExclusiveMessageCategories({
     themes: mergeAndFillCategoryLists(
       modelCategories.themes,
       synthesizedMessageCategories.themes,
-      TAGGING_MAX_MESSAGE_TAGS,
+      MESSAGE_CATEGORY_LIMITS.themes,
     ),
     humor: mergeAndFillCategoryLists(
       modelCategories.humor,
       synthesizedMessageCategories.humor,
-      TAGGING_MAX_MESSAGE_TAGS,
+      MESSAGE_CATEGORY_LIMITS.humor,
     ),
     art: mergeAndFillCategoryLists(
       modelCategories.art,
       synthesizedMessageCategories.art,
-      TAGGING_MAX_MESSAGE_TAGS,
+      MESSAGE_CATEGORY_LIMITS.art,
     ),
     tone: mergeAndFillCategoryLists(
       modelCategories.tone,
       synthesizedMessageCategories.tone,
-      TAGGING_MAX_MESSAGE_TAGS,
+      MESSAGE_CATEGORY_LIMITS.tone,
     ),
     topics: mergeAndFillCategoryLists(
       modelCategories.topics,
       synthesizedMessageCategories.topics,
+      MESSAGE_CATEGORY_LIMITS.topics,
+    ),
+  });
+  const categories = ensureMessageCategoriesPopulated(mergedMessageCategories, input.message);
+  messageTags = filterTagSet({
+    tags: appendUniqueTags(
+      messageTags,
+      [...categories.themes, ...categories.humor, ...categories.art, ...categories.tone, ...categories.topics],
       TAGGING_MAX_MESSAGE_TAGS,
     ),
+    maxCount: TAGGING_MAX_MESSAGE_TAGS,
+    minScore: TAGGING_MIN_MESSAGE_SCORE,
   });
 
   const sourceImageUrls = collectImageUrlsForTagging(input.sourceImageUrls);
@@ -1827,7 +2449,7 @@ function normalizeGeneratedTaggingPayload(input: {
       ? appendUniqueTags(image.tags, modelImageCategoryTags, TAGGING_MAX_IMAGE_TAGS)
       : image.tags.slice(0, TAGGING_MAX_IMAGE_TAGS);
     const synthesizedImageCategories = classifyImageTagsToCategories(baseTags);
-    const categories = enforceExclusiveImageCategories({
+    const mergedImageCategories = enforceExclusiveImageCategories({
       themes: mergeAndFillCategoryLists(
         modelImageCategories.themes,
         synthesizedImageCategories.themes,
@@ -1854,6 +2476,7 @@ function normalizeGeneratedTaggingPayload(input: {
         TAGGING_MAX_IMAGE_TAGS,
       ),
     });
+    const categories = ensureImageCategoriesPopulated(mergedImageCategories, baseTags);
     const mergedImageCategoryTags = [
       ...categories.themes,
       ...categories.humor,
@@ -2111,6 +2734,7 @@ async function buildAiInput(
   const recentContext = contextLines.join("\n");
 
   const cleanedPrompt = stripAiMentions(payload.message);
+  const hasPollIntent = isLikelyPollIntent(cleanedPrompt);
   const userPrompt = clampText(
     sanitizeMessageForAi(cleanedPrompt || "Bitte hilf bei der neuesten Nachricht in diesem Chat."),
     isMinimal ? AI_USER_PROMPT_CHARS_MINIMAL : AI_USER_PROMPT_CHARS,
@@ -2130,7 +2754,7 @@ async function buildAiInput(
         ? "Die Nachricht enthält Bild-Inputs. Nutze sie nur für textliche Analyse/Beschreibung, nicht für Bildgenerierung."
         : "Die Nachricht enthält Bild-Inputs. Falls ein Bild gewünscht ist, nutze sie als Referenz-/Bearbeitungsbilder."
       : "",
-    provider === "grok"
+    hasPollIntent
       ? "Wenn der User eine Umfrage erstellen will, antworte ausschließlich mit genau einem Block in diesem Format: <POLL_JSON>{\"question\":\"<kurze Frage>\",\"options\":[\"<Option 1>\",\"<Option 2>\"],\"multiSelect\":false}</POLL_JSON>. Kein zusätzlicher Text davor oder danach. JSON muss gültig sein, mit 2 bis 15 eindeutigen Optionen."
       : "",
     recentContext ? `Letzter Chat-Kontext:\n${recentContext}` : "",
@@ -2220,16 +2844,17 @@ async function queueTaggingForCreatedMessage(input: {
   });
 }
 
-async function createAiMessage(input: {
+async function createAiMessageRecord(input: {
   provider: AiProvider;
-  sourceMessageId: string;
+  threadMessageId: string;
   content: string;
-}): Promise<void> {
+  queueTagging?: boolean;
+}): Promise<MessageRow> {
   const created = await prisma.message.create({
     data: {
       type: MessageType.MESSAGE,
       content: input.content,
-      questionMessageId: input.sourceMessageId,
+      questionMessageId: input.threadMessageId,
       authorName: getAiProviderDisplayName(input.provider),
       authorProfilePicture: getAiProviderAvatar(input.provider),
       taggingStatus: AiJobStatus.PENDING,
@@ -2241,17 +2866,165 @@ async function createAiMessage(input: {
   });
   invalidateMediaCache();
   publish("message.created", mapMessage(created));
-  await queueTaggingForCreatedMessage({
-    messageId: created.id,
-    username: created.authorName,
-    message: created.content,
-    imageUrls: extractImageUrlsForAi(created.content),
+  if (input.queueTagging !== false) {
+    await queueTaggingForCreatedMessage({
+      messageId: created.id,
+      username: created.authorName,
+      message: created.content,
+      imageUrls: extractImageUrlsForAi(created.content),
+    });
+  }
+  return created;
+}
+
+async function createAiMessage(input: {
+  provider: AiProvider;
+  threadMessageId: string;
+  content: string;
+}): Promise<void> {
+  await createAiMessageRecord({
+    provider: input.provider,
+    threadMessageId: input.threadMessageId,
+    content: input.content,
+    queueTagging: true,
   });
+}
+
+async function updateAiMessageContent(input: {
+  messageId: string;
+  content: string;
+  queueTagging?: boolean;
+}): Promise<void> {
+  const updated = await prisma.message.update({
+    where: { id: input.messageId },
+    data: {
+      content: input.content,
+    },
+    include: MESSAGE_INCLUDE,
+  });
+  invalidateMediaCache();
+  publish("message.updated", mapMessage(updated));
+  if (input.queueTagging !== false) {
+    await queueTaggingForCreatedMessage({
+      messageId: updated.id,
+      username: updated.authorName,
+      message: updated.content,
+      imageUrls: extractImageUrlsForAi(updated.content),
+    });
+  }
+}
+
+async function streamAiTextToMessage(input: {
+  provider: AiProvider;
+  threadMessageId: string;
+  responsesApi: {
+    stream?: (request: unknown) => {
+      on?: (event: string, handler: (payload: { delta?: string }) => void) => void;
+      finalResponse: () => Promise<OpenAIResponse>;
+    };
+  };
+  buildRequest: (mode: AiInputMode) => Promise<unknown>;
+}): Promise<{
+  supported: boolean;
+  messageId: string | null;
+  rawOutputText: string;
+}> {
+  if (typeof input.responsesApi.stream !== "function") {
+    return { supported: false, messageId: null, rawOutputText: "" };
+  }
+
+  let messageId: string | null = null;
+  let text = "";
+  let lastPublishedLength = 0;
+  let lastPublishedAt = 0;
+  let flushChain: Promise<void> = Promise.resolve();
+
+  const flush = (force = false) => {
+    flushChain = flushChain.then(async () => {
+      const candidate = text;
+      if (!candidate.trim()) return;
+
+      const now = Date.now();
+      const deltaLength = candidate.length - lastPublishedLength;
+      const shouldSkip = !force
+        && deltaLength < 18
+        && now - lastPublishedAt < 120
+        && !candidate.endsWith("\n");
+      if (shouldSkip) return;
+
+      if (!messageId) {
+        const created = await createAiMessageRecord({
+          provider: input.provider,
+          threadMessageId: input.threadMessageId,
+          content: candidate,
+          queueTagging: false,
+        });
+        messageId = created.id;
+      } else {
+        await updateAiMessageContent({
+          messageId,
+          content: candidate,
+          queueTagging: false,
+        });
+      }
+
+      lastPublishedLength = candidate.length;
+      lastPublishedAt = now;
+    });
+    return flushChain;
+  };
+
+  const runMode = async (mode: AiInputMode): Promise<OpenAIResponse> => {
+    const stream = await input.responsesApi.stream!(await input.buildRequest(mode));
+    if (!stream || typeof stream.finalResponse !== "function") {
+      throw new Error("STREAM_UNAVAILABLE");
+    }
+    stream.on?.("response.output_text.delta", (event) => {
+      if (typeof event.delta !== "string" || !event.delta) return;
+      text += event.delta;
+      void flush(false);
+    });
+    const finalResponse = await stream.finalResponse();
+    await flush(true);
+    const finalText = stripLeadingAiMentions(finalResponse.output_text?.trim() || "");
+    if (finalText && finalText !== text) {
+      text = finalText;
+      await flush(true);
+    }
+    return finalResponse;
+  };
+
+  try {
+    await runMode("full");
+  } catch (error) {
+    if (isContextWindowError(error)) {
+      try {
+        await runMode("minimal");
+      } catch (minimalError) {
+        if (!messageId) {
+          return { supported: false, messageId: null, rawOutputText: "" };
+        }
+        throw minimalError;
+      }
+    } else if (!messageId) {
+      return { supported: false, messageId: null, rawOutputText: "" };
+    } else {
+      throw error;
+    }
+  }
+
+  await flushChain;
+
+  return {
+    supported: true,
+    messageId,
+    rawOutputText: stripLeadingAiMentions(text.trim()),
+  };
 }
 
 async function createAiPollMessage(input: {
   provider: AiProvider;
-  sourceMessageId: string;
+  threadMessageId: string;
   question: string;
   options: string[];
   multiSelect: boolean;
@@ -2260,7 +3033,7 @@ async function createAiPollMessage(input: {
     data: {
       type: MessageType.VOTING_POLL,
       content: input.question,
-      questionMessageId: input.sourceMessageId,
+      questionMessageId: input.threadMessageId,
       authorName: getAiProviderDisplayName(input.provider),
       authorProfilePicture: getAiProviderAvatar(input.provider),
       optionOne: input.options[0] || null,
@@ -2295,19 +3068,20 @@ async function createAiPollMessage(input: {
   });
 }
 
-async function emitAiBusyNotice(sourceMessageId: string, provider: AiProvider): Promise<void> {
+async function emitAiBusyNotice(threadMessageId: string, provider: AiProvider): Promise<void> {
   const now = Date.now();
   if (now - lastAiBusyNoticeAt < AI_BUSY_NOTICE_COOLDOWN_MS) return;
   lastAiBusyNoticeAt = now;
   await createAiMessage({
     provider,
-    sourceMessageId,
+    threadMessageId,
     content: `Zu viele ${getAiProviderMention(provider)} Anfragen gleichzeitig. Bitte in wenigen Sekunden erneut versuchen.`,
   });
 }
 
 async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
   if (!isProviderConfigured(payload.provider)) return;
+  const threadMessageId = payload.threadMessageId ?? payload.sourceMessageId;
 
   publishAiStatus(payload.provider, "denkt nach…");
 
@@ -2424,6 +3198,45 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
         }
       };
 
+      const shouldTryRealtimeText = !useImageGenerationTool && !isLikelyPollIntent(cleanedMessage);
+      if (shouldTryRealtimeText) {
+        const streamResult = await streamAiTextToMessage({
+          provider: payload.provider,
+          threadMessageId,
+          responsesApi: openai.responses as unknown as {
+            stream?: (request: unknown) => {
+              on?: (event: string, handler: (payload: { delta?: string }) => void) => void;
+              finalResponse: () => Promise<OpenAIResponse>;
+            };
+          },
+          buildRequest: async (mode) => buildRequest({ mode }),
+        });
+
+        if (streamResult.supported) {
+          const outputWithoutPoll = stripAiPollBlocks(streamResult.rawOutputText);
+          const text = outputWithoutPoll.trim();
+          const finalText = !text || text === "[NO_RESPONSE]"
+            ? "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal."
+            : text;
+
+          publishAiStatus(payload.provider, "schreibt…");
+          if (streamResult.messageId) {
+            await updateAiMessageContent({
+              messageId: streamResult.messageId,
+              content: finalText,
+              queueTagging: true,
+            });
+          } else {
+            await createAiMessage({
+              provider: payload.provider,
+              threadMessageId,
+              content: finalText,
+            });
+          }
+          return;
+        }
+      }
+
       const requestWithServerRecovery = async (): Promise<OpenAIResponse> => {
         try {
           return await requestWithContextFallback();
@@ -2507,7 +3320,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
         publishAiStatus(payload.provider, "schreibt…");
         await createAiPollMessage({
           provider: payload.provider,
-          sourceMessageId: payload.sourceMessageId,
+          threadMessageId,
           question: pollPayload.question,
           options: pollPayload.options,
           multiSelect: pollPayload.multiSelect,
@@ -2525,7 +3338,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
         publishAiStatus(payload.provider, "schreibt…");
         await createAiMessage({
           provider: payload.provider,
-          sourceMessageId: payload.sourceMessageId,
+          threadMessageId,
           content: "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal.",
         });
         return;
@@ -2534,7 +3347,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       publishAiStatus(payload.provider, "schreibt…");
       await createAiMessage({
         provider: payload.provider,
-        sourceMessageId: payload.sourceMessageId,
+        threadMessageId,
         content: text,
       });
       return;
@@ -2549,7 +3362,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       publishAiStatus(payload.provider, "schreibt…");
       await createAiMessage({
         provider: payload.provider,
-        sourceMessageId: payload.sourceMessageId,
+        threadMessageId,
         content: "Bildgenerierung und Bildbearbeitung sind für @grok deaktiviert. Nutze dafür bitte @chatgpt.",
       });
       return;
@@ -2570,6 +3383,44 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       },
     });
 
+    const shouldTryRealtimeText = !isLikelyPollIntent(cleanedMessage);
+    if (shouldTryRealtimeText) {
+      const streamResult = await streamAiTextToMessage({
+        provider: payload.provider,
+        threadMessageId,
+        responsesApi: grok.responses as unknown as {
+          stream?: (request: unknown) => {
+            on?: (event: string, handler: (payload: { delta?: string }) => void) => void;
+            finalResponse: () => Promise<OpenAIResponse>;
+          };
+        },
+        buildRequest: buildGrokRequest,
+      });
+
+      if (streamResult.supported) {
+        const text = stripAiPollBlocks(streamResult.rawOutputText).trim();
+        const finalText = !text || text === "[NO_RESPONSE]"
+          ? "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal."
+          : text;
+
+        publishAiStatus(payload.provider, "schreibt…");
+        if (streamResult.messageId) {
+          await updateAiMessageContent({
+            messageId: streamResult.messageId,
+            content: finalText,
+            queueTagging: true,
+          });
+        } else {
+          await createAiMessage({
+            provider: payload.provider,
+            threadMessageId,
+            content: finalText,
+          });
+        }
+        return;
+      }
+    }
+
     let response: OpenAIResponse;
     try {
       response = (await grok.responses.create(await buildGrokRequest("full"))) as OpenAIResponse;
@@ -2586,7 +3437,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       publishAiStatus(payload.provider, "schreibt…");
       await createAiPollMessage({
         provider: payload.provider,
-        sourceMessageId: payload.sourceMessageId,
+        threadMessageId,
         question: pollPayload.question,
         options: pollPayload.options,
         multiSelect: pollPayload.multiSelect,
@@ -2600,7 +3451,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       publishAiStatus(payload.provider, "schreibt…");
       await createAiMessage({
         provider: payload.provider,
-        sourceMessageId: payload.sourceMessageId,
+        threadMessageId,
         content: "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal.",
       });
       return;
@@ -2609,7 +3460,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
     publishAiStatus(payload.provider, "schreibt…");
     await createAiMessage({
       provider: payload.provider,
-      sourceMessageId: payload.sourceMessageId,
+      threadMessageId,
       content: text,
     });
   } catch (error) {
@@ -2627,7 +3478,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
 
     await createAiMessage({
       provider: payload.provider,
-      sourceMessageId: payload.sourceMessageId,
+      threadMessageId,
       content: errorText,
     });
   } finally {
@@ -2661,6 +3512,29 @@ interface ClaimedAiJobRow {
 function parseAiJobImageUrls(raw: Prisma.JsonValue): string[] {
   if (!Array.isArray(raw)) return [];
   return raw.filter((item): item is string => typeof item === "string").slice(0, 4);
+}
+
+async function resolveThreadRootMessageId(sourceMessageId: string): Promise<string> {
+  const normalizedSource = sourceMessageId.trim();
+  if (!normalizedSource) return sourceMessageId;
+
+  let currentMessageId: string | null = normalizedSource;
+  let resolvedMessageId = normalizedSource;
+  const visited = new Set<string>();
+
+  while (currentMessageId && !visited.has(currentMessageId)) {
+    visited.add(currentMessageId);
+    const row: { id: string; questionMessageId: string | null } | null = await prisma.message.findUnique({
+      where: { id: currentMessageId },
+      select: { id: true, questionMessageId: true },
+    });
+    if (!row) break;
+
+    resolvedMessageId = row.id;
+    currentMessageId = row.questionMessageId;
+  }
+
+  return resolvedMessageId;
 }
 
 interface ClaimedMessageTagJobRow {
@@ -2796,12 +3670,14 @@ export async function processAiQueue(input: { maxJobs?: number } = {}): Promise<
     try {
       const mentionedProviders = detectAiProviders(job.message);
       const providers = mentionedProviders.length > 0 ? mentionedProviders : (["chatgpt"] as const);
+      const threadMessageId = await resolveThreadRootMessageId(job.sourceMessageId);
 
       for (const provider of providers) {
         if (!isProviderConfigured(provider)) continue;
         await emitAiResponse({
           provider,
           sourceMessageId: job.sourceMessageId,
+          threadMessageId,
           username: job.username,
           message: job.message,
           imageUrls: parseAiJobImageUrls(job.imageUrls),
@@ -3012,6 +3888,7 @@ async function generateTaggingPayloadForJob(input: {
     rawText,
     sourceImageUrls,
     model: grokConfig.textModel,
+    message: input.message,
   });
 }
 
@@ -3103,6 +3980,7 @@ export async function processTaggingQueue(
 async function maybeRespondAsAi(payload: Omit<AiTriggerPayload, "provider">): Promise<void> {
   const mentionedProviders = detectAiProviders(payload.message);
   if (mentionedProviders.length === 0) return;
+  const threadMessageId = await resolveThreadRootMessageId(payload.sourceMessageId);
 
   const configuredProviders = mentionedProviders.filter((provider) => isProviderConfigured(provider));
   const unconfiguredProviders = mentionedProviders.filter((provider) => !isProviderConfigured(provider));
@@ -3111,7 +3989,7 @@ async function maybeRespondAsAi(payload: Omit<AiTriggerPayload, "provider">): Pr
     publishAiStatus(provider, "offline");
     await createAiMessage({
       provider,
-      sourceMessageId: payload.sourceMessageId,
+      threadMessageId,
       content: `Ich bin aktuell nicht konfiguriert. Bitte ${provider === "grok" ? "GROK_API_KEY" : "OPENAI_API_KEY"} setzen.`,
     });
   }
@@ -3121,7 +3999,7 @@ async function maybeRespondAsAi(payload: Omit<AiTriggerPayload, "provider">): Pr
   const queued = await enqueueAiResponse(payload);
   if (queued === "full") {
     for (const provider of configuredProviders) {
-      await emitAiBusyNotice(payload.sourceMessageId, provider);
+      await emitAiBusyNotice(threadMessageId, provider);
     }
     return;
   }
@@ -3145,7 +4023,18 @@ export function __extractAiPollPayloadForTests(rawText: string): AiPollPayload |
 }
 
 async function getUserByClientId(clientId: string) {
-  const user = await prisma.user.findUnique({ where: { clientId } });
+  const user = await prisma.user.findUnique({
+    where: { clientId },
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+    },
+  });
   assert(user, "Nutzersitzung nicht gefunden. Bitte erneut anmelden.", 401);
   return user;
 }
@@ -3303,6 +4192,7 @@ function toAuthSessionResponse(user: {
   id: string;
   clientId: string;
   loginName: string | null;
+  loginNameEncrypted: string | null;
   sessionToken: string | null;
   sessionExpiresAt: Date | null;
   username: string;
@@ -3311,16 +4201,26 @@ function toAuthSessionResponse(user: {
   isOnline: boolean;
   lastSeenAt: Date | null;
 }): AuthSessionDTO {
-  assert(user.loginName, "Konto ist unvollständig. Bitte erneut anmelden.", 401);
   assert(user.sessionToken, "Sitzung fehlt. Bitte erneut anmelden.", 401);
   assert(user.sessionExpiresAt, "Sitzung fehlt. Bitte erneut anmelden.", 401);
 
-  const devMode = user.username.trim().toLowerCase().startsWith(DEVELOPER_USERNAME.toLowerCase());
+  const loginName = (() => {
+    if (user.loginNameEncrypted) {
+      return decryptLoginName(user.loginNameEncrypted);
+    }
+    if (user.loginName) {
+      return normalizeLoginName(user.loginName);
+    }
+    throw new AppError("Konto ist unvollständig. Bitte erneut anmelden.", 401);
+  })();
+
+  const isDeveloperAlias = user.username.trim().toLowerCase().startsWith(DEVELOPER_USERNAME.toLowerCase());
+  const devMode = isDeveloperAlias || isDevUnlockUsername(loginName) || isDevUnlockUsername(user.username);
   const devAuthToken = devMode ? issueDevAuthToken(user.clientId) ?? undefined : undefined;
 
   return {
     ...mapUser(user),
-    loginName: user.loginName,
+    loginName,
     sessionToken: user.sessionToken,
     sessionExpiresAt: user.sessionExpiresAt.toISOString(),
     devMode,
@@ -3330,67 +4230,198 @@ function toAuthSessionResponse(user: {
 
 export async function signUpAccount(input: AuthSignUpRequest): Promise<AuthSessionDTO> {
   const loginName = normalizeLoginName(input.loginName);
+  const loginNameLookup = hashLoginNameLookup(loginName);
   const requestedDisplayName = input.displayName.trim();
   assert(requestedDisplayName.length >= 3, "Anzeigename muss mindestens 3 Zeichen lang sein", 400);
   await assertUsernameAllowed(requestedDisplayName);
 
-  const existing = await prisma.user.findFirst({
-    where: {
-      loginName,
-    },
-    select: { id: true },
-  });
+  let supportsEncryptedLoginNameColumns = true;
+  let existing: { id: string } | null = null;
+  try {
+    existing = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { loginNameLookup },
+          { loginName },
+        ],
+      },
+      select: { id: true },
+    });
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    supportsEncryptedLoginNameColumns = false;
+    markEncryptedLoginColumnsUnavailable();
+    existing = await prisma.user.findFirst({
+      where: { loginName },
+      select: { id: true },
+    });
+  }
   assert(!existing, "Dieser Login-Name ist bereits vergeben", 409);
 
   const clientId = randomUUID();
   const sessionToken = createSessionToken();
   const sessionExpiresAt = new Date(Date.now() + AUTH_SESSION_WINDOW_MS);
-  const devMode = isDevUnlockUsername(requestedDisplayName);
-  const displayName = devMode ? await resolveDeveloperUsername(clientId) : requestedDisplayName;
   const now = new Date();
 
-  const user = await prisma.user.create({
-    data: {
-      clientId,
-      loginName,
-      passwordHash: hashPassword(input.password),
-      sessionToken,
-      sessionExpiresAt,
-      username: displayName,
-      profilePicture: input.profilePicture || getDefaultProfilePicture(),
-      isOnline: true,
-      status: "",
-      lastSeenAt: now,
-    },
-  });
+  let user: {
+    id: string;
+    clientId: string;
+    loginName: string | null;
+    loginNameEncrypted: string | null;
+    sessionToken: string | null;
+    sessionExpiresAt: Date | null;
+    username: string;
+    profilePicture: string;
+    status: string;
+    isOnline: boolean;
+    lastSeenAt: Date | null;
+  };
+  try {
+    user = await prisma.user.create({
+      data: {
+        clientId,
+        loginName: supportsEncryptedLoginNameColumns ? null : loginName,
+        ...(supportsEncryptedLoginNameColumns
+          ? {
+            loginNameEncrypted: encryptLoginName(loginName),
+            loginNameLookup,
+          }
+          : {}),
+        passwordHash: hashPassword(input.password),
+        sessionToken,
+        sessionExpiresAt,
+        username: requestedDisplayName,
+        profilePicture: input.profilePicture || getDefaultProfilePicture(),
+        isOnline: true,
+        status: "",
+        lastSeenAt: now,
+      },
+      select: {
+        id: true,
+        clientId: true,
+        loginName: true,
+        ...(supportsEncryptedLoginNameColumns ? { loginNameEncrypted: true } : {}),
+        sessionToken: true,
+        sessionExpiresAt: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+      },
+    }) as typeof user;
+    markEncryptedLoginColumnsAvailableIfUnknown();
+  } catch (error) {
+    if (!supportsEncryptedLoginNameColumns || !isMissingColumnError(error)) throw error;
+    supportsEncryptedLoginNameColumns = false;
+    markEncryptedLoginColumnsUnavailable();
+    user = await prisma.user.create({
+      data: {
+        clientId,
+        loginName,
+        passwordHash: hashPassword(input.password),
+        sessionToken,
+        sessionExpiresAt,
+        username: requestedDisplayName,
+        profilePicture: input.profilePicture || getDefaultProfilePicture(),
+        isOnline: true,
+        status: "",
+        lastSeenAt: now,
+      },
+      select: {
+        id: true,
+        clientId: true,
+        loginName: true,
+        sessionToken: true,
+        sessionExpiresAt: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+      },
+    }) as typeof user;
+  }
 
   const dto = mapUser(user);
   publish("user.updated", dto);
   publish("presence.updated", dto);
-  await emitSystemMessage(`${user.username} ist dem Chat beigetreten`);
+  await emitSystemMessage(`${user.username} ist dem Chat beigetreten`, { authorId: user.id });
   return toAuthSessionResponse(user);
 }
 
 export async function signInAccount(input: AuthSignInRequest): Promise<AuthSessionDTO> {
   const loginName = normalizeLoginName(input.loginName);
-  const existing = await prisma.user.findFirst({
-    where: {
-      loginName,
-    },
-    select: {
-      id: true,
-      clientId: true,
-      loginName: true,
-      passwordHash: true,
-      sessionToken: true,
-      sessionExpiresAt: true,
-      username: true,
-      profilePicture: true,
-      status: true,
-      isOnline: true,
-      lastSeenAt: true,
-    },
-  });
+  const loginNameLookup = hashLoginNameLookup(loginName);
+  let supportsEncryptedLoginNameColumns = true;
+  let existing: {
+    id: string;
+    clientId: string;
+    loginName: string | null;
+    loginNameEncrypted: string | null;
+    loginNameLookup: string | null;
+    passwordHash: string | null;
+    sessionToken: string | null;
+    sessionExpiresAt: Date | null;
+    username: string;
+    profilePicture: string;
+    status: string;
+    isOnline: boolean;
+    lastSeenAt: Date | null;
+  } | null = null;
+  try {
+    existing = await prisma.user.findFirst({
+      where: {
+        OR: [
+          { loginNameLookup },
+          { loginName },
+        ],
+      },
+      select: {
+        id: true,
+        clientId: true,
+        loginName: true,
+        loginNameEncrypted: true,
+        loginNameLookup: true,
+        passwordHash: true,
+        sessionToken: true,
+        sessionExpiresAt: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+      },
+    });
+    markEncryptedLoginColumnsAvailableIfUnknown();
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    supportsEncryptedLoginNameColumns = false;
+    markEncryptedLoginColumnsUnavailable();
+    const legacyExisting = await prisma.user.findFirst({
+      where: { loginName },
+      select: {
+        id: true,
+        clientId: true,
+        loginName: true,
+        passwordHash: true,
+        sessionToken: true,
+        sessionExpiresAt: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+      },
+    });
+    existing = legacyExisting
+      ? {
+        ...legacyExisting,
+        loginNameEncrypted: null,
+        loginNameLookup: null,
+      }
+      : null;
+  }
 
   assert(existing, "Login fehlgeschlagen", 401);
   assert(existing.passwordHash, "Login fehlgeschlagen", 401);
@@ -3399,66 +4430,232 @@ export async function signInAccount(input: AuthSignInRequest): Promise<AuthSessi
   const sessionToken = createSessionToken();
   const sessionExpiresAt = new Date(Date.now() + AUTH_SESSION_WINDOW_MS);
   const now = new Date();
-  const user = await prisma.user.update({
-    where: { id: existing.id },
-    data: {
-      sessionToken,
-      sessionExpiresAt,
-      isOnline: true,
-      status: "",
-      lastSeenAt: now,
-    },
-  });
+  const shouldMigrateLegacyLoginName = supportsEncryptedLoginNameColumns && (Boolean(existing.loginName)
+    || !existing.loginNameEncrypted
+    || existing.loginNameLookup !== loginNameLookup);
+
+  let user: {
+    id: string;
+    clientId: string;
+    loginName: string | null;
+    loginNameEncrypted: string | null;
+    sessionToken: string | null;
+    sessionExpiresAt: Date | null;
+    username: string;
+    profilePicture: string;
+    status: string;
+    isOnline: boolean;
+    lastSeenAt: Date | null;
+  };
+  try {
+    user = await prisma.user.update({
+      where: { id: existing.id },
+      data: {
+        sessionToken,
+        sessionExpiresAt,
+        isOnline: true,
+        status: "",
+        lastSeenAt: now,
+        ...(shouldMigrateLegacyLoginName
+          ? {
+            loginNameEncrypted: encryptLoginName(loginName),
+            loginNameLookup,
+            loginName: null,
+          }
+          : {}),
+      },
+      select: {
+        id: true,
+        clientId: true,
+        loginName: true,
+        ...(supportsEncryptedLoginNameColumns ? { loginNameEncrypted: true } : {}),
+        sessionToken: true,
+        sessionExpiresAt: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+      },
+    }) as typeof user;
+    if (supportsEncryptedLoginNameColumns) {
+      markEncryptedLoginColumnsAvailableIfUnknown();
+    }
+  } catch (error) {
+    if (!supportsEncryptedLoginNameColumns || !isMissingColumnError(error)) throw error;
+    supportsEncryptedLoginNameColumns = false;
+    markEncryptedLoginColumnsUnavailable();
+    user = await prisma.user.update({
+      where: { id: existing.id },
+      data: {
+        sessionToken,
+        sessionExpiresAt,
+        isOnline: true,
+        status: "",
+        lastSeenAt: now,
+      },
+      select: {
+        id: true,
+        clientId: true,
+        loginName: true,
+        sessionToken: true,
+        sessionExpiresAt: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+      },
+    }) as typeof user;
+  }
 
   const dto = mapUser(user);
   publish("user.updated", dto);
   publish("presence.updated", dto);
-  if (!existing.isOnline) {
-    await emitSystemMessage(`${user.username} ist dem Chat beigetreten`);
-  }
   return toAuthSessionResponse(user);
 }
 
 export async function restoreSession(input: LoginRequest): Promise<LoginResponseDTO> {
-  const user = await prisma.user.findFirst({
-    where: {
-      clientId: input.clientId,
-      sessionToken: input.sessionToken,
-      sessionExpiresAt: { gt: new Date() },
-    },
-    select: {
-      id: true,
-      clientId: true,
-      loginName: true,
-      passwordHash: true,
-      sessionToken: true,
-      sessionExpiresAt: true,
-      username: true,
-      profilePicture: true,
-      status: true,
-      isOnline: true,
-      lastSeenAt: true,
-    },
-  });
+  let supportsEncryptedLoginNameColumns = true;
+  let user: {
+    id: string;
+    clientId: string;
+    loginName: string | null;
+    loginNameEncrypted: string | null;
+    passwordHash: string | null;
+    sessionToken: string | null;
+    sessionExpiresAt: Date | null;
+    username: string;
+    profilePicture: string;
+    status: string;
+    isOnline: boolean;
+    lastSeenAt: Date | null;
+  } | null = null;
+  try {
+    user = await prisma.user.findFirst({
+      where: {
+        clientId: input.clientId,
+        sessionToken: input.sessionToken,
+        sessionExpiresAt: { gt: new Date() },
+      },
+      select: {
+        id: true,
+        clientId: true,
+        loginName: true,
+        loginNameEncrypted: true,
+        passwordHash: true,
+        sessionToken: true,
+        sessionExpiresAt: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+      },
+    });
+    markEncryptedLoginColumnsAvailableIfUnknown();
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    supportsEncryptedLoginNameColumns = false;
+    markEncryptedLoginColumnsUnavailable();
+    const legacyUser = await prisma.user.findFirst({
+      where: {
+        clientId: input.clientId,
+        sessionToken: input.sessionToken,
+        sessionExpiresAt: { gt: new Date() },
+      },
+      select: {
+        id: true,
+        clientId: true,
+        loginName: true,
+        passwordHash: true,
+        sessionToken: true,
+        sessionExpiresAt: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+      },
+    });
+    user = legacyUser
+      ? {
+        ...legacyUser,
+        loginNameEncrypted: null,
+      }
+      : null;
+  }
   assert(user, "Sitzung ist abgelaufen. Bitte erneut anmelden.", 401);
 
   const now = new Date();
   const refreshedExpiry = new Date(Date.now() + AUTH_SESSION_WINDOW_MS);
-  const updated = await prisma.user.update({
-    where: { id: user.id },
-    data: {
-      isOnline: true,
-      status: "",
-      lastSeenAt: now,
-      sessionExpiresAt: refreshedExpiry,
-    },
-  });
+  let updated: {
+    id: string;
+    clientId: string;
+    username: string;
+    profilePicture: string;
+    status: string;
+    isOnline: boolean;
+    lastSeenAt: Date | null;
+    sessionToken: string | null;
+    sessionExpiresAt: Date | null;
+  };
+  try {
+    updated = await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        isOnline: true,
+        status: "",
+        lastSeenAt: now,
+        sessionExpiresAt: refreshedExpiry,
+      },
+      select: {
+        id: true,
+        clientId: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+        sessionToken: true,
+        sessionExpiresAt: true,
+      },
+    });
+    if (supportsEncryptedLoginNameColumns) {
+      markEncryptedLoginColumnsAvailableIfUnknown();
+    }
+  } catch (error) {
+    if (!supportsEncryptedLoginNameColumns || !isMissingColumnError(error)) throw error;
+    supportsEncryptedLoginNameColumns = false;
+    markEncryptedLoginColumnsUnavailable();
+    updated = await prisma.user.update({
+      where: { id: user.id },
+      data: {
+        isOnline: true,
+        status: "",
+        lastSeenAt: now,
+        sessionExpiresAt: refreshedExpiry,
+      },
+      select: {
+        id: true,
+        clientId: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+        sessionToken: true,
+        sessionExpiresAt: true,
+      },
+    });
+  }
   const dto = mapUser(updated);
   publish("user.updated", dto);
   publish("presence.updated", dto);
   return toAuthSessionResponse({
     ...updated,
     loginName: user.loginName,
+    loginNameEncrypted: user.loginNameEncrypted,
     sessionToken: user.sessionToken,
     sessionExpiresAt: refreshedExpiry,
   });
@@ -3471,8 +4668,8 @@ async function loginUserLegacy(input: {
 }): Promise<LoginResponseDTO> {
   const requestedUsername = input.username.trim();
   assert(requestedUsername.length >= 3, "Benutzername muss mindestens 3 Zeichen lang sein", 400);
-  const devMode = isDevUnlockUsername(requestedUsername);
-  const username = devMode ? await resolveDeveloperUsername(input.clientId) : requestedUsername;
+  const devMode = isDevUnlockUsername(requestedUsername) || requestedUsername.toLowerCase().startsWith(DEVELOPER_USERNAME.toLowerCase());
+  const username = requestedUsername;
   await assertUsernameAllowed(username);
   await assertUsernameAvailable(username, input.clientId);
 
@@ -3507,19 +4704,28 @@ async function loginUserLegacy(input: {
       status: "",
       lastSeenAt: new Date(),
     },
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+    },
   });
 
   const dto = mapUser(user);
   publish("user.updated", dto);
   publish("presence.updated", dto);
 
-  if (!existingUser?.isOnline) {
-    await emitSystemMessage(`${user.username} ist dem Chat beigetreten`);
+  if (!existingUser) {
+    await emitSystemMessage(`${user.username} ist dem Chat beigetreten`, { authorId: user.id });
   }
 
   return {
     ...dto,
-    loginName: user.loginName || `legacy-${user.clientId}`,
+    loginName: `legacy-${user.clientId}`,
     sessionToken,
     sessionExpiresAt: sessionExpiresAt.toISOString(),
     devMode,
@@ -3574,13 +4780,22 @@ export async function renameUser(input: {
       ...(profilePicture ? { profilePicture } : {}),
       updatedAt: new Date(),
     },
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+    },
   });
 
   const dto = mapUser(user);
   publish("user.updated", dto);
 
   if (newUsername && currentUser.username !== newUsername) {
-    await emitSystemMessage(`${newUsername} ist dem Chat beigetreten`);
+    await emitSystemMessage(`${newUsername} ist dem Chat beigetreten`, { authorId: user.id });
   }
 
   return dto;
@@ -3590,6 +4805,15 @@ export async function pingPresence(input: { clientId: string }): Promise<UserPre
   const user = await prisma.user.update({
     where: { clientId: input.clientId },
     data: { isOnline: true, lastSeenAt: new Date() },
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+    },
   });
 
   await cleanupOfflineUsers();
@@ -3602,6 +4826,15 @@ export async function setTypingStatus(input: { clientId: string; status: string 
   const user = await prisma.user.update({
     where: { clientId: input.clientId },
     data: { status: input.status, isOnline: true, lastSeenAt: new Date() },
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+    },
   });
 
   const dto = mapUser(user);
@@ -3610,12 +4843,32 @@ export async function setTypingStatus(input: { clientId: string; status: string 
 }
 
 export async function markUserOffline(input: { clientId: string }): Promise<UserPresenceDTO> {
-  const user = await prisma.user.findUnique({ where: { clientId: input.clientId } });
+  const user = await prisma.user.findUnique({
+    where: { clientId: input.clientId },
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+    },
+  });
   assert(user, "Nutzersitzung nicht gefunden. Bitte erneut anmelden.", 401);
 
   const offlineUser = await prisma.user.update({
     where: { clientId: input.clientId },
     data: { isOnline: false, status: "", lastSeenAt: new Date(), sessionToken: null, sessionExpiresAt: null },
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+    },
   });
 
   const dto = mapUser(offlineUser);
@@ -3653,9 +4906,7 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
     assert(referencedMessage, "Frage-Nachricht nicht gefunden", 404);
     assert(referencedMessage.type === MessageType.QUESTION, "questionId muss auf eine Frage verweisen", 400);
     questionMessageId = referencedMessage.id;
-  }
-
-  if (type === MessageType.MESSAGE && referencedMessage) {
+  } else if (referencedMessage) {
     questionMessageId = referencedMessage.id;
   }
 
@@ -3976,6 +5227,28 @@ export async function reactToMessage(input: {
     assert(isReactableSystemMessage(message), "Diese Systemnachricht kann nicht bewertet werden", 400);
   }
 
+  let messageAuthorId = message.authorId ?? null;
+  const joinMessageUsername = message.authorName === "System"
+    ? extractSystemJoinUsername(message.content)
+    : null;
+  const messageTargetUsername = joinMessageUsername || message.authorName;
+
+  if (!messageAuthorId && joinMessageUsername) {
+    const resolvedAuthorId = await resolveJoinMessageTargetUserId(message.content);
+    if (resolvedAuthorId) {
+      messageAuthorId = resolvedAuthorId;
+      await prisma.message.updateMany({
+        where: {
+          id: message.id,
+          authorId: null,
+        },
+        data: {
+          authorId: resolvedAuthorId,
+        },
+      });
+    }
+  }
+
   const existingReaction = await prisma.messageReaction.findUnique({
     where: {
       messageId_userId: {
@@ -4028,8 +5301,8 @@ export async function reactToMessage(input: {
     userId: user.id,
     type: UserBehaviorEventType.REACTION_GIVEN,
     messageId: message.id,
-    relatedUserId: message.authorId ?? null,
-    relatedUsername: message.authorName,
+    relatedUserId: messageAuthorId,
+    relatedUsername: messageTargetUsername,
     reaction: input.reaction,
     preview: message.content,
     meta: {
@@ -4038,10 +5311,10 @@ export async function reactToMessage(input: {
     } as Prisma.InputJsonValue,
   });
 
-  if (hasActiveReaction && message.authorId && message.authorId !== user.id) {
+  if (hasActiveReaction && messageAuthorId && messageAuthorId !== user.id) {
     const createdNotification = await prisma.notification.create({
       data: {
-        userId: message.authorId,
+        userId: messageAuthorId,
         actorUserId: user.id,
         actorUsernameSnapshot: user.username,
         messageId: message.id,
@@ -4051,8 +5324,8 @@ export async function reactToMessage(input: {
     });
     publish("notification.created", mapNotification(createdNotification));
     publish("reaction.received", {
-      targetUserId: message.authorId,
-      targetUsername: message.authorName,
+      targetUserId: messageAuthorId,
+      targetUsername: messageTargetUsername,
       fromUsername: user.username,
       messageId: message.id,
       reaction: input.reaction,
@@ -4061,7 +5334,7 @@ export async function reactToMessage(input: {
     });
 
     await createBehaviorEvent({
-      userId: message.authorId,
+      userId: messageAuthorId,
       type: UserBehaviorEventType.REACTION_RECEIVED,
       messageId: message.id,
       relatedUserId: user.id,
@@ -4076,10 +5349,10 @@ export async function reactToMessage(input: {
 
   await recomputeTasteProfileForUser(user.id);
   publishTasteUpdated(user.id, "reaction");
-  if (message.authorId) {
-    await recomputeTasteProfileForUser(message.authorId);
-    if (message.authorId !== user.id) {
-      publishTasteUpdated(message.authorId, "reaction");
+  if (messageAuthorId) {
+    await recomputeTasteProfileForUser(messageAuthorId);
+    if (messageAuthorId !== user.id) {
+      publishTasteUpdated(messageAuthorId, "reaction");
     }
   }
 
@@ -4500,8 +5773,11 @@ async function getTasteWindowStats(input: {
   for (const row of reactionsGiven) {
     const targetUserId = row.message?.authorId;
     if (!targetUserId) continue;
+    const targetUsername = row.message.authorName === "System"
+      ? extractSystemJoinUsername(row.message.content) || row.message.authorName
+      : row.message.authorName;
     const entry = toSocialEntry(interactionMap, targetUserId, {
-      username: row.message.authorName,
+      username: targetUsername,
       profilePicture: row.message.authorProfilePicture,
     });
     entry.given += 1;
@@ -4821,6 +6097,198 @@ async function getAdminOverviewInternal(): Promise<AdminOverviewDTO> {
 export async function getAdminOverview(input: { clientId: string; devAuthToken: string }): Promise<AdminOverviewDTO> {
   await assertDeveloperMode(input);
   return getAdminOverviewInternal();
+}
+
+export async function getAdminUsers(input: {
+  clientId: string;
+  devAuthToken: string;
+}): Promise<AdminUserListResponseDTO> {
+  await assertDeveloperMode(input);
+
+  let supportsEncryptedLoginNameColumns = canUseEncryptedLoginColumns();
+  let users: Array<{
+    id: string;
+    clientId: string;
+    username: string;
+    profilePicture: string;
+    isOnline: boolean;
+    loginName: string | null;
+    loginNameEncrypted: string | null;
+    passwordHash: string | null;
+  }> = [];
+  if (supportsEncryptedLoginNameColumns) {
+    try {
+      users = await prisma.user.findMany({
+        where: {
+          clientId: {
+            notIn: [...SYSTEM_CLIENT_IDS],
+          },
+        },
+        orderBy: [{ createdAt: "desc" }],
+        select: {
+          id: true,
+          clientId: true,
+          username: true,
+          profilePicture: true,
+          isOnline: true,
+          loginName: true,
+          loginNameEncrypted: true,
+          passwordHash: true,
+        },
+      });
+      markEncryptedLoginColumnsAvailableIfUnknown();
+    } catch (error) {
+      if (!isMissingColumnError(error)) throw error;
+      markEncryptedLoginColumnsUnavailable();
+      supportsEncryptedLoginNameColumns = false;
+    }
+  }
+
+  if (!supportsEncryptedLoginNameColumns) {
+    const legacyUsers = await prisma.user.findMany({
+      where: {
+        clientId: {
+          notIn: [...SYSTEM_CLIENT_IDS],
+        },
+      },
+      orderBy: [{ createdAt: "desc" }],
+      select: {
+        id: true,
+        clientId: true,
+        username: true,
+        profilePicture: true,
+        isOnline: true,
+        loginName: true,
+        passwordHash: true,
+      },
+    });
+    users = legacyUsers.map((user) => ({ ...user, loginNameEncrypted: null }));
+  }
+
+  return {
+    items: users.map((user) => {
+      const loginName = user.loginNameEncrypted
+        ? decryptLoginName(user.loginNameEncrypted)
+        : user.loginName ? normalizeLoginName(user.loginName) : null;
+      const hasAccount = Boolean(user.passwordHash && loginName);
+
+      return {
+        userId: user.id,
+        clientId: user.clientId,
+        username: user.username,
+        profilePicture: user.profilePicture,
+        loginName,
+        hasAccount,
+        canResetPassword: hasAccount,
+        isOnline: user.isOnline,
+      };
+    }),
+  };
+}
+
+export async function adminResetUserPassword(input: {
+  clientId: string;
+  devAuthToken: string;
+  targetUserId: string;
+  newPassword: string;
+}): Promise<AdminResetUserPasswordResponse> {
+  await assertDeveloperMode(input);
+
+  const targetUserId = input.targetUserId.trim();
+  const newPassword = input.newPassword.trim();
+  assert(targetUserId, "targetUserId ist erforderlich", 400);
+  assert(newPassword.length >= 8, "newPassword muss mindestens 8 Zeichen lang sein", 400);
+
+  let supportsEncryptedLoginNameColumns = canUseEncryptedLoginColumns();
+  let target: {
+    id: string;
+    username: string;
+    loginName: string | null;
+    loginNameEncrypted: string | null;
+    passwordHash: string | null;
+  } | null = null;
+  if (supportsEncryptedLoginNameColumns) {
+    try {
+      target = await prisma.user.findUnique({
+        where: { id: targetUserId },
+        select: {
+          id: true,
+          username: true,
+          loginName: true,
+          loginNameEncrypted: true,
+          passwordHash: true,
+        },
+      });
+      markEncryptedLoginColumnsAvailableIfUnknown();
+    } catch (error) {
+      if (!isMissingColumnError(error)) throw error;
+      supportsEncryptedLoginNameColumns = false;
+      markEncryptedLoginColumnsUnavailable();
+    }
+  }
+
+  if (!supportsEncryptedLoginNameColumns) {
+    const legacyTarget = await prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: {
+        id: true,
+        username: true,
+        loginName: true,
+        passwordHash: true,
+      },
+    });
+    target = legacyTarget
+      ? {
+        ...legacyTarget,
+        loginNameEncrypted: null,
+      }
+      : null;
+  }
+  assert(target, "Zielnutzer nicht gefunden", 404);
+
+  const loginName = target.loginNameEncrypted
+    ? decryptLoginName(target.loginNameEncrypted)
+    : target.loginName ? normalizeLoginName(target.loginName) : null;
+  const hasAccount = Boolean(target.passwordHash && loginName);
+  assert(hasAccount, "Dieser Nutzer hat kein Konto-Passwort", 400);
+
+  const updated = await prisma.user.update({
+    where: { id: target.id },
+    data: {
+      passwordHash: hashPassword(newPassword),
+      ...(supportsEncryptedLoginNameColumns
+        ? {
+          loginNameEncrypted: encryptLoginName(loginName!),
+          loginNameLookup: hashLoginNameLookup(loginName!),
+          loginName: null,
+        }
+        : {
+          loginName,
+        }),
+      sessionToken: null,
+      sessionExpiresAt: null,
+      isOnline: false,
+      status: "",
+      lastSeenAt: new Date(),
+    },
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+    },
+  });
+
+  publish("user.updated", mapUser(updated));
+  publish("presence.updated", mapUser(updated));
+
+  return {
+    ok: true,
+    message: `Passwort für ${target.username} wurde zurückgesetzt.`,
+  };
 }
 
 export async function runAdminAction(input: AdminActionRequest): Promise<AdminActionResponse> {

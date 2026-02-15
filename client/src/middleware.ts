@@ -3,7 +3,7 @@ import { AUTH_SESSION_COOKIE_NAME } from "@/server/auth-cookie";
 
 export function resolveAuthRedirect(pathname: string, hasAuthCookie: boolean): string | null {
   if (pathname === "/") {
-    return hasAuthCookie ? "/chat" : "/login";
+    return hasAuthCookie ? "/chat" : "/signup";
   }
 
   if (pathname.startsWith("/chat") && !hasAuthCookie) {

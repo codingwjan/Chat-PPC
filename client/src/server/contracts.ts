@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type {
   AdminActionRequest,
+  AdminResetUserPasswordRequest,
   AdminOverviewRequest,
   AuthSignInRequest,
   AuthSignUpRequest,
@@ -198,7 +199,7 @@ const extendPollSchema = z.object({
 const reactMessageSchema = z.object({
   clientId: text("clientId"),
   messageId: text("messageId"),
-  reaction: z.enum(["LOL", "FIRE", "BASED", "WTF", "BIG_BRAIN"]),
+  reaction: z.enum(["LIKE", "LOL", "FIRE", "BASED", "WTF", "BIG_BRAIN"]),
 });
 
 const markNotificationsReadSchema = z.object({
@@ -255,6 +256,11 @@ const adminActionSchema = adminOverviewSchema
       });
     }
   });
+
+const adminResetUserPasswordSchema = adminOverviewSchema.extend({
+  targetUserId: text("targetUserId"),
+  newPassword: text("newPassword").min(8, "newPassword muss mindestens 8 Zeichen lang sein"),
+});
 
 function parseOrThrow<T>(schema: z.ZodType<T>, payload: unknown): T {
   const parsed = schema.safeParse(payload);
@@ -339,4 +345,12 @@ export function parseAdminTasteQueryRequest(payload: unknown): {
 
 export function parseAdminActionRequest(payload: unknown): AdminActionRequest {
   return parseOrThrow(adminActionSchema, payload);
+}
+
+export function parseAdminUsersQueryRequest(payload: unknown): AdminOverviewRequest {
+  return parseOrThrow(adminOverviewSchema, payload);
+}
+
+export function parseAdminResetUserPasswordRequest(payload: unknown): AdminResetUserPasswordRequest {
+  return parseOrThrow(adminResetUserPasswordSchema, payload);
 }

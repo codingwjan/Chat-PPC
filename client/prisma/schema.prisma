@@ -26,6 +26,7 @@ enum AiJobStatus {
 }
 
 enum MessageReactionType {
+  LIKE
   LOL
   FIRE
   BASED
@@ -49,6 +50,8 @@ model User {
   id               String            @id @default(cuid())
   clientId         String            @unique
   loginName        String?           @unique
+  loginNameEncrypted String?
+  loginNameLookup  String?           @unique
   passwordHash     String?
   sessionToken     String?
   sessionExpiresAt DateTime?

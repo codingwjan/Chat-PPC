@@ -40,6 +40,7 @@ const pendingPreviewRequests = new Map<string, Promise<LinkPreviewDTO | null>>()
 const imageAspectRatioCache = new Map<string, number>();
 const DEFAULT_PROFILE_PICTURE = getDefaultProfilePicture();
 const REACTION_OPTIONS: Array<{ reaction: ReactionType; emoji: string; label: string }> = [
+  { reaction: "LIKE", emoji: "❤️", label: "Like" },
   { reaction: "LOL", emoji: "😂", label: "LOL" },
   { reaction: "FIRE", emoji: "🔥", label: "FIRE" },
   { reaction: "BASED", emoji: "🫡", label: "BASED" },
@@ -176,11 +177,13 @@ function MessageReactionBar({
   onReact,
   centered,
   showSummary = true,
+  showUserSummary = false,
 }: {
   message: MessageDTO;
   onReact?: (messageId: string, reaction: ReactionType) => void;
   centered?: boolean;
   showSummary?: boolean;
+  showUserSummary?: boolean;
 }) {
   if (!onReact) return null;
   const reactions = message.reactions;
@@ -232,17 +235,19 @@ function MessageReactionBar({
               </span>
             ))}
           </div>
-          <div className={`space-y-0.5 ${centered ? "text-center" : ""}`}>
-            {chips.map((chip) => {
-              const names = userSummary.get(chip.reaction) || [];
-              if (names.length === 0) return null;
-              return (
-                <p key={`names-${chip.reaction}`} className="text-[10px] text-slate-500">
-                  {chip.emoji} {chip.label}: {names.join(", ")}
-                </p>
-              );
-            })}
-          </div>
+          {showUserSummary ? (
+            <div className={`space-y-0.5 ${centered ? "text-center" : ""}`}>
+              {chips.map((chip) => {
+                const names = userSummary.get(chip.reaction) || [];
+                if (names.length === 0) return null;
+                return (
+                  <p key={`names-${chip.reaction}`} className="text-[10px] text-slate-500">
+                    {chip.emoji} {chip.label}: {names.join(", ")}
+                  </p>
+                );
+              })}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -597,6 +602,7 @@ function ChatMessageComponent({
   if (message.type === "votingPoll") {
     const options = message.poll?.options || [];
     const totalVotes = options.reduce((sum, option) => sum + option.votes, 0);
+    const pollReplyContext = Boolean(message.questionId && message.oldmessage && message.oldusername);
 
     return (
       <div className={`flex w-full ${isRightAligned ? "justify-end" : "justify-start"} [content-visibility:auto] [contain-intrinsic-size:320px]`}>
@@ -648,6 +654,11 @@ function ChatMessageComponent({
                   ? "Mehrfachauswahl aktiv - Klick aktualisiert deine Stimme sofort"
                   : "Einzelauswahl - Klick aktualisiert deine Stimme sofort"}
               </p>
+              {pollReplyContext ? (
+                <p className="mt-2 rounded-xl bg-slate-100 px-3 py-2 text-xs text-slate-500">
+                  Antwort auf &quot;{message.oldmessage}&quot; von {message.oldusername}
+                </p>
+              ) : null}
             </div>
           </div>
           <div className="space-y-2">
@@ -702,7 +713,7 @@ function ChatMessageComponent({
               );
             })}
           </div>
-          <MessageReactionBar message={message} onReact={onReact} />
+          <MessageReactionBar message={message} onReact={onReact} showUserSummary={isOwnMessage} />
           {isOwnMessage ? (
             <div className="mt-2">
               {delivery?.status === "sending" ? (
@@ -772,7 +783,7 @@ function ChatMessageComponent({
               Antworten
             </button>
           </div>
-          <MessageReactionBar message={message} onReact={onReact} />
+          <MessageReactionBar message={message} onReact={onReact} showUserSummary={isOwnMessage} />
           {isOwnMessage ? (
             <div className="mt-2">
               {delivery?.status === "sending" ? (
@@ -928,7 +939,7 @@ function ChatMessageComponent({
                 ))}
               </div>
             ) : null}
-            <MessageReactionBar message={message} onReact={onReact} />
+            <MessageReactionBar message={message} onReact={onReact} showUserSummary={isOwnMessage} />
             {isOwnMessage ? (
               <div className="mt-2">
                 {delivery?.status === "sending" ? (

@@ -13,7 +13,6 @@ import {
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
-  type ReactElement,
 } from "react";
 import { ChatComposer, type ComposerMode } from "@/components/chat-composer";
 import { ChatMessage } from "@/components/chat-message";
@@ -89,6 +88,7 @@ const COMPOSER_BOTTOM_GAP_PX = 16;
 const LAST_MESSAGE_EXTRA_CLEARANCE_PX = 28;
 const HARD_BOTTOM_ATTACH_PX = 8;
 const REACTION_OPTIONS: Array<{ reaction: ReactionType; emoji: string; label: string }> = [
+  { reaction: "LIKE", emoji: "❤️", label: "Like" },
   { reaction: "LOL", emoji: "😂", label: "LOL" },
   { reaction: "FIRE", emoji: "🔥", label: "FIRE" },
   { reaction: "BASED", emoji: "🫡", label: "BASED" },
@@ -97,6 +97,7 @@ const REACTION_OPTIONS: Array<{ reaction: ReactionType; emoji: string; label: st
 ];
 const AI_ASSISTANT_USERNAMES = new Set(["chatgpt", "grok"]);
 const REACTION_SCORE_BY_TYPE: Record<ReactionType, number> = {
+  LIKE: 1.0,
   LOL: 1.4,
   FIRE: 1.2,
   BASED: 1.1,
@@ -502,39 +503,48 @@ const MessageList = memo(function MessageList({
   onOpenLightbox,
   onRemixImage,
 }: MessageListProps) {
-  const messageById = new Map(messages.map((message) => [message.id, message] as const));
-  const roots: MessageDTO[] = [];
-  const childrenByRoot = new Map<string, MessageDTO[]>();
+  const orderedMessages = useMemo(
+    () =>
+      [...messages].sort((a, b) => {
+        const timeDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        if (timeDiff !== 0) return timeDiff;
+        return a.id.localeCompare(b.id);
+      }),
+    [messages],
+  );
 
-  const resolveThreadRootId = (message: MessageDTO): string | null => {
-    if (!message.questionId) return null;
+  const threadedEntries = useMemo(() => {
+    const messageById = new Map(orderedMessages.map((message) => [message.id, message] as const));
 
-    const visited = new Set<string>([message.id]);
-    let currentParentId: string | undefined = message.questionId;
+    const resolveThreadRootId = (message: MessageDTO): string | null => {
+      if (!message.questionId) return null;
 
-    while (currentParentId) {
-      if (visited.has(currentParentId)) return null;
-      visited.add(currentParentId);
+      const visited = new Set<string>([message.id]);
+      let currentParentId: string | undefined = message.questionId;
 
-      const parent = messageById.get(currentParentId);
-      if (!parent) return null;
-      if (!parent.questionId) return parent.id;
-      currentParentId = parent.questionId;
-    }
+      while (currentParentId) {
+        if (visited.has(currentParentId)) return null;
+        visited.add(currentParentId);
 
-    return null;
-  };
+        const parent = messageById.get(currentParentId);
+        if (!parent) return null;
+        if (!parent.questionId) return parent.id;
+        currentParentId = parent.questionId;
+      }
 
-  for (const message of messages) {
-    const rootId = resolveThreadRootId(message);
-    if (rootId && rootId !== message.id) {
-      const threadMessages = childrenByRoot.get(rootId) || [];
-      threadMessages.push(message);
-      childrenByRoot.set(rootId, threadMessages);
-      continue;
-    }
-    roots.push(message);
-  }
+      return null;
+    };
+
+    return orderedMessages.map((message) => {
+      const threadRootId = resolveThreadRootId(message);
+      const isThreadChild = Boolean(threadRootId && threadRootId !== message.id);
+      return {
+        message,
+        threadKey: isThreadChild ? threadRootId : message.id,
+        isThreadChild,
+      };
+    });
+  }, [orderedMessages]);
 
   const renderMessage = (message: MessageDTO) => {
     return (
@@ -562,32 +572,27 @@ const MessageList = memo(function MessageList({
     );
   };
 
-  const renderThread = (message: MessageDTO): ReactElement => {
-    const children = childrenByRoot.get(message.id) || [];
-    const isRightAligned = isRightAlignedMessage(message, currentUsername, currentUserId);
-    const threadRailClassName = isRightAligned
-      ? "mr-6 space-y-2 border-r border-slate-200 pr-3"
-      : "ml-6 space-y-2 border-l border-slate-200 pl-3";
-
-    return (
-      <div key={`thread-${message.id}`} className="space-y-2">
-        {renderMessage(message)}
-        {children.length > 0 ? (
-          <div className={threadRailClassName}>
-            {children.map((child) => (
-              <div key={`thread-child-${child.id}`} className="space-y-2">
-                {renderMessage(child)}
-              </div>
-            ))}
-          </div>
-        ) : null}
-      </div>
-    );
-  };
-
   return (
     <>
-      {roots.map((message) => renderThread(message))}
+      {threadedEntries.map((entry, index) => {
+        const previous = threadedEntries[index - 1];
+        const next = threadedEntries[index + 1];
+        const connectsToPrevious = entry.isThreadChild && previous?.threadKey === entry.threadKey;
+        const connectsToNext = entry.isThreadChild && next?.isThreadChild && next.threadKey === entry.threadKey;
+        const showThreadRail = connectsToPrevious || connectsToNext;
+        const railClassName = isRightAlignedMessage(entry.message, currentUsername, currentUserId)
+          ? "mr-6 border-r border-slate-200 pr-3"
+          : "ml-6 border-l border-slate-200 pl-3";
+
+        return (
+          <div
+            key={`message-row-${entry.message.id}`}
+            className={showThreadRail ? `space-y-2 ${railClassName}` : "space-y-2"}
+          >
+            {renderMessage(entry.message)}
+          </div>
+        );
+      })}
     </>
   );
 });
@@ -2374,6 +2379,9 @@ export function ChatApp() {
             username: session.username,
             profilePicture: sessionProfilePicture,
             createdAt: new Date().toISOString(),
+            questionId: replyTarget?.id,
+            oldusername: replyTarget?.username,
+            oldmessage: replyTarget?.message,
             poll: {
               options: options.map((option, index) => ({
                 id: `${tempMessageId}-opt-${index}`,
@@ -2397,6 +2405,7 @@ export function ChatApp() {
             message: question,
             pollOptions: options,
             pollMultiSelect,
+            questionId: replyTarget?.id,
           });
           clearPendingDelivery(tempMessageId);
           removeOptimisticMessage(tempMessageId);
@@ -2405,6 +2414,7 @@ export function ChatApp() {
           setPollQuestion("");
           setPollOptions(["", ""]);
           setPollMultiSelect(false);
+          setReplyTarget(null);
         }
       }
 
@@ -3160,6 +3170,14 @@ export function ChatApp() {
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => router.push("/chat/dev/users")}
+              disabled={adminBusy}
+              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
+            >
+              Dev Users
+            </button>
             <button
               type="button"
               onClick={() => void refreshDeveloperData()}

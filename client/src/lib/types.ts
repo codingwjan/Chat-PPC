@@ -81,7 +81,7 @@ export interface VotePollRequest {
   optionIds?: string[];
 }
 
-export type ReactionType = "LOL" | "FIRE" | "BASED" | "WTF" | "BIG_BRAIN";
+export type ReactionType = "LIKE" | "LOL" | "FIRE" | "BASED" | "WTF" | "BIG_BRAIN";
 
 export interface ReactMessageRequest {
   clientId: string;
@@ -126,6 +126,31 @@ export interface AdminActionResponse {
   ok: true;
   message: string;
   overview: AdminOverviewDTO;
+}
+
+export interface AdminUserListItemDTO {
+  userId: string;
+  clientId: string;
+  username: string;
+  profilePicture: string;
+  loginName: string | null;
+  hasAccount: boolean;
+  canResetPassword: boolean;
+  isOnline: boolean;
+}
+
+export interface AdminUserListResponseDTO {
+  items: AdminUserListItemDTO[];
+}
+
+export interface AdminResetUserPasswordRequest extends AdminOverviewRequest {
+  targetUserId: string;
+  newPassword: string;
+}
+
+export interface AdminResetUserPasswordResponse {
+  ok: true;
+  message: string;
 }
 
 export interface DeveloperUserTasteDTO {
