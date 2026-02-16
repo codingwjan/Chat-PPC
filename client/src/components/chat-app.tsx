@@ -117,6 +117,26 @@ function hasChatGptMention(message: string): boolean {
   return /(^|\s)@chatgpt\b/i.test(message);
 }
 
+function aiTagForReplyMessage(message: MessageDTO): "chatgpt" | "grok" | null {
+  const normalizedUsername = message.username.trim().toLowerCase();
+  if (normalizedUsername === "chatgpt" || message.authorId === "chatgpt") return "chatgpt";
+  if (normalizedUsername === "grok" || message.authorId === "grok") return "grok";
+  return null;
+}
+
+function ensureLeadingAiReplyTag(draft: string, provider: "chatgpt" | "grok"): string {
+  const oppositeProvider = provider === "chatgpt" ? "grok" : "chatgpt";
+  let nextDraft = draft;
+
+  if (hasLeadingAiTag(nextDraft, oppositeProvider)) {
+    nextDraft = toggleLeadingAiTag(nextDraft, oppositeProvider);
+  }
+  if (!hasLeadingAiTag(nextDraft, provider)) {
+    nextDraft = toggleLeadingAiTag(nextDraft, provider);
+  }
+  return nextDraft;
+}
+
 function mergeUser(users: UserPresenceDTO[], next: UserPresenceDTO): UserPresenceDTO[] {
   const index = users.findIndex((user) => user.clientId === next.clientId);
   if (index === -1) return [...users, next];
@@ -2788,6 +2808,12 @@ export function ChatApp() {
       username: message.username,
       message: message.message,
     });
+
+    const aiProviderTag = aiTagForReplyMessage(message);
+    if (aiProviderTag) {
+      setMessageDraft((current) => ensureLeadingAiReplyTag(current, aiProviderTag));
+    }
+
     setComposerMode("message");
     requestAnimationFrame(() => {
       messageInputRef.current?.focus();
