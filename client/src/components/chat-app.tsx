@@ -16,6 +16,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { createPortal } from "react-dom";
+import { AppOverlayDialog } from "@/components/app-overlay-dialog";
 import { ChatComposer, type ComposerMode } from "@/components/chat-composer";
 import { ChatMessage } from "@/components/chat-message";
 import { MemberProgressInline } from "@/components/member-progress-inline";
@@ -35,13 +36,10 @@ import {
 } from "@/lib/session";
 import type {
   AdminActionRequest,
-  AdminActionResponse,
-  AdminOverviewDTO,
   AiStatusDTO,
   AuthSessionDTO,
   ChatBackgroundDTO,
   CreateMessageRequest,
-  DeveloperUserTasteListDTO,
   ExtendPollRequest,
   LoginResponseDTO,
   MediaItemDTO,
@@ -424,12 +422,6 @@ function formatLastSeenStatus(timestamp: string | Date): string {
   return `zuletzt aktiv ${date.toLocaleTimeString("de-DE", LAST_SEEN_TIME_OPTIONS)}`;
 }
 
-function formatUpdatedAtShort(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "unbekannt";
-  return date.toLocaleString("de-DE");
-}
-
 function formatPresenceStatus(user: UserPresenceDTO): string {
   const explicitStatusRaw = user.status.trim();
   const explicitStatus = explicitStatusRaw.toLowerCase();
@@ -509,6 +501,8 @@ function createDefaultAiStatus(): AiStatusDTO {
   return {
     chatgpt: "online",
     grok: "online",
+    chatgptModel: "Modell dynamisch (Prompt)",
+    grokModel: "Modell wird geladen…",
     updatedAt: new Date().toISOString(),
   };
 }
@@ -529,6 +523,7 @@ interface MessageListProps {
   onStartReply: (message: MessageDTO) => void;
   onOpenLightbox: (url: string, alt?: string) => void;
   onRemixImage: (url: string, alt?: string) => void;
+  onOpenAuthorProfile: (message: MessageDTO) => void;
 }
 
 const MessageList = memo(function MessageList({
@@ -547,6 +542,7 @@ const MessageList = memo(function MessageList({
   onStartReply,
   onOpenLightbox,
   onRemixImage,
+  onOpenAuthorProfile,
 }: MessageListProps) {
   const orderedMessages = useMemo(
     () =>
@@ -613,6 +609,7 @@ const MessageList = memo(function MessageList({
         onStartReply={onStartReply}
         onOpenLightbox={onOpenLightbox}
         onRemixImage={onRemixImage}
+        onOpenAuthorProfile={onOpenAuthorProfile}
       />
     );
   };
@@ -787,7 +784,6 @@ export function ChatApp() {
   });
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [initialMessagesLoaded, setInitialMessagesLoaded] = useState(false);
-  const [adminOverview, setAdminOverview] = useState<AdminOverviewDTO | null>(null);
   const [showTasteProfileModal, setShowTasteProfileModal] = useState(false);
   const [tasteWindow, setTasteWindow] = useState<TasteWindowKey>("30d");
   const [tasteProfileDetailed, setTasteProfileDetailed] = useState<TasteProfileDetailedDTO | null>(null);
@@ -798,12 +794,6 @@ export function ChatApp() {
   const [tasteEventsLoading, setTasteEventsLoading] = useState(false);
   const [tasteEventsLoadingMore, setTasteEventsLoadingMore] = useState(false);
   const [tasteProfileError, setTasteProfileError] = useState<string | null>(null);
-  const [developerTasteProfiles, setDeveloperTasteProfiles] = useState<DeveloperUserTasteListDTO>({ items: [] });
-  const [adminBusy, setAdminBusy] = useState(false);
-  const [adminNotice, setAdminNotice] = useState<string | null>(null);
-  const [showAdminPanel, setShowAdminPanel] = useState(false);
-  const [adminTargetUsername, setAdminTargetUsername] = useState("");
-  const [adminTargetMessageId, setAdminTargetMessageId] = useState("");
   const [pendingDeliveries, setPendingDeliveries] = useState<Record<string, true>>({});
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
   const [lightboxCopyState, setLightboxCopyState] = useState<LightboxCopyState>("idle");
@@ -1189,20 +1179,6 @@ export function ChatApp() {
     });
   }, [session?.clientId]);
 
-  const fetchDeveloperTasteProfiles = useCallback(async (): Promise<DeveloperUserTasteListDTO> => {
-    if (!session?.clientId || !session.devAuthToken) {
-      return { items: [] };
-    }
-    const searchParams = new URLSearchParams({
-      clientId: session.clientId,
-      devAuthToken: session.devAuthToken,
-      limit: "40",
-    });
-    return apiJson<DeveloperUserTasteListDTO>(`/api/admin/tastes?${searchParams.toString()}`, {
-      cache: "no-store",
-    });
-  }, [session?.clientId, session?.devAuthToken]);
-
   const hydrateMediaCache = useCallback(() => {
     if (typeof window === "undefined") return false;
 
@@ -1524,28 +1500,6 @@ export function ChatApp() {
     [restoreSessionPresence, router, session, syncChatState, syncSessionIdentityFromPresence],
   );
 
-  const fetchAdminOverview = useCallback(async () => {
-    if (!session?.clientId || !session.devAuthToken) {
-      setAdminOverview(null);
-      return;
-    }
-
-    const searchParams = new URLSearchParams({
-      clientId: session.clientId,
-      devAuthToken: session.devAuthToken,
-    });
-    const overview = await apiJson<AdminOverviewDTO>(`/api/admin?${searchParams.toString()}`);
-    setAdminOverview(overview);
-  }, [session?.clientId, session?.devAuthToken]);
-
-  const refreshDeveloperData = useCallback(async () => {
-    const [, tastes] = await Promise.all([
-      fetchAdminOverview(),
-      fetchDeveloperTasteProfiles(),
-    ]);
-    setDeveloperTasteProfiles(tastes);
-  }, [fetchAdminOverview, fetchDeveloperTasteProfiles]);
-
   const loadTasteProfileModalData = useCallback(async (): Promise<void> => {
     if (!session?.clientId) return;
     setTasteProfileError(null);
@@ -1599,8 +1553,11 @@ export function ChatApp() {
     async (
       action: AdminActionRequest["action"],
       options?: {
+        targetUserId?: string;
         targetUsername?: string;
         targetMessageId?: string;
+        targetScore?: number;
+        targetRank?: "BRONZE" | "SILBER" | "GOLD" | "PLATIN";
       },
     ) => {
       if (!session?.clientId || !session.devAuthToken) {
@@ -1608,31 +1565,32 @@ export function ChatApp() {
         return;
       }
 
-      setAdminBusy(true);
-      setAdminNotice(null);
       try {
         const payload: AdminActionRequest = {
           clientId: session.clientId,
           devAuthToken: session.devAuthToken,
           action,
+          targetUserId: options?.targetUserId,
           targetUsername: options?.targetUsername,
           targetMessageId: options?.targetMessageId,
+          targetScore: options?.targetScore,
+          targetRank: options?.targetRank,
         };
 
-        const result = await apiJson<AdminActionResponse>("/api/admin", {
+        const result = await apiJson<{ message: string }>("/api/admin", {
           method: "POST",
           body: JSON.stringify(payload),
         });
 
-        setAdminOverview(result.overview);
-        setAdminNotice(result.message);
+        setValidationNotice({
+          title: "Admin",
+          message: result.message,
+        });
         setError(null);
         await syncChatState();
         requestAnimationFrame(() => scrollToBottom("auto"));
       } catch (actionError) {
         setError(actionError instanceof Error ? actionError.message : "Admin-Aktion fehlgeschlagen.");
-      } finally {
-        setAdminBusy(false);
       }
     },
     [scrollToBottom, session?.clientId, session?.devAuthToken, syncChatState],
@@ -1957,34 +1915,6 @@ export function ChatApp() {
   }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasMore, mediaItems.length, showMedia]);
 
   useEffect(() => {
-    if (!isDeveloperMode) {
-      setAdminOverview(null);
-      setDeveloperTasteProfiles({ items: [] });
-      return;
-    }
-
-    let cancelled = false;
-
-    const loadOverview = async () => {
-      try {
-        const [, tastes] = await Promise.all([fetchAdminOverview(), fetchDeveloperTasteProfiles()]);
-        if (cancelled) return;
-        setDeveloperTasteProfiles(tastes);
-      } catch (overviewError) {
-        if (!cancelled) {
-          setError(overviewError instanceof Error ? overviewError.message : "Entwicklerwerkzeuge konnten nicht geladen werden.");
-        }
-      }
-    };
-
-    void loadOverview();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [fetchAdminOverview, fetchDeveloperTasteProfiles, isDeveloperMode]);
-
-  useEffect(() => {
     if (!session?.clientId) {
       setShowTasteProfileModal(false);
       setTasteProfileDetailed(null);
@@ -2145,14 +2075,17 @@ export function ChatApp() {
     };
 
     const onAiStatus = (event: Event) => {
-      const parsed = parseEvent<{ status: string; provider?: "chatgpt" | "grok" }>(event as MessageEvent<string>);
+      const parsed = parseEvent<{ status: string; provider?: "chatgpt" | "grok"; model?: string }>(event as MessageEvent<string>);
       if (!parsed || isLeavingRef.current) return;
       const status = parsed.status || "online";
       setAiStatus((current) => {
         const nextProvider = parsed.provider || "chatgpt";
+        const model = parsed.model?.trim();
         return {
           ...current,
           [nextProvider]: status,
+          ...(nextProvider === "chatgpt" && model ? { chatgptModel: model } : {}),
+          ...(nextProvider === "grok" && model ? { grokModel: model } : {}),
           updatedAt: new Date().toISOString(),
         };
       });
@@ -3451,6 +3384,12 @@ export function ChatApp() {
     setShowMedia(true);
   }
 
+  function openDevMenu(): void {
+    if (!isDeveloperMode) return;
+    setMobileSidebarOpen(false);
+    router.push("/dev");
+  }
+
   async function saveBackgroundDraft(): Promise<void> {
     setUploadingBackground(true);
     try {
@@ -3495,188 +3434,39 @@ export function ChatApp() {
     }
   }
 
-  const developerControls = isDeveloperMode ? (
-    <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Entwicklerwerkzeuge</p>
-        <button
-          type="button"
-          onClick={() => setShowAdminPanel((value) => !value)}
-          className="h-7 rounded-lg border border-amber-300 bg-white px-2 text-[11px] font-semibold text-amber-900"
-        >
-          {showAdminPanel ? "Ausblenden" : "Öffnen"}
-        </button>
-      </div>
-      {showAdminPanel ? (
-        <div className="mt-2 space-y-2">
-          <div className="grid grid-cols-2 gap-2 text-[11px] text-amber-900">
-            <div className="rounded-lg bg-white px-2 py-1">
-              Nutzer: <span className="font-semibold">{adminOverview?.usersTotal ?? "-"}</span>
-            </div>
-            <div className="rounded-lg bg-white px-2 py-1">
-              Online: <span className="font-semibold">{adminOverview?.usersOnline ?? "-"}</span>
-            </div>
-            <div className="rounded-lg bg-white px-2 py-1">
-              Nachrichten: <span className="font-semibold">{adminOverview?.messagesTotal ?? "-"}</span>
-            </div>
-            <div className="rounded-lg bg-white px-2 py-1">
-              Sperrliste: <span className="font-semibold">{adminOverview?.blacklistTotal ?? "-"}</span>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => router.push("/chat/dev/users")}
-              disabled={adminBusy}
-              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-            >
-              Dev Users
-            </button>
-            <button
-              type="button"
-              onClick={() => void refreshDeveloperData()}
-              disabled={adminBusy}
-              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-            >
-              Aktualisieren
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (!window.confirm("Alle Chat-Nachrichten und Umfragen löschen?")) return;
-                void runAdminAction("delete_all_messages");
-              }}
-              disabled={adminBusy}
-              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-            >
-              Nachrichten löschen
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (!window.confirm("Alle Nutzer außer dir abmelden?")) return;
-                void runAdminAction("logout_all_users");
-              }}
-              disabled={adminBusy}
-              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-            >
-              Nutzer abmelden
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (!window.confirm("Sperrliste für Benutzernamen leeren?")) return;
-                void runAdminAction("clear_blacklist");
-              }}
-              disabled={adminBusy}
-              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-            >
-              Sperrliste leeren
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (!window.confirm("Alles zurücksetzen? Nachrichten, Nutzer und Sperrliste werden gelöscht.")) return;
-                void runAdminAction("reset_all");
-              }}
-              disabled={adminBusy}
-              className="h-8 rounded-lg bg-amber-600 px-3 text-[11px] font-semibold text-white disabled:opacity-60"
-            >
-              Alles zurücksetzen
-            </button>
-          </div>
-          <div className="space-y-2">
-            <div className="flex gap-2">
-              <input
-                value={adminTargetUsername}
-                onChange={(event) => setAdminTargetUsername(event.target.value)}
-                placeholder="Benutzername zum Löschen…"
-                className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  const target = adminTargetUsername.trim();
-                  if (!target) return;
-                  if (!window.confirm(`Nutzer ${target} löschen?`)) return;
-                  void runAdminAction("delete_user", { targetUsername: target });
-                }}
-                disabled={adminBusy}
-                className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-              >
-                Nutzer löschen
-              </button>
-            </div>
-            <div className="flex gap-2">
-              <input
-                value={adminTargetMessageId}
-                onChange={(event) => setAdminTargetMessageId(event.target.value)}
-                placeholder="Nachrichten-ID zum Löschen…"
-                className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  const target = adminTargetMessageId.trim();
-                  if (!target) return;
-                  if (!window.confirm(`Nachricht ${target} löschen?`)) return;
-                  void runAdminAction("delete_message", { targetMessageId: target });
-                }}
-                disabled={adminBusy}
-                className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-              >
-                Nachricht löschen
-              </button>
-            </div>
-          </div>
-          <div className="rounded-lg border border-amber-200 bg-white p-2">
-            <p className="text-[11px] font-semibold text-amber-900">Interessen anderer Nutzer</p>
-            {developerTasteProfiles.items.length === 0 ? (
-              <p className="mt-1 text-[11px] text-amber-900/80">Noch keine Daten vorhanden.</p>
-            ) : (
-              <div className="mt-2 max-h-56 space-y-2 overflow-y-auto pr-1">
-                {developerTasteProfiles.items.map((item) => (
-                  <div key={item.userId} className="rounded-md border border-amber-100 bg-amber-50/40 p-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="truncate text-[11px] font-semibold text-amber-900">{item.username}</p>
-                      <p className="text-[10px] text-amber-900/80">{item.reactionsReceived} Reaktionen</p>
-                    </div>
-                    <p className="mt-0.5 text-[10px] text-amber-900/80">
-                      Aktualisiert: {formatUpdatedAtShort(item.updatedAt)}
-                    </p>
-                    {item.topTags.length > 0 ? (
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {item.topTags.slice(0, 8).map((tag) => (
-                          <span key={`${item.userId}-${tag.tag}`} className="rounded-full border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] text-amber-900">
-                            {tag.tag}
-                          </span>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="mt-1 text-[10px] text-amber-900/80">Noch keine Top-Tags.</p>
-                    )}
-                    {item.reactionDistribution.length > 0 ? (
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {item.reactionDistribution.map((entry) => (
-                          <span
-                            key={`${item.userId}-${entry.reaction}`}
-                            className="rounded-full border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] text-amber-900"
-                          >
-                            {entry.reaction}: {entry.count}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-          {adminNotice ? <p className="text-[11px] font-medium text-amber-900">{adminNotice}</p> : null}
-        </div>
-      ) : null}
-    </div>
-  ) : undefined;
+  function openMessageAuthorProfile(message: MessageDTO): void {
+    const normalizedAuthor = message.username.trim().toLowerCase();
+    const matchedOnlineUserById = message.authorId
+      ? users.find((user) => user.id === message.authorId)
+      : undefined;
+    const matchedOnlineUserByName = users.find((user) => user.username.trim().toLowerCase() === normalizedAuthor);
+    const matchedAiUser = AI_ASSISTANT_USERNAMES.has(normalizedAuthor)
+      ? onlineUsers.find((user) => user.username.trim().toLowerCase() === normalizedAuthor)
+      : undefined;
+    const matched = matchedOnlineUserById || matchedOnlineUserByName || matchedAiUser;
+
+    if (matched) {
+      void openMemberProfile(matched);
+      return;
+    }
+
+    setMobileSidebarOpen(false);
+    setMemberDrawerOpen(true);
+    setMemberDrawerLoading(false);
+    setMemberDrawerError(null);
+    setMemberDrawerProfile(
+      toSyntheticPublicProfile({
+        id: message.authorId || `message-author-${message.id}`,
+        clientId: AI_CLIENT_IDS.has(normalizedAuthor) ? normalizedAuthor : `message-author-${message.id}`,
+        username: message.username,
+        profilePicture: normalizeProfilePictureUrl(message.profilePicture),
+        status: "",
+        isOnline: false,
+        lastSeenAt: null,
+        member: message.member,
+      }),
+    );
+  }
 
   if (!session) return <div className="p-6 text-sm text-slate-500">Wird geladen…</div>;
 
@@ -3693,6 +3483,7 @@ export function ChatApp() {
         member={ownMember}
         memberHighlight={highlightOwnMember}
         onOpenProfileEditor={openProfileEditor}
+        onOpenDevMenu={isDeveloperMode ? openDevMenu : undefined}
         onOpenSharedBackground={openSharedBackgroundModal}
         onOpenMedia={openMediaModal}
         onOpenPointsInfo={openPointsInfoModal}
@@ -3705,7 +3496,6 @@ export function ChatApp() {
             }}
           />
         }
-        developerContent={developerControls}
       />
 
       <div className="flex h-full min-h-0 flex-col lg:pl-72">
@@ -3785,6 +3575,7 @@ export function ChatApp() {
                 onStartReply={handleStartReply}
                 onOpenLightbox={handleOpenLightbox}
                 onRemixImage={handleRemixImage}
+                onOpenAuthorProfile={openMessageAuthorProfile}
               />
             </div>
           </div>
@@ -3884,7 +3675,7 @@ export function ChatApp() {
 
       <UiToast
         show={Boolean(error)}
-        title="Hinweis"
+        title="Fehler"
         message={error || ""}
         tone="error"
         onClose={() => setError(null)}
@@ -3910,153 +3701,149 @@ export function ChatApp() {
         loading={memberDrawerLoading}
         error={memberDrawerError}
         profile={memberDrawerProfile}
+        aiModels={{ chatgpt: aiStatus.chatgptModel, grok: aiStatus.grokModel }}
         onOpenProfileImage={(url, alt) => setLightbox({ url, alt })}
       />
 
       {showPointsInfo ? (
-        <div className="fixed inset-0 z-[67] grid place-items-center bg-slate-900/45 p-2 sm:p-4" onClick={() => setShowPointsInfo(false)}>
-          <div
-            className="w-full max-w-lg max-h-[92dvh] overflow-y-auto rounded-3xl border border-white/70 bg-white/95 p-5 shadow-2xl backdrop-blur [overscroll-behavior:contain] sm:p-6"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Punkte Erklärung"
-          >
-            <h2 className="text-xl font-semibold text-slate-900">Wie bekomme ich PPC Score?</h2>
-            <p className="mt-1 text-sm text-slate-600">Diese Aktionen geben dir Punkte:</p>
+        <AppOverlayDialog
+          open={showPointsInfo}
+          onClose={() => setShowPointsInfo(false)}
+          title="Wie bekomme ich PPC Score?"
+          description="Diese Aktionen geben dir Punkte."
+          maxWidthClassName="sm:max-w-lg"
+          bodyClassName="space-y-4"
+          footer={(
+            <div className="flex flex-wrap gap-2 sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setShowPointsInfo(false)}
+                className="inline-flex w-full justify-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-xs inset-ring-1 inset-ring-slate-300 hover:bg-slate-50 sm:w-auto"
+              >
+                Schließen
+              </button>
+            </div>
+          )}
+        >
+          <div className="space-y-2">
+            {PPC_MEMBER_POINT_RULES.map((rule) => (
+              <div key={rule.id} className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                <p className="text-sm text-slate-700">{rule.label}</p>
+                <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">
+                  +{rule.points}
+                </span>
+              </div>
+            ))}
+          </div>
 
-            <div className="mt-4 space-y-2">
-              {PPC_MEMBER_POINT_RULES.map((rule) => (
-                <div key={rule.id} className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                  <p className="text-sm text-slate-700">{rule.label}</p>
-                  <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">
-                    +{rule.points}
-                  </span>
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Ränge & Schwellen</p>
+            <div className="mt-2 space-y-2">
+              {ownRankMilestones.map((step) => (
+                <div
+                  key={step.rank}
+                  className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
+                    step.reached
+                      ? "border-emerald-200 bg-emerald-50"
+                      : "border-slate-200 bg-white"
+                  }`}
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">{step.label}</p>
+                    <p className="text-xs text-slate-600">ab {step.minScore} Punkten</p>
+                  </div>
+                  <p className={`text-xs font-semibold ${step.reached ? "text-emerald-700" : "text-slate-700"}`}>
+                    {step.reached ? "erreicht" : `noch ${step.remaining} Punkte`}
+                  </p>
                 </div>
               ))}
             </div>
-
-            <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
-              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Ränge & Schwellen</p>
-              <div className="mt-2 space-y-2">
-                {ownRankMilestones.map((step) => (
-                  <div
-                    key={step.rank}
-                    className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
-                      step.reached
-                        ? "border-emerald-200 bg-emerald-50"
-                        : "border-slate-200 bg-white"
-                    }`}
-                  >
-                    <div>
-                      <p className="text-sm font-semibold text-slate-900">{step.label}</p>
-                      <p className="text-xs text-slate-600">ab {step.minScore} Punkten</p>
-                    </div>
-                    <p className={`text-xs font-semibold ${step.reached ? "text-emerald-700" : "text-slate-700"}`}>
-                      {step.reached ? "erreicht" : `noch ${step.remaining} Punkte`}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => setShowPointsInfo(false)}
-              className="mt-4 h-11 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-            >
-              Schließen
-            </button>
           </div>
-        </div>
+        </AppOverlayDialog>
       ) : null}
 
       {showBackgroundModal ? (
-        <div className="fixed inset-0 z-[66] grid place-items-center bg-slate-900/45 p-2 sm:p-4" onClick={() => setShowBackgroundModal(false)}>
-          <div
-            className="w-full max-w-xl max-h-[92dvh] overflow-y-auto rounded-3xl border border-white/70 bg-white/95 p-5 shadow-2xl backdrop-blur [overscroll-behavior:contain] sm:p-6"
-            onClick={(event) => event.stopPropagation()}
-            onPaste={onBackgroundModalPaste}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Geteilter Chat-Hintergrund"
-          >
-            <h2 className="text-xl font-semibold text-slate-900">Geteilter Chat-Hintergrund</h2>
-            <p className="mt-1 text-sm text-slate-600">URL einfügen, Bild per Copy/Paste übernehmen oder hochladen.</p>
-
-            <div className="mt-4 space-y-3">
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Aktuelle Vorschau</p>
-                <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white">
-                  {chatBackgroundUrl ? (
-                    <img
-                      src={chatBackgroundUrl}
-                      alt="Aktueller Chat-Hintergrund"
-                      className="aspect-video w-full bg-slate-100 object-contain"
-                      loading="lazy"
-                      decoding="async"
-                      width={960}
-                      height={540}
-                    />
-                  ) : (
-                    <div className="grid aspect-video place-items-center bg-slate-100 text-xs text-slate-500">Kein Hintergrund gesetzt</div>
-                  )}
-                </div>
+        <AppOverlayDialog
+          open={showBackgroundModal}
+          onClose={() => setShowBackgroundModal(false)}
+          title="Geteilter Chat-Hintergrund"
+          description="URL einfügen, Bild per Copy/Paste übernehmen oder hochladen."
+          maxWidthClassName="sm:max-w-xl"
+          bodyClassName="space-y-3"
+          footer={(
+            <div className="flex flex-wrap gap-2 sm:flex-row-reverse sm:justify-start">
+              <button
+                type="button"
+                onClick={() => void saveBackgroundDraft()}
+                className="inline-flex w-full justify-center rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white shadow-xs hover:bg-slate-800 disabled:opacity-60 sm:ml-3 sm:w-auto"
+                disabled={uploadingBackground}
+              >
+                {uploadingBackground ? "Speichert…" : "Speichern"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowBackgroundModal(false)}
+                className="inline-flex w-full justify-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-xs inset-ring-1 inset-ring-slate-300 hover:bg-slate-50 sm:w-auto"
+              >
+                Abbrechen
+              </button>
+            </div>
+          )}
+        >
+          <div className="space-y-3" onPaste={onBackgroundModalPaste}>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Aktuelle Vorschau</p>
+              <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white">
+                {chatBackgroundUrl ? (
+                  <img
+                    src={chatBackgroundUrl}
+                    alt="Aktueller Chat-Hintergrund"
+                    className="aspect-video w-full bg-slate-100 object-contain"
+                    loading="lazy"
+                    decoding="async"
+                    width={960}
+                    height={540}
+                  />
+                ) : (
+                  <div className="grid aspect-video place-items-center bg-slate-100 text-xs text-slate-500">Kein Hintergrund gesetzt</div>
+                )}
               </div>
+            </div>
 
-              <label className="block text-sm font-medium text-slate-900" htmlFor="chat-background-url">Bild-URL</label>
-              <input
-                id="chat-background-url"
-                name="chat-background-url"
-                type="url"
-                value={backgroundDraftUrl}
-                onChange={(event) => setBackgroundDraftUrl(event.target.value)}
-                placeholder="https://example.com/background.jpg…"
-                className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                autoComplete="off"
-              />
+            <label className="block text-sm font-medium text-slate-900" htmlFor="chat-background-url">Bild-URL</label>
+            <input
+              id="chat-background-url"
+              name="chat-background-url"
+              type="url"
+              value={backgroundDraftUrl}
+              onChange={(event) => setBackgroundDraftUrl(event.target.value)}
+              placeholder="https://example.com/background.jpg…"
+              className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+              autoComplete="off"
+            />
 
-              <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3">
-                <p className="text-xs text-slate-600">Tipp: Hier hinein klicken und dann ein Bild einfügen (Cmd/Ctrl + V).</p>
-                <div className="mt-2 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => backgroundUploadRef.current?.click()}
-                    className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                    disabled={uploadingBackground}
-                  >
-                    {uploadingBackground ? "Wird hochgeladen…" : "Datei hochladen"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setBackgroundDraftUrl("")}
-                    className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                  >
-                    Zurücksetzen
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex flex-wrap gap-2">
+            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3">
+              <p className="text-xs text-slate-600">Tipp: Hier hinein klicken und dann ein Bild einfügen (Cmd/Ctrl + V).</p>
+              <div className="mt-2 flex flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={() => setShowBackgroundModal(false)}
-                  className="h-11 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  onClick={() => backgroundUploadRef.current?.click()}
+                  className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  disabled={uploadingBackground}
                 >
-                  Abbrechen
+                  {uploadingBackground ? "Wird hochgeladen…" : "Datei hochladen"}
                 </button>
                 <button
                   type="button"
-                  onClick={() => void saveBackgroundDraft()}
-                  className="h-11 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:opacity-60"
-                  disabled={uploadingBackground}
+                  onClick={() => setBackgroundDraftUrl("")}
+                  className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
                 >
-                  {uploadingBackground ? "Speichert…" : "Speichern"}
+                  Zurücksetzen
                 </button>
               </div>
             </div>
           </div>
-        </div>
+        </AppOverlayDialog>
       ) : null}
 
       <input
@@ -4068,217 +3855,210 @@ export function ChatApp() {
       />
 
       {editingProfile ? (
-        <div className="fixed inset-0 z-[65] grid place-items-center bg-slate-900/45 p-2 sm:p-4" onClick={closeProfileEditor}>
-          <div
-            className="w-full max-w-2xl max-h-[92dvh] overflow-y-auto rounded-3xl border border-white/70 bg-white/95 p-5 shadow-2xl backdrop-blur [overscroll-behavior:contain] sm:p-6"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Mein Profil"
-          >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h2 className="text-xl font-semibold text-slate-900">Mein Profil</h2>
-                <p className="mt-1 text-sm text-slate-600">Profil, Sicherheit und Statistik.</p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={() => void logout()}
-                  className="h-10 rounded-xl border border-rose-200 bg-rose-50 px-4 text-sm font-semibold text-rose-700 hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={isLeaving}
-                >
-                  {isLeaving ? "Meldet ab…" : "Abmelden"}
-                </button>
-                <button
-                  type="button"
-                  onClick={closeProfileEditor}
-                  className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                >
-                  Schließen
-                </button>
+        <AppOverlayDialog
+          open={editingProfile}
+          onClose={closeProfileEditor}
+          title="Mein Profil"
+          description="Profil, Sicherheit und Statistik."
+          maxWidthClassName="sm:max-w-2xl"
+          bodyClassName="space-y-4"
+          footer={(
+            <div className="flex flex-wrap gap-2 sm:justify-end">
+              <button
+                type="button"
+                onClick={closeProfileEditor}
+                className="inline-flex w-full justify-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-xs inset-ring-1 inset-ring-slate-300 hover:bg-slate-50 sm:w-auto"
+              >
+                Schließen
+              </button>
+            </div>
+          )}
+        >
+          <section className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4" onPaste={onProfileImagePaste}>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">Profil</h3>
+              <button
+                type="button"
+                onClick={() => void saveProfile()}
+                className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white disabled:opacity-60"
+                disabled={uploadingProfile || savingProfile || isLeaving}
+              >
+                {savingProfile ? "Speichert…" : "Speichern"}
+              </button>
+            </div>
+
+            <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
+              <img
+                src={profilePictureDraft || getDefaultProfilePicture()}
+                alt="Profilbild-Vorschau"
+                className="h-20 w-20 rounded-full border border-slate-200 object-cover"
+                loading="lazy"
+                decoding="async"
+                width={80}
+                height={80}
+              />
+              <div className="min-w-0">
+                <p className="truncate text-xl font-semibold text-slate-900">{usernameDraft || session.username}</p>
+                <p className={`mt-1 text-sm font-medium ${isDeveloperMode ? "text-amber-600" : "text-sky-500"}`}>
+                  {isDeveloperMode ? "Entwicklermodus" : "online"}
+                </p>
               </div>
             </div>
 
-            <div className="mt-4 space-y-4">
-              <section className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4" onPaste={onProfileImagePaste}>
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">Profil</h3>
-                  <button
-                    type="button"
-                    onClick={() => void saveProfile()}
-                    className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white disabled:opacity-60"
-                    disabled={uploadingProfile || savingProfile || isLeaving}
-                  >
-                    {savingProfile ? "Speichert…" : "Speichern"}
-                  </button>
-                </div>
+            <label className="block text-sm font-medium text-slate-900" htmlFor="profile-display-name">Anzeigename</label>
+            <input
+              id="profile-display-name"
+              value={usernameDraft}
+              onChange={(event) => setUsernameDraft(event.target.value)}
+              placeholder="Benutzername…"
+              className="h-12 w-full rounded-xl border border-slate-200 px-4 text-base text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+            />
 
-                <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
-                  <img
-                    src={profilePictureDraft || getDefaultProfilePicture()}
-                    alt="Profilbild-Vorschau"
-                    className="h-20 w-20 rounded-full border border-slate-200 object-cover"
-                    loading="lazy"
-                    decoding="async"
-                    width={80}
-                    height={80}
-                  />
-                  <div className="min-w-0">
-                    <p className="truncate text-xl font-semibold text-slate-900">{usernameDraft || session.username}</p>
-                    <p className={`mt-1 text-sm font-medium ${isDeveloperMode ? "text-amber-600" : "text-sky-500"}`}>
-                      {isDeveloperMode ? "Entwicklermodus" : "online"}
-                    </p>
-                  </div>
-                </div>
+            <div
+              className={`space-y-3 rounded-xl border border-dashed p-3 transition ${
+                profileDropActive
+                  ? "border-sky-400 bg-sky-50"
+                  : "border-slate-300 bg-white"
+              }`}
+              tabIndex={0}
+              onDragOver={onProfileImageDragOver}
+              onDragEnter={onProfileImageDragOver}
+              onDragLeave={onProfileImageDragLeave}
+              onDrop={onProfileImageDrop}
+            >
+              <p className="text-sm text-slate-500">Vor dem Speichern Profilbild hochladen und zuschneiden.</p>
+              <p className="text-xs text-slate-500">
+                Bild hierher ziehen oder per Einfügen (Cmd/Ctrl + V) übernehmen.
+              </p>
+              <button
+                type="button"
+                onClick={() => profileUploadRef.current?.click()}
+                className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 disabled:opacity-60"
+                disabled={uploadingProfile || savingProfile || isLeaving}
+              >
+                {uploadingProfile ? "Wird hochgeladen…" : "Hochladen"}
+              </button>
+            </div>
 
-                <label className="block text-sm font-medium text-slate-900" htmlFor="profile-display-name">Anzeigename</label>
-                <input
-                  id="profile-display-name"
-                  value={usernameDraft}
-                  onChange={(event) => setUsernameDraft(event.target.value)}
-                  placeholder="Benutzername…"
-                  className="h-12 w-full rounded-xl border border-slate-200 px-4 text-base text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                />
+            <button
+              type="button"
+              onClick={() => void logout()}
+              className="h-11 w-full rounded-xl border border-rose-200 bg-rose-50 px-4 text-sm font-semibold text-rose-700 hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isLeaving}
+            >
+              {isLeaving ? "Meldet ab…" : "Abmelden"}
+            </button>
+          </section>
 
-                <div
-                  className={`space-y-3 rounded-xl border border-dashed p-3 transition ${
-                    profileDropActive
-                      ? "border-sky-400 bg-sky-50"
-                      : "border-slate-300 bg-white"
-                  }`}
-                  tabIndex={0}
-                  onDragOver={onProfileImageDragOver}
-                  onDragEnter={onProfileImageDragOver}
-                  onDragLeave={onProfileImageDragLeave}
-                  onDrop={onProfileImageDrop}
-                >
-                  <p className="text-sm text-slate-500">Vor dem Speichern Profilbild hochladen und zuschneiden.</p>
-                  <p className="text-xs text-slate-500">
-                    Bild hierher ziehen oder per Einfügen (Cmd/Ctrl + V) übernehmen.
+          <section className="space-y-3 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">Statistik</h3>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-slate-900">PPC Score</p>
+              <p className="text-sm font-semibold text-sky-700">{ownMember?.score ?? 0}</p>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-slate-200">
+              <div
+                className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out"
+                style={{ width: `${ownProgressPercent}%` }}
+              />
+            </div>
+            <p className="text-xs text-slate-600">
+              {ownMember?.nextRank
+                ? `Noch ${ownMember.pointsToNext ?? 0} bis zum nächsten Rang`
+                : "Höchster Rang erreicht"}
+            </p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {ownRankMilestones.map((step) => (
+                <div key={`profile-rank-${step.rank}`} className="rounded-lg border border-slate-200 bg-white px-2 py-2">
+                  <p className="text-xs font-semibold text-slate-800">{step.label}</p>
+                  <p className="text-[11px] text-slate-600">
+                    {step.reached ? "Erreicht" : `Noch ${step.remaining} bis ${step.minScore}`}
                   </p>
-                  <button
-                    type="button"
-                    onClick={() => profileUploadRef.current?.click()}
-                    className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 disabled:opacity-60"
-                    disabled={uploadingProfile || savingProfile || isLeaving}
-                  >
-                    {uploadingProfile ? "Wird hochgeladen…" : "Hochladen"}
-                  </button>
                 </div>
-              </section>
-
-              <section className="space-y-3 rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">Statistik</h3>
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-sm font-semibold text-slate-900">PPC Score</p>
-                  <p className="text-sm font-semibold text-sky-700">{ownMember?.score ?? 0}</p>
-                </div>
-                <div className="h-2 overflow-hidden rounded-full bg-slate-200">
-                  <div
-                    className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out"
-                    style={{ width: `${ownProgressPercent}%` }}
-                  />
-                </div>
-                <p className="text-xs text-slate-600">
-                  {ownMember?.nextRank
-                    ? `Noch ${ownMember.pointsToNext ?? 0} bis zum nächsten Rang`
-                    : "Höchster Rang erreicht"}
-                </p>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  {ownRankMilestones.map((step) => (
-                    <div key={`profile-rank-${step.rank}`} className="rounded-lg border border-slate-200 bg-white px-2 py-2">
-                      <p className="text-xs font-semibold text-slate-800">{step.label}</p>
-                      <p className="text-[11px] text-slate-600">
-                        {step.reached ? "Erreicht" : `Noch ${step.remaining} bis ${step.minScore}`}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-xs text-slate-700 sm:grid-cols-3">
-                  <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Posts: <span className="font-semibold">{ownProfileStats.postsTotal}</span></div>
-                  <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Reaktionen erhalten: <span className="font-semibold">{ownProfileStats.reactionsReceived}</span></div>
-                  <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Reaktionen gegeben: <span className="font-semibold">{ownProfileStats.reactionsGiven}</span></div>
-                  <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Umfragen erstellt: <span className="font-semibold">{ownProfileStats.pollsCreated}</span></div>
-                  <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Umfrage-Stimmen: <span className="font-semibold">{ownProfileStats.pollVotes}</span></div>
-                  <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Aktive Tage: <span className="font-semibold">{ownProfileStats.activeDays}</span></div>
-                </div>
-              </section>
-
-              <section className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4">
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">Sicherheit</h3>
-                  <button
-                    type="button"
-                    onClick={() => void saveSecurity()}
-                    className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white disabled:opacity-60"
-                    disabled={savingSecurity || isLeaving}
-                  >
-                    {savingSecurity ? "Speichert…" : "Speichern"}
-                  </button>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-slate-900" htmlFor="profile-login-name">Login-Name</label>
-                  <input
-                    id="profile-login-name"
-                    value={loginNameDraft}
-                    onChange={(event) => setLoginNameDraft(event.target.value)}
-                    placeholder="z. B. vorname.nachname"
-                    autoCapitalize="none"
-                    autoCorrect="off"
-                    spellCheck={false}
-                    className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                    disabled={savingSecurity || isLeaving}
-                  />
-                </div>
-
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <div className="sm:col-span-2">
-                    <label className="block text-sm font-medium text-slate-900" htmlFor="profile-current-password">Aktuelles Passwort</label>
-                    <input
-                      id="profile-current-password"
-                      type="password"
-                      autoComplete="current-password"
-                      value={currentPasswordDraft}
-                      onChange={(event) => setCurrentPasswordDraft(event.target.value)}
-                      className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                      disabled={savingSecurity || isLeaving}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-900" htmlFor="profile-new-password">Neues Passwort</label>
-                    <input
-                      id="profile-new-password"
-                      type="password"
-                      autoComplete="new-password"
-                      value={newPasswordDraft}
-                      onChange={(event) => setNewPasswordDraft(event.target.value)}
-                      className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                      disabled={savingSecurity || isLeaving}
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-900" htmlFor="profile-confirm-password">Neues Passwort bestätigen</label>
-                    <input
-                      id="profile-confirm-password"
-                      type="password"
-                      autoComplete="new-password"
-                      value={confirmNewPasswordDraft}
-                      onChange={(event) => setConfirmNewPasswordDraft(event.target.value)}
-                      className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                      disabled={savingSecurity || isLeaving}
-                    />
-                  </div>
-                </div>
-
-                <p className="text-xs text-slate-500">
-                  Für Login-Name- oder Passwort-Änderungen ist das aktuelle Passwort erforderlich.
-                </p>
-              </section>
+              ))}
             </div>
-          </div>
-        </div>
+            <div className="grid grid-cols-2 gap-2 text-xs text-slate-700 sm:grid-cols-3">
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Posts: <span className="font-semibold">{ownProfileStats.postsTotal}</span></div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Reaktionen erhalten: <span className="font-semibold">{ownProfileStats.reactionsReceived}</span></div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Reaktionen gegeben: <span className="font-semibold">{ownProfileStats.reactionsGiven}</span></div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Umfragen erstellt: <span className="font-semibold">{ownProfileStats.pollsCreated}</span></div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Umfrage-Stimmen: <span className="font-semibold">{ownProfileStats.pollVotes}</span></div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Aktive Tage: <span className="font-semibold">{ownProfileStats.activeDays}</span></div>
+            </div>
+          </section>
+
+          <section className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">Sicherheit</h3>
+              <button
+                type="button"
+                onClick={() => void saveSecurity()}
+                className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white disabled:opacity-60"
+                disabled={savingSecurity || isLeaving}
+              >
+                {savingSecurity ? "Speichert…" : "Speichern"}
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-900" htmlFor="profile-login-name">Login-Name</label>
+              <input
+                id="profile-login-name"
+                value={loginNameDraft}
+                onChange={(event) => setLoginNameDraft(event.target.value)}
+                placeholder="z. B. vorname.nachname"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                disabled={savingSecurity || isLeaving}
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium text-slate-900" htmlFor="profile-current-password">Aktuelles Passwort</label>
+                <input
+                  id="profile-current-password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={currentPasswordDraft}
+                  onChange={(event) => setCurrentPasswordDraft(event.target.value)}
+                  className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  disabled={savingSecurity || isLeaving}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-900" htmlFor="profile-new-password">Neues Passwort</label>
+                <input
+                  id="profile-new-password"
+                  type="password"
+                  autoComplete="new-password"
+                  value={newPasswordDraft}
+                  onChange={(event) => setNewPasswordDraft(event.target.value)}
+                  className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  disabled={savingSecurity || isLeaving}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-900" htmlFor="profile-confirm-password">Neues Passwort bestätigen</label>
+                <input
+                  id="profile-confirm-password"
+                  type="password"
+                  autoComplete="new-password"
+                  value={confirmNewPasswordDraft}
+                  onChange={(event) => setConfirmNewPasswordDraft(event.target.value)}
+                  className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  disabled={savingSecurity || isLeaving}
+                />
+              </div>
+            </div>
+
+            <p className="text-xs text-slate-500">
+              Für Login-Name- oder Passwort-Änderungen ist das aktuelle Passwort erforderlich.
+            </p>
+          </section>
+        </AppOverlayDialog>
       ) : null}
 
       <input
@@ -4404,80 +4184,73 @@ export function ChatApp() {
       ) : null}
 
       {showMedia ? (
-        <div
-          className="fixed inset-0 z-50 grid place-items-center bg-slate-900/40 p-2 sm:p-4"
-          onClick={() => setShowMedia(false)}
-        >
-          <div
-            className="w-full max-w-5xl max-h-[92dvh] overflow-y-auto rounded-2xl bg-white p-4 shadow-2xl [overscroll-behavior:contain] sm:p-5"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Medienansicht"
-          >
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-900">Medien</h2>
-                <p className="text-sm text-slate-500">
-                  {loadingMedia && mediaItems.length === 0
-                    ? "Vollständige Medienhistorie wird geladen…"
-                    : `${mediaTotalCount} Bild${mediaTotalCount === 1 ? "" : "er"} in der Datenbank`}
-                </p>
-              </div>
+        <AppOverlayDialog
+          open={showMedia}
+          onClose={() => setShowMedia(false)}
+          title="Medien"
+          description={
+            loadingMedia && mediaItems.length === 0
+              ? "Vollständige Medienhistorie wird geladen…"
+              : `${mediaTotalCount} Bild${mediaTotalCount === 1 ? "" : "er"} in der Datenbank`
+          }
+          maxWidthClassName="sm:max-w-5xl"
+          footer={(
+            <div className="flex flex-wrap gap-2 sm:justify-end">
               <button
-                className="h-9 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700"
+                type="button"
                 onClick={() => setShowMedia(false)}
+                className="inline-flex w-full justify-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-xs inset-ring-1 inset-ring-slate-300 hover:bg-slate-50 sm:w-auto"
               >
                 Schließen
               </button>
             </div>
-
-            {loadingMedia && mediaItems.length === 0 ? (
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
-                Medien werden geladen…
+          )}
+        >
+          {loadingMedia && mediaItems.length === 0 ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
+              Medien werden geladen…
+            </div>
+          ) : mediaItems.length === 0 ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
+              Noch keine Bilder geteilt.
+            </div>
+          ) : (
+            <div ref={mediaScrollRef} className="max-h-[70vh] overflow-y-auto pr-1">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                {mediaItems.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setLightbox({ url: item.url, alt: `Geteilt von ${item.username}` })}
+                    className="group overflow-hidden rounded-xl border border-slate-200 bg-slate-50 text-left"
+                    title={`Geteilt von ${item.username}`}
+                  >
+                    <div className="relative aspect-square w-full bg-slate-100">
+                      <img
+                        src={item.url}
+                        alt="Geteiltes Medium"
+                        className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.03]"
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    </div>
+                    <div className="px-2 py-1.5">
+                      <p className="truncate text-[11px] font-medium text-slate-700">{item.username}</p>
+                      <p className="text-[10px] text-slate-500">{new Date(item.createdAt).toLocaleString("de-DE")}</p>
+                    </div>
+                  </button>
+                ))}
               </div>
-            ) : mediaItems.length === 0 ? (
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
-                Noch keine Bilder geteilt.
-              </div>
-            ) : (
-              <div ref={mediaScrollRef} className="max-h-[70vh] overflow-y-auto pr-1">
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                  {mediaItems.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setLightbox({ url: item.url, alt: `Geteilt von ${item.username}` })}
-                      className="group overflow-hidden rounded-xl border border-slate-200 bg-slate-50 text-left"
-                      title={`Geteilt von ${item.username}`}
-                    >
-                      <div className="relative aspect-square w-full bg-slate-100">
-                        <img
-                          src={item.url}
-                          alt="Geteiltes Medium"
-                          className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.03]"
-                          loading="lazy"
-                          decoding="async"
-                        />
-                      </div>
-                      <div className="px-2 py-1.5">
-                        <p className="truncate text-[11px] font-medium text-slate-700">{item.username}</p>
-                        <p className="text-[10px] text-slate-500">{new Date(item.createdAt).toLocaleString("de-DE")}</p>
-                      </div>
-                    </button>
-                  ))}
+              {mediaHasMore || loadingMediaMore ? (
+                <div className="mt-3 flex justify-center">
+                  <p className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-600">
+                    {loadingMediaMore ? "Weitere werden geladen…" : "Zum automatischen Nachladen scrollen"}
+                  </p>
                 </div>
-                {mediaHasMore || loadingMediaMore ? (
-                  <div className="mt-3 flex justify-center">
-                    <p className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-600">
-                      {loadingMediaMore ? "Weitere werden geladen…" : "Zum automatischen Nachladen scrollen"}
-                    </p>
-                  </div>
-                ) : null}
-              </div>
-            )}
-          </div>
-        </div>
+              ) : null}
+            </div>
+          )}
+        </AppOverlayDialog>
       ) : null}
     </main>
   );

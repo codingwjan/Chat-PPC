@@ -1,10 +1,12 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
-import { Dialog, DialogBackdrop, DialogPanel, DialogTitle, TransitionChild } from "@headlessui/react";
+import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from "@headlessui/react";
 import { XMarkIcon } from "@heroicons/react/24/outline";
 import { MemberProgressInline } from "@/components/member-progress-inline";
-import type { PublicUserProfileDTO } from "@/lib/types";
+import type { MemberRank, PublicUserProfileDTO } from "@/lib/types";
+
+type AiProviderClientId = "chatgpt" | "grok";
 
 interface MemberProfileDrawerProps {
   open: boolean;
@@ -12,7 +14,60 @@ interface MemberProfileDrawerProps {
   loading: boolean;
   error?: string | null;
   profile: PublicUserProfileDTO | null;
+  aiModels?: Partial<Record<AiProviderClientId, string>>;
   onOpenProfileImage?: (url: string, alt: string) => void;
+}
+
+const PROFILE_CARD_TINT_BY_RANK: Record<MemberRank, string> = {
+  BRONZE: "rgba(180, 83, 9, 0.28)",
+  SILBER: "rgba(100, 116, 139, 0.24)",
+  GOLD: "rgba(161, 98, 7, 0.28)",
+  PLATIN: "rgba(14, 116, 144, 0.24)",
+};
+
+const PROFILE_CARD_TINT_BY_AI: Record<AiProviderClientId, string> = {
+  chatgpt: "rgba(167, 139, 250, 0.28)",
+  grok: "rgba(192, 132, 252, 0.28)",
+};
+
+const AI_PROFILE_COPY: Record<
+  AiProviderClientId,
+  {
+    capabilities: string;
+    styleTone: string;
+    info: string;
+  }
+> = {
+  chatgpt: {
+    capabilities:
+      "Textgenerierung (moderiert), Umfrage-Erstellung und Bildgenerierung.",
+    styleTone: "Moderiert, klar und sicherheitsorientiert.",
+    info: "Wird mit @chatgpt erwähnt und antwortet auf Basis des aktuellen Chat-Kontexts.",
+  },
+  grok: {
+    capabilities:
+      "Textgenerierung (unmoderiert) und Umfrage-Erstellung.",
+    styleTone: "Unmoderiert.",
+    info: "Wird mit @grok erwähnt. Bildgenerierung ist für @grok deaktiviert.",
+  },
+};
+
+function getAiProvider(clientId: string | null | undefined): AiProviderClientId | null {
+  if (clientId === "chatgpt" || clientId === "grok") return clientId;
+  return null;
+}
+
+function profileCardGradient(profile: PublicUserProfileDTO | null): string | undefined {
+  const aiProvider = getAiProvider(profile?.clientId);
+  if (aiProvider) {
+    const tint = PROFILE_CARD_TINT_BY_AI[aiProvider];
+    return `linear-gradient(to top right, ${tint} 0%, rgba(248, 250, 252, 0.96) 58%, rgba(241, 245, 249, 0.96) 100%)`;
+  }
+
+  const rank = profile?.member?.rank;
+  if (!rank) return undefined;
+  const tint = PROFILE_CARD_TINT_BY_RANK[rank];
+  return `linear-gradient(to top right, ${tint} 0%, rgba(248, 250, 252, 0.96) 58%, rgba(241, 245, 249, 0.96) 100%)`;
 }
 
 function formatLastSeen(lastSeenAt: string | null): string {
@@ -37,8 +92,14 @@ export function MemberProfileDrawer({
   loading,
   error,
   profile,
+  aiModels,
   onOpenProfileImage,
 }: MemberProfileDrawerProps) {
+  const aiProvider = getAiProvider(profile?.clientId);
+  const aiModel = aiProvider ? aiModels?.[aiProvider]?.trim() || "Modell wird geladen…" : "";
+  const aiCopy = aiProvider ? AI_PROFILE_COPY[aiProvider] : null;
+  const profileHeaderGradient = profileCardGradient(profile);
+
   return (
     <Dialog open={open} onClose={onClose} className="relative z-[75]">
       <DialogBackdrop
@@ -81,7 +142,10 @@ export function MemberProfileDrawer({
 
                   {profile ? (
                     <>
-                      <div className="rounded-2xl border border-slate-200 bg-white p-4">
+                      <div
+                        className="rounded-2xl border border-slate-200 bg-white p-4"
+                        style={profileHeaderGradient ? { backgroundImage: profileHeaderGradient } : undefined}
+                      >
                         <div className="flex items-center gap-3">
                           <button
                             type="button"
@@ -107,24 +171,45 @@ export function MemberProfileDrawer({
                             <p className="truncate text-2xl font-bold text-slate-900">{profile.username}</p>
                             <div className="mt-1 space-y-0.5">
                               <p className="text-sm text-slate-600">
-                                {profile.isOnline ? "Online" : formatLastSeen(profile.lastSeenAt)}
+                                {aiProvider ? aiModel : profile.isOnline ? "Online" : formatLastSeen(profile.lastSeenAt)}
                               </p>
                               <div>
-                                <MemberProgressInline member={profile.member} variant="list" />
+                                {aiProvider ? (
+                                  <span className="inline-flex items-center rounded-full border border-violet-200 bg-violet-100 px-2 py-0.5 text-[10px] font-semibold text-violet-700">
+                                    AI Assistant
+                                  </span>
+                                ) : (
+                                  <MemberProgressInline member={profile.member} variant="list" />
+                                )}
                               </div>
                             </div>
                           </div>
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                        <StatCard title="Posts" value={profile.stats.postsTotal} />
-                        <StatCard title="Reaktionen erhalten" value={profile.stats.reactionsReceived} />
-                        <StatCard title="Reaktionen gegeben" value={profile.stats.reactionsGiven} />
-                        <StatCard title="Umfragen erstellt" value={profile.stats.pollsCreated} />
-                        <StatCard title="Umfrage-Stimmen" value={profile.stats.pollVotes} />
-                        <StatCard title="Aktive Tage" value={profile.stats.activeDays} />
-                      </div>
+                      {aiProvider && aiCopy ? (
+                        <div className="space-y-2 rounded-2xl border border-violet-200 bg-violet-50/60 p-4">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-violet-700">KI-Profil</p>
+                          <p className="text-sm text-slate-700">
+                            <span className="font-semibold text-slate-900">Fähigkeiten:</span> {aiCopy.capabilities}
+                          </p>
+                          <p className="text-sm text-slate-700">
+                            <span className="font-semibold text-slate-900">Stil & Ton:</span> {aiCopy.styleTone}
+                          </p>
+                          <p className="text-sm text-slate-700">
+                            <span className="font-semibold text-slate-900">Info:</span> {aiCopy.info}
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <StatCard title="Posts" value={profile.stats.postsTotal} />
+                          <StatCard title="Reaktionen erhalten" value={profile.stats.reactionsReceived} />
+                          <StatCard title="Reaktionen gegeben" value={profile.stats.reactionsGiven} />
+                          <StatCard title="Umfragen erstellt" value={profile.stats.pollsCreated} />
+                          <StatCard title="Umfrage-Stimmen" value={profile.stats.pollVotes} />
+                          <StatCard title="Aktive Tage" value={profile.stats.activeDays} />
+                        </div>
+                      )}
                     </>
                   ) : null}
                 </div>

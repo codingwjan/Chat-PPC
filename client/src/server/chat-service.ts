@@ -9,6 +9,7 @@ import { getDefaultProfilePicture as getDefaultAvatar } from "@/lib/default-avat
 import {
   buildMemberProgress,
   isMemberRankUpgrade,
+  MEMBER_RANK_STEPS,
   memberRankLabel,
   PPC_MEMBER_BRAND,
   PPC_MEMBER_SCORE_WEIGHTS,
@@ -265,9 +266,23 @@ function fallbackStatusForProvider(provider: AiProvider): string {
   return isProviderConfigured(provider) ? "online" : "offline";
 }
 
+function fallbackModelLabelForProvider(provider: AiProvider): string {
+  if (provider === "grok") {
+    return getGrokRuntimeConfig().textModel;
+  }
+  return "Modell dynamisch (Prompt)";
+}
+
+function resolveModelFromResponse(response: OpenAIResponse | null | undefined): string | undefined {
+  const model = typeof response?.model === "string" ? response.model.trim() : "";
+  return model || undefined;
+}
+
 let aiStatusState: AiStatusDTO = {
   chatgpt: fallbackStatusForProvider("chatgpt"),
   grok: fallbackStatusForProvider("grok"),
+  chatgptModel: fallbackModelLabelForProvider("chatgpt"),
+  grokModel: fallbackModelLabelForProvider("grok"),
   updatedAt: new Date().toISOString(),
 };
 
@@ -1449,10 +1464,15 @@ export async function getOnlineUsers(): Promise<UserPresenceDTO[]> {
 }
 
 export async function getAiStatus(): Promise<AiStatusDTO> {
+  const chatgptModel = aiStatusState.chatgptModel || fallbackModelLabelForProvider("chatgpt");
+  const grokModel = aiStatusState.grokModel || fallbackModelLabelForProvider("grok");
+
   if (!hasAnyAiProviderApiKey()) {
     return {
       chatgpt: "offline",
       grok: "offline",
+      chatgptModel,
+      grokModel,
       updatedAt: new Date().toISOString(),
     };
   }
@@ -1470,6 +1490,8 @@ export async function getAiStatus(): Promise<AiStatusDTO> {
   return {
     chatgpt: hasOpenAiApiKey() ? persisted?.status || aiStatusState.chatgpt : "offline",
     grok: hasGrokApiKey() ? aiStatusState.grok : "offline",
+    chatgptModel,
+    grokModel,
     updatedAt: persisted?.lastSeenAt?.toISOString() || aiStatusState.updatedAt,
   };
 }
@@ -1611,13 +1633,20 @@ async function getPagedMessageRows(input: {
   };
 }
 
-function publishAiStatus(provider: AiProvider, status: string): void {
+function publishAiStatus(
+  provider: AiProvider,
+  status: string,
+  options?: { model?: string },
+): void {
+  const modelKey = provider === "grok" ? "grokModel" : "chatgptModel";
+  const providedModel = options?.model?.trim();
   aiStatusState = {
     ...aiStatusState,
     [provider]: status,
+    [modelKey]: providedModel || aiStatusState[modelKey] || fallbackModelLabelForProvider(provider),
     updatedAt: new Date().toISOString(),
   };
-  publish("ai.status", { status, provider });
+  publish("ai.status", { status, provider, ...(providedModel ? { model: providedModel } : {}) });
   void persistAiStatusToDatabase(aiStatusState);
 }
 
@@ -3221,12 +3250,14 @@ async function streamAiTextToMessage(input: {
   supported: boolean;
   messageId: string | null;
   rawOutputText: string;
+  model?: string;
 }> {
   if (typeof input.responsesApi.stream !== "function") {
-    return { supported: false, messageId: null, rawOutputText: "" };
+    return { supported: false, messageId: null, rawOutputText: "", model: undefined };
   }
 
   let messageId: string | null = null;
+  let model: string | undefined;
   let text = "";
   let lastPublishedLength = 0;
   let lastPublishedAt = 0;
@@ -3278,6 +3309,7 @@ async function streamAiTextToMessage(input: {
       void flush(false);
     });
     const finalResponse = await stream.finalResponse();
+    model = resolveModelFromResponse(finalResponse) || model;
     await flush(true);
     const finalText = stripLeadingAiMentions(finalResponse.output_text?.trim() || "");
     if (finalText && finalText !== text) {
@@ -3295,12 +3327,12 @@ async function streamAiTextToMessage(input: {
         await runMode("minimal");
       } catch (minimalError) {
         if (!messageId) {
-          return { supported: false, messageId: null, rawOutputText: "" };
+          return { supported: false, messageId: null, rawOutputText: "", model: undefined };
         }
         throw minimalError;
       }
     } else if (!messageId) {
-      return { supported: false, messageId: null, rawOutputText: "" };
+      return { supported: false, messageId: null, rawOutputText: "", model: undefined };
     } else {
       throw error;
     }
@@ -3312,6 +3344,7 @@ async function streamAiTextToMessage(input: {
     supported: true,
     messageId,
     rawOutputText: stripLeadingAiMentions(text.trim()),
+    model,
   };
 }
 
@@ -3376,7 +3409,9 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
   if (!isProviderConfigured(payload.provider)) return;
   const threadMessageId = payload.threadMessageId ?? payload.sourceMessageId;
 
-  publishAiStatus(payload.provider, "denkt nach…");
+  publishAiStatus(payload.provider, "denkt nach…", {
+    model: payload.provider === "grok" ? getGrokRuntimeConfig().textModel : undefined,
+  });
 
   try {
     if (payload.provider === "chatgpt") {
@@ -3512,7 +3547,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
             ? "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal."
             : text;
 
-          publishAiStatus(payload.provider, "schreibt…");
+          publishAiStatus(payload.provider, "schreibt…", { model: streamResult.model });
           if (streamResult.messageId) {
             await updateAiMessageContent({
               messageId: streamResult.messageId,
@@ -3582,11 +3617,12 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       };
 
       const response = await requestWithServerRecovery();
+      const responseModel = resolveModelFromResponse(response);
 
       const hasImageOutput = Array.isArray(response.output)
         && response.output.some((item) => item.type === "image_generation_call");
       if (hasImageOutput) {
-        publishAiStatus(payload.provider, "erstellt Bild…");
+        publishAiStatus(payload.provider, "erstellt Bild…", { model: responseModel });
       }
 
       const imageMarkdown: string[] = [];
@@ -3610,7 +3646,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       const rawOutputText = stripLeadingAiMentions(response.output_text?.trim() || "");
       const pollPayload = extractAiPollPayload(rawOutputText);
       if (pollPayload) {
-        publishAiStatus(payload.provider, "schreibt…");
+        publishAiStatus(payload.provider, "schreibt…", { model: responseModel });
         await createAiPollMessage({
           provider: payload.provider,
           threadMessageId,
@@ -3628,7 +3664,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       const text = [cleanedOutputText, ...imageMarkdown].filter(Boolean).join("\n\n").trim();
 
       if (!text || text === "[NO_RESPONSE]") {
-        publishAiStatus(payload.provider, "schreibt…");
+        publishAiStatus(payload.provider, "schreibt…", { model: responseModel });
         await createAiMessage({
           provider: payload.provider,
           threadMessageId,
@@ -3637,7 +3673,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
         return;
       }
 
-      publishAiStatus(payload.provider, "schreibt…");
+      publishAiStatus(payload.provider, "schreibt…", { model: responseModel });
       await createAiMessage({
         provider: payload.provider,
         threadMessageId,
@@ -3652,7 +3688,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
     }
     const cleanedMessage = stripAiMentions(payload.message);
     if (shouldUseImageGenerationTool(cleanedMessage, payload.imageUrls.length)) {
-      publishAiStatus(payload.provider, "schreibt…");
+      publishAiStatus(payload.provider, "schreibt…", { model: grokConfig.textModel });
       await createAiMessage({
         provider: payload.provider,
         threadMessageId,
@@ -3696,7 +3732,9 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
           ? "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal."
           : text;
 
-        publishAiStatus(payload.provider, "schreibt…");
+        publishAiStatus(payload.provider, "schreibt…", {
+          model: streamResult.model || grokConfig.textModel,
+        });
         if (streamResult.messageId) {
           await updateAiMessageContent({
             messageId: streamResult.messageId,
@@ -3723,11 +3761,12 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       }
       response = (await grok.responses.create(await buildGrokRequest("minimal"))) as OpenAIResponse;
     }
+    const responseModel = resolveModelFromResponse(response) || grokConfig.textModel;
 
     const rawOutputText = stripLeadingAiMentions(response.output_text?.trim() || "");
     const pollPayload = extractAiPollPayload(rawOutputText);
     if (pollPayload) {
-      publishAiStatus(payload.provider, "schreibt…");
+      publishAiStatus(payload.provider, "schreibt…", { model: responseModel });
       await createAiPollMessage({
         provider: payload.provider,
         threadMessageId,
@@ -3741,7 +3780,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
     const text = stripAiPollBlocks(rawOutputText).trim();
 
     if (!text || text === "[NO_RESPONSE]") {
-      publishAiStatus(payload.provider, "schreibt…");
+      publishAiStatus(payload.provider, "schreibt…", { model: responseModel });
       await createAiMessage({
         provider: payload.provider,
         threadMessageId,
@@ -3750,7 +3789,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       return;
     }
 
-    publishAiStatus(payload.provider, "schreibt…");
+    publishAiStatus(payload.provider, "schreibt…", { model: responseModel });
     await createAiMessage({
       provider: payload.provider,
       threadMessageId,
@@ -6782,6 +6821,10 @@ export async function getAdminUsers(input: {
     username: string;
     profilePicture: string;
     isOnline: boolean;
+    status: string;
+    lastSeenAt: Date | null;
+    ppcMemberScoreRaw: number;
+    ppcMemberLastActiveAt: Date | null;
     loginName: string | null;
     loginNameEncrypted: string | null;
     passwordHash: string | null;
@@ -6801,6 +6844,10 @@ export async function getAdminUsers(input: {
           username: true,
           profilePicture: true,
           isOnline: true,
+          status: true,
+          lastSeenAt: true,
+          ppcMemberScoreRaw: true,
+          ppcMemberLastActiveAt: true,
           loginName: true,
           loginNameEncrypted: true,
           passwordHash: true,
@@ -6828,6 +6875,10 @@ export async function getAdminUsers(input: {
         username: true,
         profilePicture: true,
         isOnline: true,
+        status: true,
+        lastSeenAt: true,
+        ppcMemberScoreRaw: true,
+        ppcMemberLastActiveAt: true,
         loginName: true,
         passwordHash: true,
       },
@@ -6835,12 +6886,50 @@ export async function getAdminUsers(input: {
     users = legacyUsers.map((user) => ({ ...user, loginNameEncrypted: null }));
   }
 
+  const statsByUserId = new Map<string, {
+    postsTotal: number;
+    reactionsGiven: number;
+    reactionsReceived: number;
+    pollsCreated: number;
+    pollVotes: number;
+    activeDays: number;
+  }>();
+
+  await Promise.all(users.map(async (user) => {
+    const fullStats = await getTasteWindowStats({
+      userId: user.id,
+      windowStart: null,
+    });
+    statsByUserId.set(user.id, {
+      postsTotal: fullStats.activity.postsTotal,
+      reactionsGiven: fullStats.reactions.givenTotal,
+      reactionsReceived: fullStats.reactions.receivedTotal,
+      pollsCreated: fullStats.activity.pollsCreated,
+      pollVotes: fullStats.activity.pollVotesGiven,
+      activeDays: fullStats.activity.activeDays,
+    });
+  }));
+
   return {
     items: users.map((user) => {
       const loginName = user.loginNameEncrypted
         ? decryptLoginName(user.loginNameEncrypted)
         : user.loginName ? normalizeLoginName(user.loginName) : null;
       const hasAccount = Boolean(user.passwordHash && loginName);
+      const member = isPpcMemberEligibleUser({ clientId: user.clientId, username: user.username })
+        ? buildMemberProgress({
+          rawScore: user.ppcMemberScoreRaw || 0,
+          lastActiveAt: user.ppcMemberLastActiveAt || null,
+        })
+        : undefined;
+      const stats = statsByUserId.get(user.id) || {
+        postsTotal: 0,
+        reactionsGiven: 0,
+        reactionsReceived: 0,
+        pollsCreated: 0,
+        pollVotes: 0,
+        activeDays: 0,
+      };
 
       return {
         userId: user.id,
@@ -6851,6 +6940,9 @@ export async function getAdminUsers(input: {
         hasAccount,
         canResetPassword: hasAccount,
         isOnline: user.isOnline,
+        member,
+        memberRawScore: Math.max(0, user.ppcMemberScoreRaw || 0),
+        stats,
       };
     }),
   };
@@ -7053,6 +7145,83 @@ export async function runAdminAction(input: AdminActionRequest): Promise<AdminAc
     });
     invalidateMediaCache();
     message = `Nachricht ${target.id} wurde gelöscht.`;
+  }
+
+  if (action === "set_user_score") {
+    const targetUserId = input.targetUserId?.trim();
+    const targetScore = Number(input.targetScore);
+    assert(targetUserId, "targetUserId ist für set_user_score erforderlich", 400);
+    assert(Number.isFinite(targetScore), "targetScore ist für set_user_score erforderlich", 400);
+    const nextRawScore = Math.max(0, Math.round(targetScore));
+    const target = await prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: { id: true },
+    });
+    assert(target, "Zielnutzer nicht gefunden", 404);
+
+    const updated = await prisma.user.update({
+      where: { id: target.id },
+      data: {
+        ppcMemberScoreRaw: nextRawScore,
+        ppcMemberLastActiveAt: new Date(),
+      },
+      select: {
+        id: true,
+        clientId: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+        ppcMemberScoreRaw: true,
+        ppcMemberLastActiveAt: true,
+      },
+    });
+
+    publish("user.updated", mapUser(updated));
+    publish("presence.updated", mapUser(updated));
+    const nextMember = buildMemberProgress({
+      rawScore: updated.ppcMemberScoreRaw || 0,
+      lastActiveAt: updated.ppcMemberLastActiveAt || null,
+    });
+    message = `PPC Score für ${updated.username} wurde auf ${nextMember.score} gesetzt.`;
+  }
+
+  if (action === "set_user_rank") {
+    const targetUserId = input.targetUserId?.trim();
+    const targetRank = input.targetRank;
+    assert(targetUserId, "targetUserId ist für set_user_rank erforderlich", 400);
+    assert(targetRank, "targetRank ist für set_user_rank erforderlich", 400);
+    const targetStep = MEMBER_RANK_STEPS.find((step) => step.rank === targetRank);
+    assert(targetStep, "targetRank ist ungültig", 400);
+    const target = await prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: { id: true },
+    });
+    assert(target, "Zielnutzer nicht gefunden", 404);
+
+    const updated = await prisma.user.update({
+      where: { id: target.id },
+      data: {
+        ppcMemberScoreRaw: targetStep.minScore,
+        ppcMemberLastActiveAt: new Date(),
+      },
+      select: {
+        id: true,
+        clientId: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+        ppcMemberScoreRaw: true,
+        ppcMemberLastActiveAt: true,
+      },
+    });
+
+    publish("user.updated", mapUser(updated));
+    publish("presence.updated", mapUser(updated));
+    message = `Rang für ${updated.username} wurde auf ${memberRankLabel(targetRank)} gesetzt.`;
   }
 
   const overview = await getAdminOverviewInternal();

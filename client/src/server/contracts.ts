@@ -261,9 +261,14 @@ const adminActionSchema = adminOverviewSchema
       "clear_blacklist",
       "delete_user",
       "delete_message",
+      "set_user_score",
+      "set_user_rank",
     ]),
+    targetUserId: z.string().trim().optional(),
     targetUsername: z.string().trim().optional(),
     targetMessageId: z.string().trim().optional(),
+    targetScore: z.coerce.number().optional(),
+    targetRank: z.enum(["BRONZE", "SILBER", "GOLD", "PLATIN"]).optional(),
   })
   .superRefine((value, ctx) => {
     if (value.action === "delete_user" && !value.targetUsername) {
@@ -280,6 +285,40 @@ const adminActionSchema = adminOverviewSchema
         message: "targetMessageId ist für delete_message erforderlich",
         path: ["targetMessageId"],
       });
+    }
+
+    if (value.action === "set_user_score") {
+      if (!value.targetUserId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "targetUserId ist für set_user_score erforderlich",
+          path: ["targetUserId"],
+        });
+      }
+      if (!Number.isFinite(value.targetScore ?? Number.NaN)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "targetScore ist für set_user_score erforderlich",
+          path: ["targetScore"],
+        });
+      }
+    }
+
+    if (value.action === "set_user_rank") {
+      if (!value.targetUserId) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "targetUserId ist für set_user_rank erforderlich",
+          path: ["targetUserId"],
+        });
+      }
+      if (!value.targetRank) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "targetRank ist für set_user_rank erforderlich",
+          path: ["targetRank"],
+        });
+      }
     }
   });
 

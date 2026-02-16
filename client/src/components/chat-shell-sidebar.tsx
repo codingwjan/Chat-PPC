@@ -3,7 +3,7 @@
 
 import { Dialog, DialogBackdrop, DialogPanel, TransitionChild } from "@headlessui/react";
 import { XMarkIcon } from "@heroicons/react/24/outline";
-import { InformationCircleIcon, PhotoIcon, SwatchIcon } from "@heroicons/react/20/solid";
+import { InformationCircleIcon, PhotoIcon, SwatchIcon, WrenchScrewdriverIcon } from "@heroicons/react/20/solid";
 import { type ReactNode } from "react";
 import { MemberProgressInline } from "@/components/member-progress-inline";
 import type { MemberProgressDTO } from "@/lib/types";
@@ -16,11 +16,24 @@ interface ChatShellSidebarProps {
   member?: MemberProgressDTO;
   memberHighlight?: boolean;
   onOpenProfileEditor: () => void;
+  onOpenDevMenu?: () => void;
   onOpenSharedBackground: () => void;
   onOpenMedia: () => void;
   onOpenPointsInfo: () => void;
   onlineUsersContent: ReactNode;
-  developerContent?: ReactNode;
+}
+
+const PROFILE_CARD_TINT_BY_RANK: Record<NonNullable<MemberProgressDTO["rank"]>, string> = {
+  BRONZE: "rgba(180, 83, 9, 0.28)",
+  SILBER: "rgba(100, 116, 139, 0.24)",
+  GOLD: "rgba(161, 98, 7, 0.28)",
+  PLATIN: "rgba(14, 116, 144, 0.24)",
+};
+
+function profileCardGradient(member?: MemberProgressDTO): string | undefined {
+  if (!member) return undefined;
+  const tint = PROFILE_CARD_TINT_BY_RANK[member.rank];
+  return `linear-gradient(to top right, ${tint} 0%, rgba(248, 250, 252, 0.96) 58%, rgba(241, 245, 249, 0.96) 100%)`;
 }
 
 function SidebarActionButton({
@@ -50,12 +63,14 @@ function SidebarBody({
   member,
   memberHighlight,
   onOpenProfileEditor,
+  onOpenDevMenu,
   onOpenSharedBackground,
   onOpenMedia,
   onOpenPointsInfo,
   onlineUsersContent,
-  developerContent,
 }: Omit<ChatShellSidebarProps, "mobileOpen" | "onCloseMobile">) {
+  const profileButtonGradient = profileCardGradient(member);
+
   return (
     <div className="flex h-full min-h-0 flex-col border-r border-slate-200 bg-white/90 px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-[calc(env(safe-area-inset-top)+0.75rem)] backdrop-blur [touch-action:manipulation] [-webkit-tap-highlight-color:transparent] lg:py-4">
       <div className="pb-3">
@@ -67,9 +82,14 @@ function SidebarBody({
         <div className="space-y-2">{onlineUsersContent}</div>
       </div>
 
-      {developerContent ? <div className="mt-3">{developerContent}</div> : null}
-
       <div className="mt-3 space-y-2">
+        {onOpenDevMenu ? (
+          <SidebarActionButton
+            label="Dev Menu"
+            onClick={onOpenDevMenu}
+            icon={<WrenchScrewdriverIcon className="size-4 text-slate-500" aria-hidden="true" />}
+          />
+        ) : null}
         <SidebarActionButton
           label="Medien"
           onClick={onOpenMedia}
@@ -90,8 +110,9 @@ function SidebarBody({
       <button
         type="button"
         onClick={onOpenProfileEditor}
-        className="mt-2 flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-left hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+        className="mt-2 flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-left transition-[filter,background-color] hover:brightness-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
         aria-label="Eigenes Profil öffnen"
+        style={profileButtonGradient ? { backgroundImage: profileButtonGradient } : undefined}
       >
         <img
           src={profilePicture}
@@ -121,11 +142,11 @@ export function ChatShellSidebar({
   member,
   memberHighlight,
   onOpenProfileEditor,
+  onOpenDevMenu,
   onOpenSharedBackground,
   onOpenMedia,
   onOpenPointsInfo,
   onlineUsersContent,
-  developerContent,
 }: ChatShellSidebarProps) {
   return (
     <>
@@ -161,11 +182,11 @@ export function ChatShellSidebar({
                 member={member}
                 memberHighlight={memberHighlight}
                 onOpenProfileEditor={onOpenProfileEditor}
+                onOpenDevMenu={onOpenDevMenu}
                 onOpenSharedBackground={onOpenSharedBackground}
                 onOpenMedia={onOpenMedia}
                 onOpenPointsInfo={onOpenPointsInfo}
                 onlineUsersContent={onlineUsersContent}
-                developerContent={developerContent}
               />
             </div>
           </DialogPanel>
@@ -179,11 +200,11 @@ export function ChatShellSidebar({
           member={member}
           memberHighlight={memberHighlight}
           onOpenProfileEditor={onOpenProfileEditor}
+          onOpenDevMenu={onOpenDevMenu}
           onOpenSharedBackground={onOpenSharedBackground}
           onOpenMedia={onOpenMedia}
           onOpenPointsInfo={onOpenPointsInfo}
           onlineUsersContent={onlineUsersContent}
-          developerContent={developerContent}
         />
       </aside>
     </>

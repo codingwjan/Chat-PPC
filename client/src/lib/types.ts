@@ -118,7 +118,9 @@ export type AdminActionType =
   | "logout_all_users"
   | "clear_blacklist"
   | "delete_user"
-  | "delete_message";
+  | "delete_message"
+  | "set_user_score"
+  | "set_user_rank";
 
 export interface AdminOverviewRequest {
   clientId: string;
@@ -127,8 +129,11 @@ export interface AdminOverviewRequest {
 
 export interface AdminActionRequest extends AdminOverviewRequest {
   action: AdminActionType;
+  targetUserId?: string;
   targetUsername?: string;
   targetMessageId?: string;
+  targetScore?: number;
+  targetRank?: MemberRank;
 }
 
 export interface AdminOverviewDTO {
@@ -154,6 +159,9 @@ export interface AdminUserListItemDTO {
   hasAccount: boolean;
   canResetPassword: boolean;
   isOnline: boolean;
+  member?: MemberProgressDTO;
+  memberRawScore: number;
+  stats: PublicUserProfileStatsDTO;
 }
 
 export interface AdminUserListResponseDTO {
@@ -483,6 +491,8 @@ export interface LinkPreviewDTO {
 export interface AiStatusDTO {
   chatgpt: string;
   grok: string;
+  chatgptModel: string;
+  grokModel: string;
   updatedAt: string;
 }
 
@@ -523,7 +533,7 @@ export interface SseEventPayloadMap {
   "poll.updated": MessageDTO;
   "user.updated": UserPresenceDTO;
   "chat.background.updated": ChatBackgroundDTO;
-  "ai.status": { status: string; provider?: "chatgpt" | "grok" };
+  "ai.status": { status: string; provider?: "chatgpt" | "grok"; model?: string };
 }
 
 export interface SseEnvelope<TEvent extends SseEventName = SseEventName> {

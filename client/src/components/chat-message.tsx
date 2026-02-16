@@ -32,6 +32,7 @@ interface ChatMessageProps {
   onReact?: (messageId: string, reaction: ReactionType) => void;
   onOpenLightbox?: (url: string, alt?: string) => void;
   onRemixImage?: (url: string, alt?: string) => void;
+  onOpenAuthorProfile?: (message: MessageDTO) => void;
 }
 
 const IMAGE_URL_REGEX = /\.(jpeg|jpg|gif|png|webp|svg)(\?.*)?$/i;
@@ -544,10 +545,12 @@ function LinkPreviewCard({ url }: { url: string }) {
 function MessageAvatar({
   src,
   alt,
+  onOpenProfile,
   onOpenLightbox,
 }: {
   src: string;
   alt: string;
+  onOpenProfile?: () => void;
   onOpenLightbox?: (url: string, alt?: string) => void;
 }) {
   const normalizedSrc = useMemo(() => normalizeProfilePictureUrl(src), [src]);
@@ -555,6 +558,25 @@ function MessageAvatar({
 
   const activeSrc = failed ? DEFAULT_PROFILE_PICTURE : normalizedSrc;
   const isFallback = failed || activeSrc === DEFAULT_PROFILE_PICTURE;
+
+  if (onOpenProfile) {
+    return (
+      <button
+        type="button"
+        onClick={onOpenProfile}
+        className="shrink-0 rounded-full transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+        aria-label={`Profil von ${alt.replace(/^Profilbild von /, "")} öffnen`}
+      >
+        <LazyImage
+          src={activeSrc}
+          alt={alt}
+          frameClassName="h-16 w-16 rounded-full border-2 border-slate-200 bg-slate-200/80 shadow-sm"
+          imageClassName="h-full w-full rounded-full object-cover"
+          onError={() => setFailed(true)}
+        />
+      </button>
+    );
+  }
 
   if (onOpenLightbox && !isFallback) {
     return (
@@ -602,6 +624,7 @@ function ChatMessageComponent({
   onReact,
   onOpenLightbox,
   onRemixImage,
+  onOpenAuthorProfile,
 }: ChatMessageProps) {
   const pollSettings = message.poll?.settings;
   const previewUrls = useMemo(() => extractPreviewUrls(message.message), [message.message]);
@@ -614,6 +637,10 @@ function ChatMessageComponent({
     && message.oldusername?.trim().toLowerCase() === viewerUsernameNormalized;
   const isRightAligned = isOwnMessage || isAiReplyToOwnMessage;
   const profilePictureAlt = `Profilbild von ${message.username}`;
+  const openAuthorProfile = useCallback(() => {
+    onOpenAuthorProfile?.(message);
+  }, [message, onOpenAuthorProfile]);
+  const canOpenAuthorProfile = Boolean(onOpenAuthorProfile);
 
   if (message.username === "System") {
     if (!isVisibleSystemMessage(message)) return null;
@@ -664,6 +691,7 @@ function ChatMessageComponent({
               key={`poll-${message.id}:${message.profilePicture}`}
               src={message.profilePicture}
               alt={profilePictureAlt}
+              onOpenProfile={canOpenAuthorProfile ? openAuthorProfile : undefined}
               onOpenLightbox={onOpenLightbox}
             />
             <div className="min-w-0 flex-1">
@@ -671,7 +699,20 @@ function ChatMessageComponent({
                 <div className="min-w-0">
                   <p className="text-base font-semibold text-slate-900">{message.message}</p>
                   <div className="flex flex-wrap items-center gap-1.5">
-                    <p className="text-sm text-slate-500">Umfrage von {message.username}</p>
+                    <p className="text-sm text-slate-500">
+                      Umfrage von{" "}
+                      {canOpenAuthorProfile ? (
+                        <button
+                          type="button"
+                          onClick={openAuthorProfile}
+                          className="font-semibold text-slate-600 underline decoration-slate-300 decoration-2 underline-offset-2 transition hover:text-sky-700 hover:decoration-sky-400"
+                        >
+                          {message.username}
+                        </button>
+                      ) : (
+                        <span className="font-semibold text-slate-600">{message.username}</span>
+                      )}
+                    </p>
                     <MemberProgressInline member={message.member} variant="chat" />
                   </div>
                 </div>
@@ -792,7 +833,20 @@ function ChatMessageComponent({
             <div>
               <p className="text-base font-semibold text-slate-900">{message.message}</p>
               <div className="flex flex-wrap items-center gap-1.5">
-                <p className="text-sm text-slate-500">Frage von {message.username}</p>
+                <p className="text-sm text-slate-500">
+                  Frage von{" "}
+                  {canOpenAuthorProfile ? (
+                    <button
+                      type="button"
+                      onClick={openAuthorProfile}
+                      className="font-semibold text-slate-600 underline decoration-slate-300 decoration-2 underline-offset-2 transition hover:text-sky-700 hover:decoration-sky-400"
+                    >
+                      {message.username}
+                    </button>
+                  ) : (
+                    <span className="font-semibold text-slate-600">{message.username}</span>
+                  )}
+                </p>
                 <MemberProgressInline member={message.member} variant="chat" />
               </div>
             </div>
@@ -867,11 +921,22 @@ function ChatMessageComponent({
             key={`${message.id}:${message.profilePicture}`}
             src={message.profilePicture}
             alt={profilePictureAlt}
+            onOpenProfile={canOpenAuthorProfile ? openAuthorProfile : undefined}
             onOpenLightbox={onOpenLightbox}
           />
           <div className="min-w-0">
             <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
-              <p className="text-sm font-semibold text-slate-900">{message.username}</p>
+              {canOpenAuthorProfile ? (
+                <button
+                  type="button"
+                  onClick={openAuthorProfile}
+                  className="text-sm font-semibold text-slate-900 underline decoration-slate-300 decoration-2 underline-offset-2 transition hover:text-sky-700 hover:decoration-sky-400"
+                >
+                  {message.username}
+                </button>
+              ) : (
+                <p className="text-sm font-semibold text-slate-900">{message.username}</p>
+              )}
               <MemberProgressInline member={message.member} variant="chat" />
               <time className="text-xs text-slate-400" dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
               {onStartReply ? (
