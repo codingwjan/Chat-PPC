@@ -1,11 +1,11 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { FormEvent, KeyboardEvent, useEffect, useRef, useState, type DragEvent } from "react";
 import { useRouter } from "next/navigation";
 import { AuthWhatsNewPanel } from "@/components/auth-whats-new";
-import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { apiJson } from "@/lib/http";
 import { clearSession, getDefaultProfilePicture, loadSession, saveSession, type SessionState } from "@/lib/session";
 import type { AuthSessionDTO, AuthSignUpRequest } from "@/lib/types";
@@ -15,6 +15,22 @@ interface UploadResponse {
 }
 
 const SUPPORTED_PROFILE_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+
+const ProfileImageCropModal = dynamic(
+  () => import("@/components/profile-image-crop-modal").then((module) => module.ProfileImageCropModal),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-900/55 p-4">
+        <div className="glass-panel-strong w-full max-w-xl rounded-2xl p-5 animate-pulse">
+          <div className="h-5 w-44 rounded bg-slate-200/70" />
+          <div className="mt-4 aspect-square w-full rounded-2xl bg-slate-200/70" />
+          <div className="mt-4 h-10 w-40 rounded-xl bg-slate-200/70" />
+        </div>
+      </div>
+    ),
+  },
+);
 
 async function uploadProfileImage(file: File): Promise<string> {
   const formData = new FormData();

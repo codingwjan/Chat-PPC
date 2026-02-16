@@ -4,7 +4,7 @@
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from "@headlessui/react";
 import { XMarkIcon } from "@heroicons/react/24/outline";
 import { MemberProgressInline } from "@/components/member-progress-inline";
-import type { MemberRank, PublicUserProfileDTO } from "@/lib/types";
+import type { MemberRank, PublicUserProfileDTO, PublicUserProfileStatsDTO } from "@/lib/types";
 
 type AiProviderClientId = "chatgpt" | "grok";
 
@@ -14,6 +14,7 @@ interface MemberProfileDrawerProps {
   loading: boolean;
   error?: string | null;
   profile: PublicUserProfileDTO | null;
+  ownStats?: PublicUserProfileStatsDTO | null;
   aiModels?: Partial<Record<AiProviderClientId, string>>;
   onOpenProfileImage?: (url: string, alt: string) => void;
 }
@@ -77,11 +78,12 @@ function formatLastSeen(lastSeenAt: string | null): string {
   return `Zuletzt aktiv ${date.toLocaleString("de-DE")}`;
 }
 
-function StatCard({ title, value }: { title: string; value: number }) {
+function StatCard({ title, value, ownValue }: { title: string; value: number; ownValue?: number | null }) {
   return (
     <div className="glass-panel rounded-xl p-3">
       <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{title}</p>
       <p className="mt-1 text-xl font-bold text-slate-900">{value}</p>
+      <p className="mt-1 text-xs font-semibold text-slate-400">Du: {ownValue ?? "—"}</p>
     </div>
   );
 }
@@ -92,6 +94,7 @@ export function MemberProfileDrawer({
   loading,
   error,
   profile,
+  ownStats,
   aiModels,
   onOpenProfileImage,
 }: MemberProfileDrawerProps) {
@@ -129,7 +132,11 @@ export function MemberProfileDrawer({
 
                 <div className="flex-1 space-y-4 px-4 py-5 sm:px-6">
                   {loading ? (
-                    <p className="glass-panel rounded-xl p-3 text-sm text-slate-600">Profil wird geladen…</p>
+                    <div className="glass-panel rounded-xl p-3 animate-pulse">
+                      <div className="h-4 w-32 rounded bg-slate-200/70" />
+                      <div className="mt-3 h-16 rounded-xl bg-slate-200/70" />
+                      <div className="mt-2 h-4 w-2/3 rounded bg-slate-200/70" />
+                    </div>
                   ) : null}
 
                   {error ? (
@@ -202,12 +209,20 @@ export function MemberProfileDrawer({
                         </div>
                       ) : (
                         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                          <StatCard title="Posts" value={profile.stats.postsTotal} />
-                          <StatCard title="Reaktionen erhalten" value={profile.stats.reactionsReceived} />
-                          <StatCard title="Reaktionen gegeben" value={profile.stats.reactionsGiven} />
-                          <StatCard title="Umfragen erstellt" value={profile.stats.pollsCreated} />
-                          <StatCard title="Umfrage-Stimmen" value={profile.stats.pollVotes} />
-                          <StatCard title="Aktive Tage" value={profile.stats.activeDays} />
+                          <StatCard title="Posts" value={profile.stats.postsTotal} ownValue={ownStats?.postsTotal} />
+                          <StatCard
+                            title="Reaktionen erhalten"
+                            value={profile.stats.reactionsReceived}
+                            ownValue={ownStats?.reactionsReceived}
+                          />
+                          <StatCard
+                            title="Reaktionen gegeben"
+                            value={profile.stats.reactionsGiven}
+                            ownValue={ownStats?.reactionsGiven}
+                          />
+                          <StatCard title="Umfragen erstellt" value={profile.stats.pollsCreated} ownValue={ownStats?.pollsCreated} />
+                          <StatCard title="Umfrage-Stimmen" value={profile.stats.pollVotes} ownValue={ownStats?.pollVotes} />
+                          <StatCard title="Aktive Tage" value={profile.stats.activeDays} ownValue={ownStats?.activeDays} />
                         </div>
                       )}
                     </>

@@ -136,7 +136,12 @@ export default function DevUsersPage() {
         {notice ? <div className="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{notice}</div> : null}
 
         {loading ? (
-          <p className="text-sm text-slate-600">Lade Nutzer…</p>
+          <div className="space-y-2 animate-pulse">
+            <div className="h-4 w-28 rounded bg-slate-200/70" />
+            <div className="h-10 rounded-xl bg-slate-200/70" />
+            <div className="h-10 rounded-xl bg-slate-200/70" />
+            <div className="h-10 rounded-xl bg-slate-200/70" />
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="min-w-full border-collapse text-sm">

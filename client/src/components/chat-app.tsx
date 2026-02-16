@@ -1,6 +1,7 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { Bars3Icon } from "@heroicons/react/24/outline";
 import {
@@ -10,19 +11,17 @@ import {
   useMemo,
   useRef,
   useState,
+  useTransition,
   type ChangeEvent,
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { createPortal } from "react-dom";
-import { AppOverlayDialog } from "@/components/app-overlay-dialog";
 import { ChatComposer, type ComposerMode } from "@/components/chat-composer";
 import { ChatMessage } from "@/components/chat-message";
 import { MemberProgressInline } from "@/components/member-progress-inline";
 import { ChatShellSidebar } from "@/components/chat-shell-sidebar";
-import { MemberProfileDrawer } from "@/components/member-profile-drawer";
-import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { UiToast } from "@/components/ui-toast";
 import { hasLeadingAiTag, toggleLeadingAiTag } from "@/lib/composer-ai-tags";
 import { apiJson } from "@/lib/http";
@@ -47,6 +46,7 @@ import type {
   MessageDTO,
   MessagePageDTO,
   PublicUserProfileDTO,
+  PublicUserProfileStatsDTO,
   ReactMessageRequest,
   ReactionType,
   RenameUserRequest,
@@ -70,6 +70,76 @@ interface UploadedDraftImage {
   url: string;
   label: string;
 }
+
+function OverlayDialogSkeleton() {
+  return (
+    <div className="fixed inset-0 z-[68] grid place-items-center bg-slate-900/45 backdrop-blur-sm p-3">
+      <div className="glass-panel-strong w-full max-w-2xl rounded-2xl p-6 animate-pulse">
+        <div className="h-5 w-40 rounded bg-slate-200/70" />
+        <div className="mt-3 h-4 w-64 rounded bg-slate-200/70" />
+        <div className="mt-6 space-y-3">
+          <div className="h-10 rounded-xl bg-slate-200/70" />
+          <div className="h-10 rounded-xl bg-slate-200/70" />
+          <div className="h-24 rounded-xl bg-slate-200/70" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MemberDrawerSkeleton() {
+  return (
+    <div className="fixed inset-0 z-[75] bg-slate-900/45 backdrop-blur-sm">
+      <div className="absolute inset-y-0 right-0 w-full max-w-xl p-2 sm:p-4">
+        <div className="glass-panel-strong h-full rounded-2xl p-5 animate-pulse">
+          <div className="h-5 w-28 rounded bg-slate-200/70" />
+          <div className="mt-6 h-28 rounded-2xl bg-slate-200/70" />
+          <div className="mt-4 space-y-3">
+            <div className="h-4 w-2/3 rounded bg-slate-200/70" />
+            <div className="h-4 w-1/2 rounded bg-slate-200/70" />
+            <div className="h-24 rounded-xl bg-slate-200/70" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProfileCropSkeleton() {
+  return (
+    <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-900/55 p-4">
+      <div className="glass-panel-strong w-full max-w-xl rounded-2xl p-5 animate-pulse">
+        <div className="h-5 w-44 rounded bg-slate-200/70" />
+        <div className="mt-4 aspect-square w-full rounded-2xl bg-slate-200/70" />
+        <div className="mt-4 h-10 w-40 rounded-xl bg-slate-200/70" />
+      </div>
+    </div>
+  );
+}
+
+const AppOverlayDialog = dynamic(
+  () => import("@/components/app-overlay-dialog").then((module) => module.AppOverlayDialog),
+  {
+    ssr: false,
+    loading: () => <OverlayDialogSkeleton />,
+  },
+);
+
+const MemberProfileDrawer = dynamic(
+  () => import("@/components/member-profile-drawer").then((module) => module.MemberProfileDrawer),
+  {
+    ssr: false,
+    loading: () => <MemberDrawerSkeleton />,
+  },
+);
+
+const ProfileImageCropModal = dynamic(
+  () => import("@/components/profile-image-crop-modal").then((module) => module.ProfileImageCropModal),
+  {
+    ssr: false,
+    loading: () => <ProfileCropSkeleton />,
+  },
+);
 
 const MESSAGE_PAGE_SIZE = 36;
 const SNAPSHOT_LIMIT = 40;
@@ -831,6 +901,7 @@ export function ChatApp() {
   const [editingProfile, setEditingProfile] = useState(false);
   const [memberDrawerOpen, setMemberDrawerOpen] = useState(false);
   const [memberDrawerProfile, setMemberDrawerProfile] = useState<PublicUserProfileDTO | null>(null);
+  const [memberDrawerOwnStats, setMemberDrawerOwnStats] = useState<PublicUserProfileStatsDTO | null>(null);
   const [memberDrawerLoading, setMemberDrawerLoading] = useState(false);
   const [memberDrawerError, setMemberDrawerError] = useState<string | null>(null);
   const [uploadingProfile, setUploadingProfile] = useState(false);
@@ -853,6 +924,7 @@ export function ChatApp() {
   const [isDraggingUpload, setIsDraggingUpload] = useState(false);
   const [profileDropActive, setProfileDropActive] = useState(false);
   const [composerHeightPx, setComposerHeightPx] = useState(DEFAULT_COMPOSER_HEIGHT_PX);
+  const [, startUiTransition] = useTransition();
   const isDeveloperMode = Boolean(session?.devMode && session.devAuthToken);
 
   const sessionProfilePicture = useMemo(
@@ -3379,11 +3451,15 @@ export function ChatApp() {
     setCurrentPasswordDraft("");
     setNewPasswordDraft("");
     setConfirmNewPasswordDraft("");
-    void loadTasteProfileModalData();
-    setMobileSidebarOpen(false);
-    setProfileDropActive(false);
-    setMemberDrawerOpen(false);
-    setEditingProfile(true);
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setProfileDropActive(false);
+      setMemberDrawerOpen(false);
+      setEditingProfile(true);
+    });
+    window.setTimeout(() => {
+      void loadTasteProfileModalData();
+    }, 0);
   }
 
   function closeProfileEditor(): void {
@@ -3395,19 +3471,25 @@ export function ChatApp() {
   }
 
   function openSharedBackgroundModal(): void {
-    setMobileSidebarOpen(false);
-    setBackgroundDraftUrl("");
-    setShowBackgroundModal(true);
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setBackgroundDraftUrl("");
+      setShowBackgroundModal(true);
+    });
   }
 
   function openPointsInfoModal(): void {
-    setMobileSidebarOpen(false);
-    setShowPointsInfo(true);
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setShowPointsInfo(true);
+    });
   }
 
   function openMediaModal(): void {
-    setMobileSidebarOpen(false);
-    setShowMedia(true);
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setShowMedia(true);
+    });
   }
 
   function openDevMenu(): void {
@@ -3430,9 +3512,14 @@ export function ChatApp() {
   }
 
   async function openMemberProfile(user: UserPresenceDTO): Promise<void> {
-    setMobileSidebarOpen(false);
-    setMemberDrawerOpen(true);
-    setMemberDrawerError(null);
+    const ownCachedProfile = session?.clientId ? publicProfileCacheRef.current[session.clientId] : undefined;
+    const fallbackOwnStats = ownWindowStats ? ownProfileStats : null;
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setMemberDrawerOpen(true);
+      setMemberDrawerError(null);
+      setMemberDrawerOwnStats(ownCachedProfile?.stats ?? fallbackOwnStats);
+    });
 
     if (AI_CLIENT_IDS.has(user.clientId)) {
       setMemberDrawerLoading(false);
@@ -3444,15 +3531,40 @@ export function ChatApp() {
     if (cached) {
       setMemberDrawerLoading(false);
       setMemberDrawerProfile(cached);
+      if (session?.clientId === user.clientId) {
+        setMemberDrawerOwnStats(cached.stats);
+      } else if (!ownCachedProfile && session?.clientId) {
+        try {
+          const ownProfile = await fetchPublicUserProfile(session.clientId);
+          publicProfileCacheRef.current[ownProfile.clientId] = ownProfile;
+          setMemberDrawerOwnStats(ownProfile.stats);
+        } catch {
+          // Keep fallback own stats when own profile cannot be loaded.
+        }
+      }
       return;
     }
 
     setMemberDrawerLoading(true);
     setMemberDrawerProfile(null);
     try {
+      const ownProfilePromise: Promise<PublicUserProfileDTO | null> = session?.clientId
+        ? user.clientId === session.clientId
+          ? Promise.resolve(null)
+          : ownCachedProfile
+            ? Promise.resolve(ownCachedProfile)
+            : fetchPublicUserProfile(session.clientId).catch(() => null)
+        : Promise.resolve(null);
       const profile = await fetchPublicUserProfile(user.clientId);
       publicProfileCacheRef.current[user.clientId] = profile;
       setMemberDrawerProfile(profile);
+      const ownProfile = user.clientId === session?.clientId ? profile : await ownProfilePromise;
+      if (ownProfile) {
+        publicProfileCacheRef.current[ownProfile.clientId] = ownProfile;
+      }
+      setMemberDrawerOwnStats(
+        ownProfile?.stats ?? (session?.clientId === user.clientId ? profile.stats : fallbackOwnStats),
+      );
     } catch (profileError) {
       setMemberDrawerError(profileError instanceof Error ? profileError.message : "Profil konnte nicht geladen werden.");
     } finally {
@@ -3476,25 +3588,39 @@ export function ChatApp() {
       return;
     }
 
-    setMobileSidebarOpen(false);
-    setMemberDrawerOpen(true);
-    setMemberDrawerLoading(false);
-    setMemberDrawerError(null);
-    setMemberDrawerProfile(
-      toSyntheticPublicProfile({
-        id: message.authorId || `message-author-${message.id}`,
-        clientId: AI_CLIENT_IDS.has(normalizedAuthor) ? normalizedAuthor : `message-author-${message.id}`,
-        username: message.username,
-        profilePicture: normalizeProfilePictureUrl(message.profilePicture),
-        status: "",
-        isOnline: false,
-        lastSeenAt: null,
-        member: message.member,
-      }),
-    );
+    const ownCachedProfile = session?.clientId ? publicProfileCacheRef.current[session.clientId] : undefined;
+    const fallbackProfile = toSyntheticPublicProfile({
+      id: message.authorId || `message-author-${message.id}`,
+      clientId: AI_CLIENT_IDS.has(normalizedAuthor) ? normalizedAuthor : `message-author-${message.id}`,
+      username: message.username,
+      profilePicture: normalizeProfilePictureUrl(message.profilePicture),
+      status: "",
+      isOnline: false,
+      lastSeenAt: null,
+      member: message.member,
+    });
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setMemberDrawerOpen(true);
+      setMemberDrawerLoading(false);
+      setMemberDrawerError(null);
+      setMemberDrawerOwnStats(ownCachedProfile?.stats ?? (ownWindowStats ? ownProfileStats : null));
+      setMemberDrawerProfile(fallbackProfile);
+    });
   }
 
-  if (!session) return <div className="p-6 text-sm text-slate-500">Wird geladen…</div>;
+  if (!session) {
+    return (
+      <div className="brand-surface min-h-[100svh] p-6">
+        <div className="glass-panel-strong mx-auto max-w-5xl rounded-2xl p-5 animate-pulse">
+          <div className="h-5 w-36 rounded bg-slate-200/70" />
+          <div className="mt-4 h-12 rounded-xl bg-slate-200/70" />
+          <div className="mt-3 h-12 rounded-xl bg-slate-200/70" />
+          <div className="mt-3 h-40 rounded-2xl bg-slate-200/70" />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <main
@@ -3579,7 +3705,7 @@ export function ChatApp() {
           >
             {loadingOlder ? (
               <div className="pointer-events-none absolute inset-x-0 top-3 z-10 flex justify-center">
-                <p className="rounded-full bg-white/90 px-3 py-1 text-xs text-slate-600 shadow-sm">
+                <p className="rounded-full bg-white/90 px-3 py-1 text-xs text-slate-600 shadow-sm animate-pulse">
                   Ältere Nachrichten werden geladen…
                 </p>
               </div>
@@ -3722,15 +3848,18 @@ export function ChatApp() {
         }}
       />
 
-      <MemberProfileDrawer
-        open={memberDrawerOpen}
-        onClose={() => setMemberDrawerOpen(false)}
-        loading={memberDrawerLoading}
-        error={memberDrawerError}
-        profile={memberDrawerProfile}
-        aiModels={{ chatgpt: aiStatus.chatgptModel, grok: aiStatus.grokModel }}
-        onOpenProfileImage={(url, alt) => setLightbox({ url, alt })}
-      />
+      {memberDrawerOpen ? (
+        <MemberProfileDrawer
+          open={memberDrawerOpen}
+          onClose={() => setMemberDrawerOpen(false)}
+          loading={memberDrawerLoading}
+          error={memberDrawerError}
+          profile={memberDrawerProfile}
+          ownStats={memberDrawerOwnStats}
+          aiModels={{ chatgpt: aiStatus.chatgptModel, grok: aiStatus.grokModel }}
+          onOpenProfileImage={(url, alt) => setLightbox({ url, alt })}
+        />
+      ) : null}
 
       {showPointsInfo ? (
         <AppOverlayDialog
@@ -4234,8 +4363,21 @@ export function ChatApp() {
           )}
         >
           {loadingMedia && mediaItems.length === 0 ? (
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
-              Medien werden geladen…
+            <div className="space-y-4">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 animate-pulse">
+                <div className="h-4 w-48 rounded bg-slate-200/70" />
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                {Array.from({ length: 10 }).map((_, index) => (
+                  <div key={`media-skeleton-${index}`} className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50 animate-pulse">
+                    <div className="aspect-square w-full bg-slate-200/70" />
+                    <div className="space-y-1.5 px-2 py-2">
+                      <div className="h-3 w-3/4 rounded bg-slate-200/70" />
+                      <div className="h-3 w-1/2 rounded bg-slate-200/70" />
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           ) : mediaItems.length === 0 ? (
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
@@ -4270,7 +4412,7 @@ export function ChatApp() {
               </div>
               {mediaHasMore || loadingMediaMore ? (
                 <div className="mt-3 flex justify-center">
-                  <p className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-600">
+                  <p className={`rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-600 ${loadingMediaMore ? "animate-pulse" : ""}`}>
                     {loadingMediaMore ? "Weitere werden geladen…" : "Zum automatischen Nachladen scrollen"}
                   </p>
                 </div>
