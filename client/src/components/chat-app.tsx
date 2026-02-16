@@ -77,7 +77,7 @@ const MESSAGE_PAGE_SIZE = 36;
 const SNAPSHOT_LIMIT = 40;
 const RECONCILE_INTERVAL_MS = 30_000;
 const PRESENCE_PING_INTERVAL_MS = 20_000;
-const AUTO_SCROLL_NEAR_BOTTOM_PX = 72;
+const AUTO_SCROLL_NEAR_BOTTOM_PX = 220;
 const TOP_LOAD_TRIGGER_PX = 160;
 const TOP_LOAD_COOLDOWN_MS = 750;
 const ONBOARDING_KEY = "chatppc.onboarding.v1";
@@ -963,6 +963,16 @@ export function ChatApp() {
     lastKnownBottomOffsetRef.current = 0;
   }, []);
 
+  const getDistanceFromBottom = useCallback((): number => {
+    const element = scrollRef.current;
+    if (!element) return 0;
+    return Math.max(0, element.scrollHeight - (element.scrollTop + element.clientHeight));
+  }, []);
+
+  const isWithinAutoFollowRange = useCallback((): boolean => {
+    return getDistanceFromBottom() <= AUTO_SCROLL_NEAR_BOTTOM_PX;
+  }, [getDistanceFromBottom]);
+
   const captureScrollAnchor = useCallback(() => {
     const element = scrollRef.current;
     if (!element) return;
@@ -1006,11 +1016,7 @@ export function ChatApp() {
 
   const appendOptimisticMessage = useCallback(
     (message: MessageDTO) => {
-      const element = scrollRef.current;
-      const distanceFromBottom = element
-        ? element.scrollHeight - (element.scrollTop + element.clientHeight)
-        : 0;
-      const shouldAutoScroll = !userDetachedFromBottomRef.current && distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX;
+      const shouldAutoScroll = isWithinAutoFollowRange();
 
       setMessages((current) => limitVisibleMessages(mergeMessage(current, message)));
       if (!shouldAutoScroll) {
@@ -1026,7 +1032,7 @@ export function ChatApp() {
         requestAnimationFrame(() => scrollToBottom("auto"));
       });
     },
-    [scrollToBottom],
+    [isWithinAutoFollowRange, scrollToBottom],
   );
 
   const removeOptimisticMessage = useCallback((messageId: string) => {
@@ -1306,7 +1312,7 @@ export function ChatApp() {
     (incoming: MessageDTO[], options: { notify: boolean; preserveViewerReaction?: boolean }) => {
       if (incoming.length === 0) return;
 
-      const shouldStickToBottom = isAtBottomRef.current;
+      const shouldStickToBottom = isWithinAutoFollowRange();
       const fresh = incoming.filter((message) => !knownMessageIdsRef.current.has(message.id));
 
       if (!shouldStickToBottom && fresh.length > 0) {
@@ -1328,10 +1334,13 @@ export function ChatApp() {
       }
 
       if (shouldStickToBottom) {
+        userDetachedFromBottomRef.current = false;
+        isAtBottomRef.current = true;
+        setIsAtBottom(true);
         scheduleBottomStick();
       }
     },
-    [captureScrollAnchor, fetchMediaItems, scheduleBottomStick, showMedia, updateLatestMessageCursor],
+    [captureScrollAnchor, fetchMediaItems, isWithinAutoFollowRange, scheduleBottomStick, showMedia, updateLatestMessageCursor],
   );
 
   const applySnapshot = useCallback(
@@ -2270,17 +2279,19 @@ export function ChatApp() {
 
       const distanceFromBottom = element.scrollHeight - (currentScrollTop + element.clientHeight);
       lastKnownBottomOffsetRef.current = Math.max(0, distanceFromBottom);
+      const movingUp = currentScrollTop < previousScrollTop;
       if (distanceFromBottom <= HARD_BOTTOM_ATTACH_PX) {
         userDetachedFromBottomRef.current = false;
-      } else if (currentScrollTop < previousScrollTop) {
+      } else if (movingUp && distanceFromBottom > AUTO_SCROLL_NEAR_BOTTOM_PX) {
         userDetachedFromBottomRef.current = true;
+      } else if (distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX) {
+        userDetachedFromBottomRef.current = false;
       }
 
       const atBottom = !userDetachedFromBottomRef.current && distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX;
       isAtBottomRef.current = atBottom;
       setIsAtBottom((current) => (current === atBottom ? current : atBottom));
 
-      const movingUp = currentScrollTop < previousScrollTop;
       const reachedTopTrigger = currentScrollTop <= TOP_LOAD_TRIGGER_PX;
       const closeToAbsoluteTop = currentScrollTop <= 4;
       const shouldAttemptTopLoad = reachedTopTrigger && (movingUp || closeToAbsoluteTop);
