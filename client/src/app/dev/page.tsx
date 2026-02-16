@@ -269,8 +269,8 @@ export default function DevPage() {
 
   if (!canUseDevPage) {
     return (
-      <main className="min-h-[100svh] bg-slate-50 p-6">
-        <div className="mx-auto max-w-6xl rounded-xl border border-slate-200 bg-white p-6">
+      <main className="brand-surface min-h-[100svh] p-6">
+        <div className="glass-panel-strong mx-auto max-w-6xl rounded-xl p-6">
           <p className="text-sm text-slate-700">Entwicklermodus ist nicht aktiv.</p>
           <Link href="/chat" className="mt-3 inline-block text-sm font-semibold text-sky-700">
             Zurück zum Chat
@@ -281,9 +281,9 @@ export default function DevPage() {
   }
 
   return (
-    <main className="min-h-[100svh] bg-slate-50 p-4 sm:p-6">
+    <main className="brand-surface min-h-[100svh] p-4 sm:p-6">
       <div className="mx-auto max-w-7xl space-y-4">
-        <div className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6">
+        <div className="glass-panel-strong rounded-2xl p-4 sm:p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h1 className="text-xl font-semibold text-slate-900">Dev Menu</h1>
@@ -319,7 +319,7 @@ export default function DevPage() {
         {error ? <div className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div> : null}
         {notice ? <div className="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{notice}</div> : null}
 
-        <section className="rounded-2xl border border-slate-200 bg-white p-4 sm:p-6">
+        <section className="glass-panel-strong rounded-2xl p-4 sm:p-6">
           <h2 className="text-base font-semibold text-slate-900">Übersicht</h2>
           <div className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-5">
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">Nutzer: <span className="font-semibold">{overview?.usersTotal ?? "-"}</span></div>

@@ -3473,7 +3473,7 @@ export function ChatApp() {
   return (
     <main
       style={chatBackgroundStyle}
-      className="relative h-[100dvh] w-full overflow-x-hidden overflow-y-hidden bg-[radial-gradient(circle_at_top_right,_#dbeafe_0%,_#f8fafc_45%,_#eff6ff_100%)] [touch-action:manipulation]"
+      className="brand-surface relative h-[100dvh] w-full overflow-x-hidden overflow-y-hidden [touch-action:manipulation]"
     >
       <ChatShellSidebar
         mobileOpen={mobileSidebarOpen}
@@ -3600,17 +3600,6 @@ export function ChatApp() {
           ) : null}
 
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-2 pb-[calc(env(safe-area-inset-bottom)+0.6rem)] pt-16 sm:px-3">
-            <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-36">
-              <div className="absolute inset-0 bg-gradient-to-t from-white/85 via-white/30 to-transparent" />
-              <div
-                className="absolute inset-0 sm:backdrop-blur-md"
-                style={{
-                  maskImage: "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 100%)",
-                  WebkitMaskImage:
-                    "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 100%)",
-                }}
-              />
-            </div>
             <div className="pointer-events-auto relative mx-auto w-full max-w-[960px]">
               <ChatComposer
                 composerRef={composerRef}
@@ -3671,6 +3660,18 @@ export function ChatApp() {
             </div>
           </div>
         </section>
+      </div>
+
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-36">
+        <div className="absolute inset-0 bg-gradient-to-t from-white/85 via-white/30 to-transparent" />
+        <div
+          className="absolute inset-0 sm:backdrop-blur-md"
+          style={{
+            maskImage: "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 100%)",
+            WebkitMaskImage:
+              "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 100%)",
+          }}
+        />
       </div>
 
       <UiToast
@@ -4153,9 +4154,9 @@ export function ChatApp() {
         : null}
 
       {showOnboarding ? (
-        <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-900/55 p-2 sm:p-4">
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-900/50 backdrop-blur-sm p-2 sm:p-4">
           <div
-            className="w-full max-w-xl max-h-[92dvh] overflow-y-auto rounded-3xl border border-white/70 bg-white p-6 shadow-2xl [overscroll-behavior:contain]"
+            className="glass-panel-strong w-full max-w-xl max-h-[92dvh] overflow-y-auto rounded-3xl p-6 [overscroll-behavior:contain]"
             role="dialog"
             aria-modal="true"
             aria-label="Schnellstart"

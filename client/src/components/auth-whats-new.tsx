@@ -28,7 +28,7 @@ const WHATS_NEW_ITEMS = [
 
 export function AuthWhatsNewPanel() {
   return (
-    <aside className="rounded-3xl border border-white/75 bg-white/65 p-6 shadow-[0_30px_80px_rgba(15,23,42,0.12)] backdrop-blur-xl sm:p-8 lg:min-h-[560px] lg:p-10">
+    <aside className="glass-panel-strong rounded-3xl p-6 sm:p-8 lg:min-h-[560px] lg:p-10">
       <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
         <SparklesIcon className="h-3.5 w-3.5" aria-hidden="true" />
         What&apos;s New
@@ -43,7 +43,7 @@ export function AuthWhatsNewPanel() {
 
       <ul className="mt-8 space-y-3">
         {WHATS_NEW_ITEMS.map(({ title, subtitle, Icon, accent }) => (
-          <li key={title} className={`rounded-2xl border border-slate-200/80 bg-gradient-to-br ${accent} p-4 shadow-[0_14px_40px_rgba(15,23,42,0.08)]`}>
+          <li key={title} className={`glass-panel rounded-2xl bg-gradient-to-br ${accent} p-4`}>
             <div className="flex items-start gap-3">
               <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-slate-200/80 bg-white/90 text-slate-700">
                 <Icon className="h-5 w-5" aria-hidden="true" />

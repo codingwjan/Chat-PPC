@@ -115,8 +115,8 @@ export default function DevUsersPage() {
 
   if (!canUseDevPage) {
     return (
-      <main className="min-h-[100svh] bg-slate-50 p-6">
-        <div className="mx-auto max-w-5xl rounded-xl border border-slate-200 bg-white p-6">
+      <main className="brand-surface min-h-[100svh] p-6">
+        <div className="glass-panel-strong mx-auto max-w-5xl rounded-xl p-6">
           <p className="text-sm text-slate-700">Entwicklermodus ist nicht aktiv.</p>
           <Link href="/chat" className="mt-3 inline-block text-sm font-semibold text-sky-700">Zurück zum Chat</Link>
         </div>
@@ -125,8 +125,8 @@ export default function DevUsersPage() {
   }
 
   return (
-    <main className="min-h-[100svh] bg-slate-50 p-6">
-      <div className="mx-auto max-w-6xl space-y-4 rounded-xl border border-slate-200 bg-white p-6">
+    <main className="brand-surface min-h-[100svh] p-6">
+      <div className="glass-panel-strong mx-auto max-w-6xl space-y-4 rounded-xl p-6">
         <div className="flex items-center justify-between gap-3">
           <h1 className="text-xl font-semibold text-slate-900">Dev Users</h1>
           <Link href="/chat" className="text-sm font-semibold text-sky-700 hover:text-sky-800">Zurück zu /chat</Link>

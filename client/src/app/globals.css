@@ -1,8 +1,40 @@
 @import "tailwindcss";
 
 :root {
-  --font-heading: "Avenir Next", "Segoe UI", sans-serif;
-  --font-body: "IBM Plex Sans", "Segoe UI", sans-serif;
+  --brand-font: var(--font-brand-sans), "Segoe UI", sans-serif;
+  --brand-color: #18181b;
+  --brand-surface: radial-gradient(110% 120% at 0% 0%, #d4d4d8 0%, #e9e9ef 36%, #f8f8fb 100%);
+  --brand-ring: color-mix(in oklab, var(--brand-color) 30%, white);
+  --glass-bg: color-mix(in oklab, white 72%, transparent);
+  --glass-bg-strong: color-mix(in oklab, white 86%, transparent);
+  --glass-border: color-mix(in oklab, var(--brand-color) 14%, white);
+  --glass-shadow-soft: 0 12px 40px rgba(24, 24, 27, 0.12);
+  --glass-shadow: 0 28px 80px rgba(24, 24, 27, 0.18);
+
+  --color-slate-900: var(--brand-color);
+  --color-slate-800: color-mix(in oklab, var(--brand-color) 90%, black);
+  --color-slate-700: color-mix(in oklab, var(--brand-color) 78%, white);
+  --color-slate-600: color-mix(in oklab, var(--brand-color) 62%, white);
+  --color-slate-500: color-mix(in oklab, var(--brand-color) 46%, white);
+  --color-slate-400: color-mix(in oklab, var(--brand-color) 32%, white);
+  --color-slate-300: color-mix(in oklab, var(--brand-color) 20%, white);
+  --color-slate-200: color-mix(in oklab, var(--brand-color) 12%, white);
+  --color-slate-100: color-mix(in oklab, var(--brand-color) 8%, white);
+  --color-slate-50: color-mix(in oklab, var(--brand-color) 4%, white);
+
+  --color-sky-900: color-mix(in oklab, var(--brand-color) 92%, black);
+  --color-sky-800: color-mix(in oklab, var(--brand-color) 84%, black);
+  --color-sky-700: color-mix(in oklab, var(--brand-color) 76%, white);
+  --color-sky-600: color-mix(in oklab, var(--brand-color) 66%, white);
+  --color-sky-500: color-mix(in oklab, var(--brand-color) 56%, white);
+  --color-sky-400: color-mix(in oklab, var(--brand-color) 40%, white);
+  --color-sky-300: color-mix(in oklab, var(--brand-color) 28%, white);
+  --color-sky-200: color-mix(in oklab, var(--brand-color) 18%, white);
+  --color-sky-100: color-mix(in oklab, var(--brand-color) 10%, white);
+  --color-sky-50: color-mix(in oklab, var(--brand-color) 6%, white);
+
+  --font-heading: var(--brand-font);
+  --font-body: var(--brand-font);
 }
 
 * {
@@ -22,8 +54,8 @@ body {
 body {
   margin: 0;
   font-family: var(--font-body);
-  color: #0f172a;
-  background: #f8fafc;
+  color: var(--brand-color);
+  background: var(--brand-surface);
 }
 
 h1,
@@ -33,6 +65,45 @@ h4,
 h5,
 h6 {
   font-family: var(--font-heading);
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--font-brand-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.brand-surface {
+  background: var(--brand-surface);
+}
+
+.brand-ring {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--brand-ring);
+}
+
+.glass-panel {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow-soft);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+}
+
+.glass-panel-strong {
+  background: var(--glass-bg-strong);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(24px) saturate(150%);
+  -webkit-backdrop-filter: blur(24px) saturate(150%);
+}
+
+.glass-strip {
+  background: color-mix(in oklab, white 66%, transparent);
+  border-color: var(--glass-border);
+  backdrop-filter: blur(18px) saturate(135%);
+  -webkit-backdrop-filter: blur(18px) saturate(135%);
 }
 
 @keyframes ppc-score-pop {

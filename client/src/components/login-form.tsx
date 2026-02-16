@@ -122,7 +122,7 @@ export function LoginForm() {
   }
 
   return (
-    <main className="relative min-h-[100svh] overflow-hidden bg-[radial-gradient(80%_100%_at_0%_0%,#d0f4f0_0%,#f4f6f8_35%,#f8fbfd_100%)] [font-family:var(--font-signup-sans)]">
+    <main className="brand-surface relative min-h-[100svh] overflow-hidden [font-family:var(--brand-font)]">
       <div className="pointer-events-none absolute inset-0">
         <div className="absolute -left-20 -top-24 h-72 w-72 rounded-full bg-cyan-200/45 blur-3xl" />
         <div className="absolute right-[-120px] top-[28%] h-80 w-80 rounded-full bg-amber-200/45 blur-3xl" />
@@ -132,7 +132,7 @@ export function LoginForm() {
       <div className="relative mx-auto grid min-h-[100svh] w-full max-w-6xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[1fr_1.25fr] lg:items-center lg:py-10">
         <AuthWhatsNewPanel />
 
-        <section className="rounded-3xl border border-white/70 bg-white/80 p-6 shadow-[0_28px_90px_rgba(15,23,42,0.16)] backdrop-blur-xl sm:p-8 lg:p-10">
+        <section className="glass-panel-strong rounded-3xl p-6 sm:p-8 lg:p-10">
           <nav className="mb-4 flex flex-wrap gap-2" aria-label="Auth-Modus">
             <Link
               href="/login"

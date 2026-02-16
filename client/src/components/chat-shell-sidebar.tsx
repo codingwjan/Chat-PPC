@@ -49,7 +49,7 @@ function SidebarActionButton({
     <button
       type="button"
       onClick={onClick}
-      className="flex h-11 w-full items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+      className="glass-panel flex h-11 w-full items-center gap-2 rounded-xl px-3 text-sm font-medium text-slate-700 hover:bg-slate-50/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
     >
       {icon}
       <span>{label}</span>
@@ -72,7 +72,7 @@ function SidebarBody({
   const profileButtonGradient = profileCardGradient(member);
 
   return (
-    <div className="flex h-full min-h-0 flex-col border-r border-slate-200 bg-white/90 px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-[calc(env(safe-area-inset-top)+0.75rem)] backdrop-blur [touch-action:manipulation] [-webkit-tap-highlight-color:transparent] lg:py-4">
+    <div className="glass-panel-strong flex h-full min-h-0 flex-col rounded-r-2xl border-r px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)] pt-[calc(env(safe-area-inset-top)+0.75rem)] [touch-action:manipulation] [-webkit-tap-highlight-color:transparent] lg:py-4">
       <div className="pb-3">
         <p className="text-lg font-semibold text-slate-900">ChatPPC</p>
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Users</p>
@@ -110,7 +110,7 @@ function SidebarBody({
       <button
         type="button"
         onClick={onOpenProfileEditor}
-        className="mt-2 flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-left transition-[filter,background-color] hover:brightness-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+        className="glass-panel mt-2 flex items-center gap-3 rounded-xl p-3 text-left transition-[filter,background-color] hover:brightness-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
         aria-label="Eigenes Profil öffnen"
         style={profileButtonGradient ? { backgroundImage: profileButtonGradient } : undefined}
       >

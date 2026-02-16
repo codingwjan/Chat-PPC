@@ -144,7 +144,7 @@ export function ChatComposer({
   onSubmit,
 }: ChatComposerProps) {
   return (
-    <div ref={composerRef} className="relative rounded-[1.25rem] border border-slate-200/80 bg-white/95 p-2.5 shadow-[0_10px_35px_rgba(15,23,42,0.12)] sm:rounded-[1.5rem] sm:p-3 sm:backdrop-blur [-webkit-tap-highlight-color:transparent]">
+    <div ref={composerRef} className="glass-panel-strong relative rounded-[1.25rem] p-2.5 sm:rounded-[1.5rem] sm:p-3 [-webkit-tap-highlight-color:transparent]">
       <div className="mb-2 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {PRIMARY_MODES.map((composerMode) => (
           <button

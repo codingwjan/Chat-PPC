@@ -25,7 +25,7 @@ export function ChatShellHeader({
   onOpenMedia,
 }: ChatShellHeaderProps) {
   return (
-    <header className="sticky top-0 z-30 flex items-center gap-x-4 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur sm:px-6 lg:bg-white/75">
+    <header className="glass-strip sticky top-0 z-30 flex items-center gap-x-4 border-b px-4 py-3 sm:px-6">
       <button
         type="button"
         onClick={onOpenSidebar}
@@ -64,7 +64,7 @@ export function ChatShellHeader({
       <button
         type="button"
         onClick={onOpenMedia}
-        className="rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-xs ring-1 ring-inset ring-slate-300 hover:bg-slate-50"
+        className="glass-panel rounded-md px-3 py-2 text-sm font-semibold text-slate-900 hover:bg-slate-50/80"
       >
         Medien
       </button>

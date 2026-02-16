@@ -30,7 +30,7 @@ export function AppOverlayDialog({
   zIndexClassName = "z-[68]",
 }: AppOverlayDialogProps) {
   const panelClasses = [
-    "relative flex max-h-[92dvh] w-full transform flex-col overflow-hidden rounded-2xl bg-white text-left shadow-2xl transition-all",
+    "glass-panel-strong relative flex max-h-[92dvh] w-full transform flex-col overflow-hidden rounded-2xl text-left transition-all",
     "data-closed:translate-y-4 data-closed:opacity-0 data-enter:duration-300 data-enter:ease-out data-leave:duration-200 data-leave:ease-in",
     "data-closed:sm:translate-y-0 data-closed:sm:scale-95",
     maxWidthClassName,
@@ -45,7 +45,7 @@ export function AppOverlayDialog({
     <Dialog open={open} onClose={onClose} className={`relative ${zIndexClassName}`}>
       <DialogBackdrop
         transition
-        className="fixed inset-0 bg-slate-900/55 transition-opacity data-closed:opacity-0 data-enter:duration-300 data-enter:ease-out data-leave:duration-200 data-leave:ease-in"
+        className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm transition-opacity data-closed:opacity-0 data-enter:duration-300 data-enter:ease-out data-leave:duration-200 data-leave:ease-in"
       />
 
       <div className="fixed inset-0 z-10 w-screen overflow-y-auto">
@@ -55,7 +55,7 @@ export function AppOverlayDialog({
               <button
                 type="button"
                 onClick={onClose}
-                className="rounded-md bg-white text-slate-400 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                className="glass-panel rounded-md text-slate-400 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
               >
                 <span className="sr-only">Schließen</span>
                 <XMarkIcon aria-hidden="true" className="size-6" />

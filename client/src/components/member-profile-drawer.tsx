@@ -79,7 +79,7 @@ function formatLastSeen(lastSeenAt: string | null): string {
 
 function StatCard({ title, value }: { title: string; value: number }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+    <div className="glass-panel rounded-xl p-3">
       <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{title}</p>
       <p className="mt-1 text-xl font-bold text-slate-900">{value}</p>
     </div>
@@ -104,7 +104,7 @@ export function MemberProfileDrawer({
     <Dialog open={open} onClose={onClose} className="relative z-[75]">
       <DialogBackdrop
         transition
-        className="fixed inset-0 bg-slate-900/55 transition-opacity duration-300 ease-out data-closed:opacity-0"
+        className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm transition-opacity duration-300 ease-out data-closed:opacity-0"
       />
 
       <div className="fixed inset-0 overflow-hidden">
@@ -114,7 +114,7 @@ export function MemberProfileDrawer({
               transition
               className="pointer-events-auto w-screen max-w-xl transform transition duration-400 ease-out data-closed:translate-x-full"
             >
-              <div className="flex h-full flex-col overflow-y-auto bg-white shadow-xl [overscroll-behavior:contain]">
+              <div className="glass-panel-strong flex h-full flex-col overflow-y-auto [overscroll-behavior:contain]">
                 <div className="flex items-start justify-between border-b border-slate-200 px-4 py-4 sm:px-6">
                   <DialogTitle className="text-base font-semibold text-slate-900">Profil</DialogTitle>
                   <button
@@ -129,7 +129,7 @@ export function MemberProfileDrawer({
 
                 <div className="flex-1 space-y-4 px-4 py-5 sm:px-6">
                   {loading ? (
-                    <p className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">Profil wird geladen…</p>
+                    <p className="glass-panel rounded-xl p-3 text-sm text-slate-600">Profil wird geladen…</p>
                   ) : null}
 
                   {error ? (
@@ -137,13 +137,13 @@ export function MemberProfileDrawer({
                   ) : null}
 
                   {!loading && !error && !profile ? (
-                    <p className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">Kein Profil verfügbar.</p>
+                    <p className="glass-panel rounded-xl p-3 text-sm text-slate-600">Kein Profil verfügbar.</p>
                   ) : null}
 
                   {profile ? (
                     <>
                       <div
-                        className="rounded-2xl border border-slate-200 bg-white p-4"
+                        className="glass-panel rounded-2xl p-4"
                         style={profileHeaderGradient ? { backgroundImage: profileHeaderGradient } : undefined}
                       >
                         <div className="flex items-center gap-3">
