@@ -77,7 +77,7 @@ const MESSAGE_PAGE_SIZE = 36;
 const SNAPSHOT_LIMIT = 40;
 const RECONCILE_INTERVAL_MS = 30_000;
 const PRESENCE_PING_INTERVAL_MS = 20_000;
-const AUTO_SCROLL_NEAR_BOTTOM_PX = 220;
+const AUTO_SCROLL_NEAR_BOTTOM_PX = 420;
 const TOP_LOAD_TRIGGER_PX = 160;
 const TOP_LOAD_COOLDOWN_MS = 750;
 const ONBOARDING_KEY = "chatppc.onboarding.v1";
@@ -95,6 +95,7 @@ const DEFAULT_COMPOSER_HEIGHT_PX = 208;
 const COMPOSER_BOTTOM_GAP_PX = 16;
 const LAST_MESSAGE_EXTRA_CLEARANCE_PX = 28;
 const HARD_BOTTOM_ATTACH_PX = 8;
+const MANUAL_DETACH_DELTA_PX = 24;
 const REACTION_OPTIONS: Array<{ reaction: ReactionType; emoji: string; label: string }> = [
   { reaction: "LIKE", emoji: "❤️", label: "Like" },
   { reaction: "LOL", emoji: "😂", label: "LOL" },
@@ -785,6 +786,7 @@ export function ChatApp() {
     return !document.hidden;
   });
   const [showOnboarding, setShowOnboarding] = useState(false);
+  const [initialMessagesLoaded, setInitialMessagesLoaded] = useState(false);
   const [adminOverview, setAdminOverview] = useState<AdminOverviewDTO | null>(null);
   const [showTasteProfileModal, setShowTasteProfileModal] = useState(false);
   const [tasteWindow, setTasteWindow] = useState<TasteWindowKey>("30d");
@@ -1767,6 +1769,34 @@ export function ChatApp() {
   }, [router, session]);
 
   useEffect(() => {
+    setInitialMessagesLoaded(false);
+  }, [session?.clientId]);
+
+  useEffect(() => {
+    if (!initialMessagesLoaded) return;
+
+    let cancelled = false;
+    const stickToBottomOnce = () => {
+      if (cancelled) return;
+      userDetachedFromBottomRef.current = false;
+      isAtBottomRef.current = true;
+      setIsAtBottom(true);
+      scrollToBottom("auto");
+      requestAnimationFrame(() => scrollToBottom("auto"));
+    };
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(stickToBottomOnce);
+    });
+    const settleTimer = window.setTimeout(stickToBottomOnce, 260);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(settleTimer);
+    };
+  }, [initialMessagesLoaded, scrollToBottom]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
 
     let frame: number | null = null;
@@ -1864,8 +1894,7 @@ export function ChatApp() {
         hydrateMediaCache();
         if (cancelled) return;
         setError(null);
-
-        requestAnimationFrame(() => scrollToBottom("auto"));
+        setInitialMessagesLoaded(true);
         const onboardingDone = window.localStorage.getItem(ONBOARDING_KEY) === "done";
         setShowOnboarding(!onboardingDone);
       } catch (loadError) {
@@ -2274,6 +2303,7 @@ export function ChatApp() {
     const onScroll = () => {
       const currentScrollTop = Math.max(0, element.scrollTop);
       const previousScrollTop = previousScrollTopRef.current;
+      const previousBottomOffset = lastKnownBottomOffsetRef.current;
       previousScrollTopRef.current = currentScrollTop;
       lastKnownScrollHeightRef.current = element.scrollHeight;
 
@@ -2282,7 +2312,11 @@ export function ChatApp() {
       const movingUp = currentScrollTop < previousScrollTop;
       if (distanceFromBottom <= HARD_BOTTOM_ATTACH_PX) {
         userDetachedFromBottomRef.current = false;
-      } else if (movingUp && distanceFromBottom > AUTO_SCROLL_NEAR_BOTTOM_PX) {
+      } else if (
+        movingUp
+        && distanceFromBottom > AUTO_SCROLL_NEAR_BOTTOM_PX
+        && distanceFromBottom > previousBottomOffset + MANUAL_DETACH_DELTA_PX
+      ) {
         userDetachedFromBottomRef.current = true;
       } else if (distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX) {
         userDetachedFromBottomRef.current = false;
