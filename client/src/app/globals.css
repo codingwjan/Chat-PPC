@@ -34,3 +34,19 @@ h5,
 h6 {
   font-family: var(--font-heading);
 }
+
+@keyframes ppc-score-pop {
+  0% {
+    transform: translateY(0) scale(1);
+  }
+  35% {
+    transform: translateY(-1px) scale(1.04);
+  }
+  100% {
+    transform: translateY(0) scale(1);
+  }
+}
+
+.ppc-score-pop {
+  animation: ppc-score-pop 380ms ease-out;
+}

@@ -11,8 +11,10 @@ import {
   parseExtendPollRequest,
   parseLoginRequest,
   parseMarkNotificationsReadRequest,
+  parsePublicUserProfileQueryRequest,
   parseReactMessageRequest,
   parseRenameUserRequest,
+  parseUpdateOwnAccountRequest,
   parseTasteEventsQueryRequest,
   parseTasteProfileQueryRequest,
   parseUpdateChatBackgroundRequest,
@@ -83,6 +85,47 @@ describe("contracts", () => {
         clientId: "client-123",
       }),
     ).toThrow("Entweder newUsername oder profilePicture ist erforderlich");
+  });
+
+  it("parses own-account security update payload", () => {
+    const parsed = parseUpdateOwnAccountRequest({
+      clientId: "client-123",
+      currentPassword: "currentpass123",
+      newLoginName: "new.login",
+      newPassword: "newpass123",
+    });
+
+    expect(parsed.newLoginName).toBe("new.login");
+    expect(parsed.newPassword).toBe("newpass123");
+  });
+
+  it("rejects own-account security payload without change fields", () => {
+    expect(() =>
+      parseUpdateOwnAccountRequest({
+        clientId: "client-123",
+        currentPassword: "currentpass123",
+      }),
+    ).toThrow("Entweder newLoginName oder newPassword ist erforderlich");
+  });
+
+  it("rejects invalid own-account login name", () => {
+    expect(() =>
+      parseUpdateOwnAccountRequest({
+        clientId: "client-123",
+        currentPassword: "currentpass123",
+        newLoginName: "A",
+      }),
+    ).toThrow("newLoginName muss 3-32 Zeichen haben (a-z, 0-9, ., _, -)");
+  });
+
+  it("rejects too short own-account new password", () => {
+    expect(() =>
+      parseUpdateOwnAccountRequest({
+        clientId: "client-123",
+        currentPassword: "currentpass123",
+        newPassword: "short",
+      }),
+    ).toThrow("newPassword muss mindestens 8 Zeichen lang sein");
   });
 
   it("rejects data URLs for profilePicture updates", () => {
@@ -177,6 +220,15 @@ describe("contracts", () => {
       clientId: "client-1",
     });
     expect(parsed.clientId).toBe("client-1");
+  });
+
+  it("parses public user profile query request", () => {
+    const parsed = parsePublicUserProfileQueryRequest({
+      viewerClientId: "viewer-1",
+      targetClientId: "target-1",
+    });
+    expect(parsed.viewerClientId).toBe("viewer-1");
+    expect(parsed.targetClientId).toBe("target-1");
   });
 
   it("parses taste events query request", () => {

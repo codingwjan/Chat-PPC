@@ -250,6 +250,20 @@ export function SignupWizard() {
         <AuthWhatsNewPanel />
 
         <section className="rounded-3xl border border-white/70 bg-white/80 p-6 shadow-[0_28px_90px_rgba(15,23,42,0.16)] backdrop-blur-xl sm:p-8 lg:p-10">
+          <nav className="mb-4 flex flex-wrap gap-2" aria-label="Auth-Modus">
+            <Link
+              href="/login"
+              className="inline-flex h-10 items-center rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              Einloggen
+            </Link>
+            <Link
+              href="/signup"
+              className="inline-flex h-10 items-center rounded-full border border-slate-900 bg-slate-900 px-4 text-sm font-semibold text-white"
+            >
+              Account erstellen
+            </Link>
+          </nav>
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <div className={`grid h-8 w-8 place-items-center rounded-full text-xs font-semibold ${step === 1 ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600"}`}>01</div>

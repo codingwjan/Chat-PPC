@@ -36,6 +36,7 @@ enum MessageReactionType {
 
 enum UserBehaviorEventType {
   MESSAGE_CREATED
+  USERNAME_CHANGED
   MESSAGE_TAGGING_COMPLETED
   MESSAGE_TAGGING_FAILED
   REACTION_GIVEN
@@ -60,6 +61,8 @@ model User {
   status           String            @default("")
   isOnline         Boolean           @default(false)
   lastSeenAt       DateTime?
+  ppcMemberScoreRaw Float            @default(0)
+  ppcMemberLastActiveAt DateTime?
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   messages         Message[]

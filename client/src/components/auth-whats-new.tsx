@@ -19,8 +19,8 @@ const WHATS_NEW_ITEMS = [
     accent: "from-amber-400/20 via-orange-300/10 to-white",
   },
   {
-    title: "AI ist schneller geworden",
-    subtitle: "Antworten kommen spürbar direkter und flüssiger.",
+    title: "PPC-Score",
+    subtitle: "Neu: Scores machen Aktivität und Fortschritt im Chat sichtbar.",
     Icon: BoltIcon,
     accent: "from-fuchsia-400/15 via-violet-300/10 to-white",
   },

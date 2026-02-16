@@ -14,6 +14,7 @@ import type {
   RenameUserRequest,
   TypingRequest,
   UpdateChatBackgroundRequest,
+  UpdateOwnAccountRequest,
   VotePollRequest,
 } from "@/lib/types";
 import { AppError } from "@/server/errors";
@@ -94,6 +95,26 @@ const renameSchema = z.object({
       code: z.ZodIssueCode.custom,
       message: "Entweder newUsername oder profilePicture ist erforderlich",
       path: ["newUsername"],
+    });
+  }
+});
+
+const updateOwnAccountSchema = z.object({
+  clientId: text("clientId"),
+  currentPassword: text("currentPassword").min(8, "currentPassword muss mindestens 8 Zeichen lang sein"),
+  newLoginName: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(/^[a-z0-9._-]{3,32}$/, "newLoginName muss 3-32 Zeichen haben (a-z, 0-9, ., _, -)")
+    .optional(),
+  newPassword: text("newPassword").min(8, "newPassword muss mindestens 8 Zeichen lang sein").optional(),
+}).superRefine((value, ctx) => {
+  if (!value.newLoginName && !value.newPassword) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Entweder newLoginName oder newPassword ist erforderlich",
+      path: ["newLoginName"],
     });
   }
 });
@@ -211,6 +232,11 @@ const tasteProfileQuerySchema = z.object({
   clientId: text("clientId"),
 });
 
+const publicUserProfileQuerySchema = z.object({
+  viewerClientId: text("viewerClientId"),
+  targetClientId: text("targetClientId"),
+});
+
 const tasteEventsQuerySchema = z.object({
   clientId: text("clientId"),
   limit: z.coerce.number().int().min(1).max(200).optional(),
@@ -287,6 +313,10 @@ export function parseRenameUserRequest(payload: unknown): RenameUserRequest {
   return parseOrThrow(renameSchema, payload);
 }
 
+export function parseUpdateOwnAccountRequest(payload: unknown): UpdateOwnAccountRequest {
+  return parseOrThrow(updateOwnAccountSchema, payload);
+}
+
 export function parsePresencePingRequest(payload: unknown): PresencePingRequest {
   return parseOrThrow(presencePingSchema, payload);
 }
@@ -321,6 +351,13 @@ export function parseMarkNotificationsReadRequest(payload: unknown): MarkNotific
 
 export function parseTasteProfileQueryRequest(payload: unknown): { clientId: string } {
   return parseOrThrow(tasteProfileQuerySchema, payload);
+}
+
+export function parsePublicUserProfileQueryRequest(payload: unknown): {
+  viewerClientId: string;
+  targetClientId: string;
+} {
+  return parseOrThrow(publicUserProfileQuerySchema, payload);
 }
 
 export function parseTasteEventsQueryRequest(payload: unknown): {

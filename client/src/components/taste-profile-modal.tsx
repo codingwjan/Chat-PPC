@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { memberRankLabel, PPC_MEMBER_POINT_RULES } from "@/lib/member-progress";
 import type { ReactionType, TasteProfileDetailedDTO, TasteProfileEventDTO, TasteWindowKey } from "@/lib/types";
 
 interface TasteProfileModalProps {
@@ -18,7 +19,7 @@ interface TasteProfileModalProps {
   error?: string | null;
 }
 
-type TasteTabKey = "overview" | "interests" | "activity" | "raw";
+type TasteTabKey = "overview" | "interests" | "activity" | "ppcPoints" | "raw";
 
 const REACTION_LABELS: Record<ReactionType, string> = {
   LIKE: "❤️ Like",
@@ -31,6 +32,7 @@ const REACTION_LABELS: Record<ReactionType, string> = {
 
 const EVENT_TYPE_LABELS: Record<TasteProfileEventDTO["type"], string> = {
   MESSAGE_CREATED: "Nachricht erstellt",
+  USERNAME_CHANGED: "Anzeigename geändert",
   MESSAGE_TAGGING_COMPLETED: "Tagging abgeschlossen",
   MESSAGE_TAGGING_FAILED: "Tagging fehlgeschlagen",
   REACTION_GIVEN: "Reaktion gegeben",
@@ -84,11 +86,14 @@ export function TasteProfileModal(props: TasteProfileModalProps) {
   const [tab, setTab] = useState<TasteTabKey>("overview");
 
   const selectedWindow = props.profile?.windows[props.selectedWindow];
+  const member = props.profile?.member;
+  const memberBreakdown = props.profile?.memberBreakdown;
   const tabs: Array<{ key: TasteTabKey; label: string }> = useMemo(
     () => [
       { key: "overview", label: "Übersicht" },
       { key: "interests", label: "Interessen" },
       { key: "activity", label: "Aktivität" },
+      { key: "ppcPoints", label: "PPC Punkte" },
       { key: "raw", label: "Rohdaten" },
     ],
     [],
@@ -191,6 +196,18 @@ export function TasteProfileModal(props: TasteProfileModalProps) {
             <div className="space-y-3">
               {tab === "overview" ? (
                 <>
+                  {member ? (
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                      <StatCard title="PPC Score" value={member.score} />
+                      <StatCard title="Rank" value={memberRankLabel(member.rank)} />
+                      <StatCard
+                        title="Bis nächster Rank"
+                        value={member.pointsToNext ?? 0}
+                        hint={member.nextRank ? memberRankLabel(member.nextRank) : "Max Rank erreicht"}
+                      />
+                    </div>
+                  ) : null}
+
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     <StatCard title="Reaktionen gegeben" value={selectedWindow.reactions.givenTotal} />
                     <StatCard title="Reaktionen erhalten" value={selectedWindow.reactions.receivedTotal} />
@@ -203,6 +220,23 @@ export function TasteProfileModal(props: TasteProfileModalProps) {
                   </div>
 
                   <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                    {memberBreakdown ? (
+                      <div className="rounded-xl border border-slate-200 bg-white p-3">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">PPC Score Breakdown</p>
+                        <div className="mt-2 space-y-1.5 text-xs text-slate-700">
+                          <p>Nachrichten erstellt: <span className="font-semibold">{memberBreakdown.messagesCreated}</span></p>
+                          <p>Reaktionen gegeben: <span className="font-semibold">{memberBreakdown.reactionsGiven}</span></p>
+                          <p>Reaktionen erhalten: <span className="font-semibold">{memberBreakdown.reactionsReceived}</span></p>
+                          <p>KI-Mentions: <span className="font-semibold">{memberBreakdown.aiMentions}</span></p>
+                          <p>Umfragen erstellt: <span className="font-semibold">{memberBreakdown.pollsCreated}</span></p>
+                          <p>Umfragen erweitert: <span className="font-semibold">{memberBreakdown.pollsExtended}</span></p>
+                          <p>Umfrage-Stimmen: <span className="font-semibold">{memberBreakdown.pollVotes}</span></p>
+                          <p>Tagging abgeschlossen: <span className="font-semibold">{memberBreakdown.taggingCompleted}</span></p>
+                          <p>Anzeigename geändert: <span className="font-semibold">{memberBreakdown.usernameChanges}</span></p>
+                          <p>Rohscore: <span className="font-semibold">{memberBreakdown.rawScore}</span></p>
+                        </div>
+                      </div>
+                    ) : null}
                     <div className="rounded-xl border border-slate-200 bg-white p-3">
                       <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Reaktionen gegeben</p>
                       <div className="mt-2 space-y-1.5">
@@ -313,6 +347,28 @@ export function TasteProfileModal(props: TasteProfileModalProps) {
                     )}
                   </div>
                 </>
+              ) : null}
+
+              {tab === "ppcPoints" ? (
+                <div className="rounded-xl border border-slate-200 bg-white p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">PPC Score Punkte pro Aktion</p>
+                  <div className="mt-3 space-y-2">
+                    {PPC_MEMBER_POINT_RULES.map((rule) => (
+                      <div
+                        key={rule.id}
+                        className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
+                      >
+                        <p className="text-sm text-slate-700">{rule.label}</p>
+                        <span className="rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
+                          +{rule.points}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  <p className="mt-3 text-xs text-slate-500">
+                    Der sichtbare PPC Score nutzt zusätzlich Inaktivitäts-Decay (Halbwertszeit 45 Tage).
+                  </p>
+                </div>
               ) : null}
 
               {tab === "raw" ? (

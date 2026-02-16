@@ -45,6 +45,17 @@ function getLookupSecret(): string {
     return fromEnv;
   }
 
+  // Backward-compatible fallback: derive lookup secret from encryption key
+  // when only CHAT_LOGIN_NAME_ENCRYPTION_KEY is configured.
+  const encryptionKeyFromEnv = process.env.CHAT_LOGIN_NAME_ENCRYPTION_KEY?.trim();
+  if (encryptionKeyFromEnv) {
+    const derived = createHash("sha256")
+      .update(`chatppc-login-lookup:${encryptionKeyFromEnv}`, "utf8")
+      .digest("hex");
+    cachedLookupSecret = derived;
+    return derived;
+  }
+
   if (process.env.NODE_ENV === "production") {
     throw new Error("CHAT_LOGIN_NAME_LOOKUP_SECRET fehlt");
   }
@@ -97,4 +108,9 @@ export function decryptLoginName(encrypted: string): string {
   ]).toString("utf8");
 
   return normalizeLoginName(decrypted);
+}
+
+export function __resetLoginNameCryptoCacheForTests(): void {
+  cachedEncryptionKey = null;
+  cachedLookupSecret = null;
 }

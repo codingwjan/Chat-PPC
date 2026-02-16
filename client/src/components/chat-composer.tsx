@@ -88,6 +88,8 @@ function DraftImagePreview({
         className="h-full w-full object-cover"
         loading="lazy"
         decoding="async"
+        width={56}
+        height={56}
       />
       <button
         type="button"
@@ -142,7 +144,7 @@ export function ChatComposer({
   onSubmit,
 }: ChatComposerProps) {
   return (
-    <div ref={composerRef} className="relative rounded-[1.5rem] border border-slate-200/80 bg-white/95 p-3 shadow-[0_10px_35px_rgba(15,23,42,0.12)] backdrop-blur">
+    <div ref={composerRef} className="relative rounded-[1.25rem] border border-slate-200/80 bg-white/95 p-2.5 shadow-[0_10px_35px_rgba(15,23,42,0.12)] sm:rounded-[1.5rem] sm:p-3 sm:backdrop-blur [-webkit-tap-highlight-color:transparent]">
       <div className="mb-2 flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {PRIMARY_MODES.map((composerMode) => (
           <button
@@ -222,6 +224,8 @@ export function ChatComposer({
               onPaste={onMessageInputPaste}
               onKeyDown={onMessageKeyDown}
               placeholder="Nachricht schreiben…"
+              name="message-draft"
+              autoComplete="off"
               rows={1}
               className="max-h-[14rem] min-h-[2.5rem] w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
             />
@@ -266,6 +270,8 @@ export function ChatComposer({
             onChange={(event) => onQuestionDraftChange(event.target.value)}
             onKeyDown={onQuestionKeyDown}
             placeholder="Stelle deiner Gruppe eine Frage…"
+            name="question-draft"
+            autoComplete="off"
             className="h-10 w-full rounded-2xl border border-slate-200 bg-white px-4 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
           />
           <button
@@ -307,6 +313,8 @@ export function ChatComposer({
             value={pollQuestion}
             onChange={(event) => onPollQuestionChange(event.target.value)}
             placeholder="Umfragefrage…"
+            name="poll-question"
+            autoComplete="off"
             readOnly={pollExtending}
             className={`h-10 w-full rounded-2xl border px-4 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 ${
               pollExtending
@@ -321,6 +329,8 @@ export function ChatComposer({
                 value={option}
                 onChange={(event) => onPollOptionChange(index, event.target.value)}
                 placeholder={`Option ${index + 1}…`}
+                name={`poll-option-${index}`}
+                autoComplete="off"
                 readOnly={pollExtending && index < pollLockedOptionCount}
                 className={`h-9 rounded-xl border px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 ${
                   pollExtending && index < pollLockedOptionCount
@@ -369,7 +379,7 @@ export function ChatComposer({
       ) : null}
 
       {showMentionSuggestions && mentionUsers.length > 0 && mode === "message" ? (
-        <div className="absolute bottom-[calc(100%+0.5rem)] left-3 z-20 max-h-44 w-56 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl">
+        <div className="absolute bottom-[calc(100%+0.5rem)] left-3 z-20 max-h-44 w-[min(16rem,calc(100vw-1.5rem))] overflow-y-auto rounded-xl border border-slate-200 bg-white p-1 shadow-xl [overscroll-behavior:contain]">
           {mentionUsers.map((user, index) => (
             <button
               type="button"
@@ -387,6 +397,8 @@ export function ChatComposer({
                 alt=""
                 loading="lazy"
                 decoding="async"
+                width={20}
+                height={20}
               />
               <span className="truncate">{user.username}</span>
             </button>

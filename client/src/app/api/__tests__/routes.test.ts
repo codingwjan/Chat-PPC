@@ -6,11 +6,13 @@ const serviceMock = vi.hoisted(() => ({
   signUpAccount: vi.fn(),
   signInAccount: vi.fn(),
   renameUser: vi.fn(),
+  updateOwnAccount: vi.fn(),
   createMessage: vi.fn(),
   getMessages: vi.fn(),
   reactToMessage: vi.fn(),
   getNotifications: vi.fn(),
   markNotificationsRead: vi.fn(),
+  getPublicUserProfile: vi.fn(),
   getTasteProfile: vi.fn(),
   getTasteProfileDetailed: vi.fn(),
   getTasteProfileEvents: vi.fn(),
@@ -175,6 +177,41 @@ describe("api routes", () => {
     expect(response.status).toBe(200);
   });
 
+  it("liefert öffentliches Nutzerprofil", async () => {
+    serviceMock.getPublicUserProfile.mockResolvedValue({
+      userId: "u-target",
+      clientId: "target-1",
+      username: "alice",
+      profilePicture: "/default-avatar.svg",
+      status: "online",
+      isOnline: true,
+      lastSeenAt: null,
+      member: {
+        brand: "PPC Score",
+        score: 200,
+        rank: "BRONZE",
+      },
+      stats: {
+        postsTotal: 10,
+        reactionsGiven: 6,
+        reactionsReceived: 8,
+        pollsCreated: 1,
+        pollVotes: 4,
+        activeDays: 5,
+      },
+    });
+
+    const { GET } = await import("@/app/api/users/profile/route");
+    const response = await GET(
+      new Request("http://localhost/api/users/profile?viewerClientId=viewer-1&targetClientId=target-1"),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.username).toBe("alice");
+    expect(payload.stats.postsTotal).toBe(10);
+  });
+
   it("rejects empty profile/username update payload", async () => {
     const { PATCH } = await import("@/app/api/users/me/route");
 
@@ -188,6 +225,75 @@ describe("api routes", () => {
     );
 
     expect(response.status).toBe(400);
+  });
+
+  it("updates own account security settings and refreshes cookie", async () => {
+    serviceMock.updateOwnAccount.mockResolvedValue({
+      id: "u1",
+      clientId: "c1",
+      username: "newname",
+      profilePicture: "/default-avatar.svg",
+      status: "",
+      isOnline: true,
+      lastSeenAt: null,
+      loginName: "alice.new",
+      sessionToken: "token-new",
+      sessionExpiresAt: "2030-01-01T00:00:00.000Z",
+      devMode: false,
+    });
+    const { PATCH } = await import("@/app/api/users/me/account/route");
+
+    const response = await PATCH(
+      new Request("http://localhost/api/users/me/account", {
+        method: "PATCH",
+        body: JSON.stringify({
+          clientId: "c1",
+          currentPassword: "supersecure123",
+          newLoginName: "alice.new",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("set-cookie")).toContain("chatppc.auth=active");
+    const payload = await response.json();
+    expect(payload.loginName).toBe("alice.new");
+  });
+
+  it("rejects invalid own-account security payload", async () => {
+    const { PATCH } = await import("@/app/api/users/me/account/route");
+
+    const response = await PATCH(
+      new Request("http://localhost/api/users/me/account", {
+        method: "PATCH",
+        body: JSON.stringify({
+          clientId: "c1",
+          currentPassword: "supersecure123",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it("bubbles own-account security service errors", async () => {
+    serviceMock.updateOwnAccount.mockRejectedValue(new AppError("Aktuelles Passwort ist falsch.", 401));
+    const { PATCH } = await import("@/app/api/users/me/account/route");
+
+    const response = await PATCH(
+      new Request("http://localhost/api/users/me/account", {
+        method: "PATCH",
+        body: JSON.stringify({
+          clientId: "c1",
+          currentPassword: "falschespasswort",
+          newPassword: "newsecure123",
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(401);
+    const payload = await response.json();
+    expect(payload.error).toBe("Aktuelles Passwort ist falsch.");
   });
 
   it("creates messages", async () => {
@@ -311,6 +417,18 @@ describe("api routes", () => {
     serviceMock.getTasteProfileDetailed.mockResolvedValue({
       userId: "u1",
       generatedAt: "2026-02-13T16:00:00.000Z",
+      memberBreakdown: {
+        messagesCreated: 0,
+        reactionsGiven: 0,
+        reactionsReceived: 0,
+        aiMentions: 0,
+        pollsCreated: 0,
+        pollsExtended: 0,
+        pollVotes: 0,
+        taggingCompleted: 0,
+        usernameChanges: 0,
+        rawScore: 0,
+      },
       windows: {
         "7d": {
           reactions: { givenTotal: 0, receivedTotal: 0, givenByType: [], receivedByType: [] },

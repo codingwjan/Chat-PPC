@@ -12,6 +12,7 @@ import {
   type ImgHTMLAttributes,
   type SyntheticEvent,
 } from "react";
+import { MemberProgressInline } from "@/components/member-progress-inline";
 import { getDefaultProfilePicture } from "@/lib/default-avatar";
 import type { LinkPreviewDTO, MessageDTO, ReactionType } from "@/lib/types";
 
@@ -60,6 +61,17 @@ function isSystemJoinMessage(message: MessageDTO): boolean {
   if (message.username !== "System") return false;
   const content = message.message.trim().toLowerCase();
   return content.endsWith("joined the chat") || content.endsWith("ist dem chat beigetreten");
+}
+
+function isSystemRankUpMessage(message: MessageDTO): boolean {
+  if (message.username !== "System") return false;
+  return /^.+\s+ist auf\s+(bronze|silber|gold|platin)\s+aufgestiegen\s+[·-]\s+ppc (?:member|score)\s+\d+$/i.test(
+    message.message.trim(),
+  );
+}
+
+function isVisibleSystemMessage(message: MessageDTO): boolean {
+  return isSystemJoinMessage(message) || isSystemRankUpMessage(message);
 }
 
 function normalizeSharedUrl(raw: string): string {
@@ -394,7 +406,7 @@ function InlineSharedImage({
     <span className="my-3 inline-flex w-full max-w-full flex-col items-start gap-1">
       <button
         type="button"
-        className="inline-block w-full max-w-[min(78vw,24rem)] cursor-zoom-in"
+        className="inline-block w-full max-w-[min(100%,24rem)] cursor-zoom-in"
         onClick={() => onOpenLightbox?.(src, alt)}
       >
         <LazyImage
@@ -446,6 +458,13 @@ function LinkPreviewCard({ url }: { url: string }) {
   const ref = useRef<HTMLAnchorElement>(null);
   const [isVisible, setIsVisible] = useState(false);
   const [preview, setPreview] = useState<LinkPreviewDTO | null>(null);
+  const fallbackHostname = useMemo(() => {
+    try {
+      return new URL(url).hostname;
+    } catch {
+      return url;
+    }
+  }, [url]);
 
   useEffect(() => {
     if (!ref.current || isVisible) return;
@@ -475,7 +494,22 @@ function LinkPreviewCard({ url }: { url: string }) {
   }, [isVisible, url]);
 
   if (!preview) {
-    return <a ref={ref} href={url} className="hidden" />;
+    return (
+      <a
+        ref={ref}
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="mt-2 block overflow-hidden rounded-2xl border border-slate-200 bg-slate-50"
+      >
+        <div className="h-36 w-full animate-pulse bg-slate-200/80" aria-hidden />
+        <div className="space-y-2 p-3">
+          <div className="h-4 w-3/4 animate-pulse rounded bg-slate-200/80" aria-hidden />
+          <div className="h-3 w-full animate-pulse rounded bg-slate-200/70" aria-hidden />
+          <p className="text-xs text-slate-500">{fallbackHostname}</p>
+        </div>
+      </a>
+    );
   }
 
   return (
@@ -582,7 +616,7 @@ function ChatMessageComponent({
   const profilePictureAlt = `Profilbild von ${message.username}`;
 
   if (message.username === "System") {
-    if (!isSystemJoinMessage(message)) return null;
+    if (!isVisibleSystemMessage(message)) return null;
     return (
       <div className="py-2">
         <div className="flex items-center gap-3">
@@ -605,10 +639,10 @@ function ChatMessageComponent({
     const pollReplyContext = Boolean(message.questionId && message.oldmessage && message.oldusername);
 
     return (
-      <div className={`flex w-full ${isRightAligned ? "justify-end" : "justify-start"} [content-visibility:auto] [contain-intrinsic-size:320px]`}>
+      <div className={`flex w-full ${isRightAligned ? "justify-end" : "justify-start"}`}>
         <article
           data-message-id={message.id}
-          className={`w-full max-w-[min(92vw,42rem)] rounded-2xl border p-4 shadow-sm ${isOwnMessage
+          className={`w-full max-w-[min(100%,42rem)] rounded-2xl border p-4 shadow-sm ${isOwnMessage
             ? "border-sky-200 bg-sky-50/80"
             : "border-sky-100 bg-white"
             }`}
@@ -636,7 +670,10 @@ function ChatMessageComponent({
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="text-base font-semibold text-slate-900">{message.message}</p>
-                  <p className="text-sm text-slate-500">Umfrage von {message.username}</p>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <p className="text-sm text-slate-500">Umfrage von {message.username}</p>
+                    <MemberProgressInline member={message.member} variant="chat" />
+                  </div>
                 </div>
                 <time className="shrink-0 text-xs text-slate-400" dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
               </div>
@@ -731,10 +768,10 @@ function ChatMessageComponent({
 
   if (message.type === "question") {
     return (
-      <div className={`flex w-full ${isRightAligned ? "justify-end" : "justify-start"} [content-visibility:auto] [contain-intrinsic-size:320px]`}>
+      <div className={`flex w-full ${isRightAligned ? "justify-end" : "justify-start"}`}>
         <article
           data-message-id={message.id}
-          className={`w-full max-w-[min(92vw,42rem)] rounded-2xl border p-4 shadow-sm ${isOwnMessage
+          className={`w-full max-w-[min(100%,42rem)] rounded-2xl border p-4 shadow-sm ${isOwnMessage
             ? "border-amber-200 bg-amber-50"
             : "border-amber-100 bg-amber-50/70"
             }`}
@@ -754,7 +791,10 @@ function ChatMessageComponent({
           <div className="mb-3 flex items-start justify-between gap-2">
             <div>
               <p className="text-base font-semibold text-slate-900">{message.message}</p>
-              <p className="text-sm text-slate-500">Frage von {message.username}</p>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <p className="text-sm text-slate-500">Frage von {message.username}</p>
+                <MemberProgressInline member={message.member} variant="chat" />
+              </div>
             </div>
             <time className="text-xs text-slate-400" dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
           </div>
@@ -802,10 +842,10 @@ function ChatMessageComponent({
   const replyContext = Boolean(message.questionId && message.oldmessage && message.oldusername);
 
   return (
-    <div className={`flex w-full ${isRightAligned ? "justify-end" : "justify-start"} [content-visibility:auto] [contain-intrinsic-size:320px]`}>
+    <div className={`flex w-full ${isRightAligned ? "justify-end" : "justify-start"}`}>
       <article
         data-message-id={message.id}
-        className={`max-w-[min(92vw,44rem)] rounded-2xl border p-4 shadow-sm ${isOwnMessage
+        className={`max-w-[min(100%,44rem)] rounded-2xl border p-4 shadow-sm ${isOwnMessage
           ? "bg-sky-50/80 border-sky-200"
           : "border-slate-100 bg-white"
           }`}
@@ -832,6 +872,7 @@ function ChatMessageComponent({
           <div className="min-w-0">
             <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1">
               <p className="text-sm font-semibold text-slate-900">{message.username}</p>
+              <MemberProgressInline member={message.member} variant="chat" />
               <time className="text-xs text-slate-400" dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
               {onStartReply ? (
                 <button

@@ -1,4 +1,14 @@
 export type ChatMessageType = "message" | "votingPoll" | "question" | "answer";
+export type MemberRank = "BRONZE" | "SILBER" | "GOLD" | "PLATIN";
+
+export interface MemberProgressDTO {
+  brand: "PPC Score" | "PPC Member";
+  score: number;
+  rank: MemberRank;
+  nextRank?: MemberRank;
+  pointsToNext?: number;
+  lastActiveAt?: string;
+}
 
 export type SseEventName =
   | "snapshot"
@@ -46,6 +56,13 @@ export interface RenameUserRequest {
   clientId: string;
   newUsername?: string;
   profilePicture?: string;
+}
+
+export interface UpdateOwnAccountRequest {
+  clientId: string;
+  currentPassword: string;
+  newLoginName?: string;
+  newPassword?: string;
 }
 
 export interface PresencePingRequest {
@@ -177,6 +194,28 @@ export interface UserPresenceDTO {
   status: string;
   isOnline: boolean;
   lastSeenAt: string | null;
+  member?: MemberProgressDTO;
+}
+
+export interface PublicUserProfileStatsDTO {
+  postsTotal: number;
+  reactionsGiven: number;
+  reactionsReceived: number;
+  pollsCreated: number;
+  pollVotes: number;
+  activeDays: number;
+}
+
+export interface PublicUserProfileDTO {
+  userId: string;
+  clientId: string;
+  username: string;
+  profilePicture: string;
+  status: string;
+  isOnline: boolean;
+  lastSeenAt: string | null;
+  member?: MemberProgressDTO;
+  stats: PublicUserProfileStatsDTO;
 }
 
 export type MessageTaggingStatus = "pending" | "processing" | "completed" | "failed";
@@ -250,6 +289,7 @@ export interface MessageDTO {
   questionId?: string;
   oldusername?: string;
   oldmessage?: string;
+  member?: MemberProgressDTO;
   tagging?: MessageTaggingDTO;
   reactions?: MessageReactionsDTO;
   poll?: {
@@ -325,6 +365,7 @@ export type TasteWindowKey = "7d" | "30d" | "all";
 
 export type TasteProfileEventType =
   | "MESSAGE_CREATED"
+  | "USERNAME_CHANGED"
   | "MESSAGE_TAGGING_COMPLETED"
   | "MESSAGE_TAGGING_FAILED"
   | "REACTION_GIVEN"
@@ -337,6 +378,19 @@ export type TasteProfileEventType =
 export interface TasteProfileDetailedDTO {
   userId: string;
   generatedAt: string;
+  member?: MemberProgressDTO;
+  memberBreakdown: {
+    messagesCreated: number;
+    reactionsGiven: number;
+    reactionsReceived: number;
+    aiMentions: number;
+    pollsCreated: number;
+    pollsExtended: number;
+    pollVotes: number;
+    taggingCompleted: number;
+    usernameChanges: number;
+    rawScore: number;
+  };
   windows: Record<TasteWindowKey, TasteWindowStatsDTO>;
   transparency: {
     eventRetentionDays: number;

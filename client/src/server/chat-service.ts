@@ -6,6 +6,13 @@ import OpenAI from "openai";
 import type { Response as OpenAIResponse } from "openai/resources/responses/responses";
 import { PNG } from "pngjs";
 import { getDefaultProfilePicture as getDefaultAvatar } from "@/lib/default-avatar";
+import {
+  buildMemberProgress,
+  isMemberRankUpgrade,
+  memberRankLabel,
+  PPC_MEMBER_BRAND,
+  PPC_MEMBER_SCORE_WEIGHTS,
+} from "@/lib/member-progress";
 import { prisma } from "@/lib/prisma";
 import { publish } from "@/lib/sse-bus";
 import type {
@@ -24,6 +31,7 @@ import type {
   LoginRequest,
   LoginResponseDTO,
   NotificationPageDTO,
+  PublicUserProfileDTO,
   ReactionType,
   TasteProfileDetailedDTO,
   TasteProfileEventDTO,
@@ -35,6 +43,7 @@ import type {
   MessageDTO,
   MessagePageDTO,
   SnapshotDTO,
+  UpdateOwnAccountRequest,
   UserPresenceDTO,
 } from "@/lib/types";
 import { AppError, assert } from "@/server/errors";
@@ -110,6 +119,19 @@ const MESSAGE_REACTION_SCORES: Record<ReactionType, number> = {
   WTF: 1.0,
   BIG_BRAIN: 1.2,
 };
+const USERNAME_CHANGED_EVENT_TYPE = (UserBehaviorEventType as Record<string, UserBehaviorEventType | undefined>)
+  .USERNAME_CHANGED;
+const PPC_MEMBER_ACTIVE_EVENT_TYPES: readonly UserBehaviorEventType[] = [
+  UserBehaviorEventType.MESSAGE_CREATED,
+  USERNAME_CHANGED_EVENT_TYPE,
+  UserBehaviorEventType.REACTION_GIVEN,
+  UserBehaviorEventType.POLL_CREATED,
+  UserBehaviorEventType.POLL_EXTENDED,
+  UserBehaviorEventType.POLL_VOTE_GIVEN,
+  UserBehaviorEventType.AI_MENTION_SENT,
+  UserBehaviorEventType.MESSAGE_TAGGING_COMPLETED,
+].filter((type): type is UserBehaviorEventType => Boolean(type));
+const SYSTEM_RANK_UP_REGEX = /^(.+?)\s+ist auf\s+(bronze|silber|gold|platin)\s+aufgestiegen\s+[·-]\s+ppc (?:member|score)\s+(\d+)$/i;
 const TAGGING_MODEL_PROMPT = [
   "You are a strict tagging engine for chat messages and images.",
   "Return JSON only. No markdown. No prose.",
@@ -255,6 +277,7 @@ let taggingQueueDrainScheduled = false;
 let lastBehaviorEventCleanupAt = 0;
 let canPersistAiStatusRow = true;
 let encryptedLoginColumnsAvailable: boolean | null = null;
+let usernameChangedEnumValueAvailable: boolean | null = null;
 
 let mediaItemsCache:
   | {
@@ -322,6 +345,14 @@ function isMissingColumnError(error: unknown): boolean {
   return false;
 }
 
+function isMissingUsernameChangedEnumValueError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return message.includes("invalid input value for enum")
+    && message.includes("userbehavioreventtype")
+    && message.includes("username_changed");
+}
+
 function toChatMessageType(type: MessageType): MessageDTO["type"] {
   if (type === MessageType.VOTING_POLL) return "votingPoll";
   if (type === MessageType.QUESTION) return "question";
@@ -336,6 +367,26 @@ function toDbMessageType(type: CreateMessageRequest["type"]): MessageType {
   return MessageType.MESSAGE;
 }
 
+function isDeveloperAlias(username: string): boolean {
+  const normalized = username.trim().toLowerCase();
+  const developer = DEVELOPER_USERNAME.toLowerCase();
+  return normalized === developer || normalized.startsWith(`${developer}-`);
+}
+
+function isPpcMemberEligibleUser(input: { clientId: string; username: string }): boolean {
+  const normalizedUsername = input.username.trim().toLowerCase();
+  if (SYSTEM_CLIENT_IDS.includes(input.clientId as (typeof SYSTEM_CLIENT_IDS)[number])) {
+    return false;
+  }
+  if (normalizedUsername === "system" || normalizedUsername === "chatgpt" || normalizedUsername === "grok") {
+    return false;
+  }
+  if (isDeveloperAlias(input.username)) {
+    return false;
+  }
+  return true;
+}
+
 function mapUser(user: {
   id: string;
   clientId: string;
@@ -344,7 +395,16 @@ function mapUser(user: {
   status: string;
   isOnline: boolean;
   lastSeenAt: Date | null;
+  ppcMemberScoreRaw?: number | null;
+  ppcMemberLastActiveAt?: Date | null;
 }): UserPresenceDTO {
+  const eligible = isPpcMemberEligibleUser({ clientId: user.clientId, username: user.username });
+  const member = eligible
+    ? buildMemberProgress({
+      rawScore: user.ppcMemberScoreRaw || 0,
+      lastActiveAt: user.ppcMemberLastActiveAt || null,
+    })
+    : undefined;
   return {
     id: user.id,
     clientId: user.clientId,
@@ -353,6 +413,7 @@ function mapUser(user: {
     status: user.status,
     isOnline: user.isOnline,
     lastSeenAt: user.lastSeenAt ? user.lastSeenAt.toISOString() : null,
+    member,
   };
 }
 
@@ -366,7 +427,11 @@ const MESSAGE_INCLUDE = Prisma.validator<Prisma.MessageInclude>()({
   },
   author: {
     select: {
+      clientId: true,
+      username: true,
       profilePicture: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   },
   pollOptions: {
@@ -616,8 +681,26 @@ function extractSystemJoinUsername(content: string): string | null {
   return null;
 }
 
+function extractSystemRankUpPayload(content: string): { username: string; rank: string; score: number } | null {
+  const match = content.trim().match(SYSTEM_RANK_UP_REGEX);
+  if (!match) return null;
+  const username = match[1]?.trim() || "";
+  const rank = match[2]?.trim() || "";
+  const scoreRaw = Number.parseInt(match[3] || "", 10);
+  if (!username || !rank || !Number.isFinite(scoreRaw)) return null;
+  return {
+    username,
+    rank,
+    score: scoreRaw,
+  };
+}
+
 function isSystemJoinContent(content: string): boolean {
   return extractSystemJoinUsername(content) !== null;
+}
+
+function isSystemRankUpContent(content: string): boolean {
+  return extractSystemRankUpPayload(content) !== null;
 }
 
 async function resolveJoinMessageTargetUserId(content: string): Promise<string | null> {
@@ -639,7 +722,7 @@ async function resolveJoinMessageTargetUserId(content: string): Promise<string |
 }
 
 function isReactableSystemMessage(input: { authorName: string; content: string }): boolean {
-  return input.authorName === "System" && isSystemJoinContent(input.content);
+  return input.authorName === "System" && (isSystemJoinContent(input.content) || isSystemRankUpContent(input.content));
 }
 
 function extractJoinUsernameTag(content: string): string | null {
@@ -751,6 +834,198 @@ async function createBehaviorEvent(input: {
       expiresAt: new Date(createdAt.getTime() + BEHAVIOR_EVENT_RETENTION_MS),
     },
   });
+}
+
+function getPpcMemberActiveEventTypesForQuery(): UserBehaviorEventType[] {
+  if (!USERNAME_CHANGED_EVENT_TYPE || usernameChangedEnumValueAvailable === false) {
+    return PPC_MEMBER_ACTIVE_EVENT_TYPES.filter((type) => type !== USERNAME_CHANGED_EVENT_TYPE);
+  }
+  return [...PPC_MEMBER_ACTIVE_EVENT_TYPES];
+}
+
+async function findLatestPpcMemberActiveEvent(userId: string): Promise<{ createdAt: Date } | null> {
+  const runQuery = async (): Promise<{ createdAt: Date } | null> =>
+    prisma.userBehaviorEvent.findFirst({
+      where: {
+        userId,
+        type: { in: getPpcMemberActiveEventTypesForQuery() },
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: { createdAt: true },
+    });
+
+  try {
+    return await runQuery();
+  } catch (error) {
+    if (!isMissingUsernameChangedEnumValueError(error)) {
+      throw error;
+    }
+    usernameChangedEnumValueAvailable = false;
+    return runQuery();
+  }
+}
+
+async function getPpcMemberBreakdown(userId: string): Promise<{
+  breakdown: TasteProfileDetailedDTO["memberBreakdown"];
+  rawScore: number;
+  lastActiveAt: Date | null;
+}> {
+  const systemJoinMessageWhere: Prisma.MessageWhereInput = {
+    authorId: userId,
+    authorName: "System",
+    OR: [
+      { content: { endsWith: " joined the chat", mode: "insensitive" } },
+      { content: { endsWith: " ist dem chat beigetreten", mode: "insensitive" } },
+    ],
+  };
+
+  const [behaviorRows, reactionsGiven, reactionsReceived, latestActiveEvent, systemJoinMessageCount, latestSystemJoinMessage] = await Promise.all([
+    prisma.userBehaviorEvent.groupBy({
+      by: ["type"],
+      where: { userId },
+      _count: { type: true },
+    }),
+    prisma.messageReaction.count({
+      where: { userId },
+    }),
+    prisma.messageReaction.count({
+      where: {
+        message: { authorId: userId },
+      },
+    }),
+    findLatestPpcMemberActiveEvent(userId),
+    prisma.message.count({
+      where: systemJoinMessageWhere,
+    }),
+    prisma.message.findFirst({
+      where: systemJoinMessageWhere,
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: { createdAt: true },
+    }),
+  ]);
+
+  const eventCounts = new Map<UserBehaviorEventType, number>();
+  for (const row of behaviorRows) {
+    eventCounts.set(row.type, row._count.type);
+  }
+  const usernameChangesFromEvents = USERNAME_CHANGED_EVENT_TYPE
+    ? (eventCounts.get(USERNAME_CHANGED_EVENT_TYPE) || 0)
+    : 0;
+  const usernameChangesFromSystemMessages = Math.max(0, systemJoinMessageCount - 1);
+  const usernameChanges = Math.max(usernameChangesFromEvents, usernameChangesFromSystemMessages);
+  const latestRenameActivityAt = systemJoinMessageCount > 1 ? latestSystemJoinMessage?.createdAt || null : null;
+  const latestEventActivityAt = latestActiveEvent?.createdAt || null;
+
+  const breakdown: TasteProfileDetailedDTO["memberBreakdown"] = {
+    messagesCreated: eventCounts.get(UserBehaviorEventType.MESSAGE_CREATED) || 0,
+    reactionsGiven,
+    reactionsReceived,
+    aiMentions: eventCounts.get(UserBehaviorEventType.AI_MENTION_SENT) || 0,
+    pollsCreated: eventCounts.get(UserBehaviorEventType.POLL_CREATED) || 0,
+    pollsExtended: eventCounts.get(UserBehaviorEventType.POLL_EXTENDED) || 0,
+    pollVotes: eventCounts.get(UserBehaviorEventType.POLL_VOTE_GIVEN) || 0,
+    taggingCompleted: eventCounts.get(UserBehaviorEventType.MESSAGE_TAGGING_COMPLETED) || 0,
+    usernameChanges,
+    rawScore: 0,
+  };
+
+  breakdown.rawScore = (
+    breakdown.messagesCreated * PPC_MEMBER_SCORE_WEIGHTS.messagesCreated
+    + breakdown.reactionsGiven * PPC_MEMBER_SCORE_WEIGHTS.reactionsGiven
+    + breakdown.reactionsReceived * PPC_MEMBER_SCORE_WEIGHTS.reactionsReceived
+    + breakdown.aiMentions * PPC_MEMBER_SCORE_WEIGHTS.aiMentions
+    + breakdown.pollsCreated * PPC_MEMBER_SCORE_WEIGHTS.pollsCreated
+    + breakdown.pollsExtended * PPC_MEMBER_SCORE_WEIGHTS.pollsExtended
+    + breakdown.pollVotes * PPC_MEMBER_SCORE_WEIGHTS.pollVotes
+    + breakdown.taggingCompleted * PPC_MEMBER_SCORE_WEIGHTS.taggingCompleted
+    + breakdown.usernameChanges * PPC_MEMBER_SCORE_WEIGHTS.usernameChanges
+  );
+
+  return {
+    breakdown,
+    rawScore: breakdown.rawScore,
+    lastActiveAt: latestEventActivityAt && latestRenameActivityAt
+      ? (latestEventActivityAt.getTime() >= latestRenameActivityAt.getTime() ? latestEventActivityAt : latestRenameActivityAt)
+      : latestEventActivityAt || latestRenameActivityAt || null,
+  };
+}
+
+export async function recomputePpcMemberForUser(
+  userId: string,
+  options: { emitRankUp?: boolean } = {},
+): Promise<void> {
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
+    },
+  });
+  if (!user) return;
+
+  const eligible = isPpcMemberEligibleUser(user);
+  const previousMember = eligible
+    ? buildMemberProgress({
+      rawScore: user.ppcMemberScoreRaw || 0,
+      lastActiveAt: user.ppcMemberLastActiveAt || null,
+    })
+    : undefined;
+
+  const computed = eligible
+    ? await getPpcMemberBreakdown(user.id)
+    : { rawScore: 0, lastActiveAt: null as Date | null };
+
+  const updated = await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      ppcMemberScoreRaw: computed.rawScore,
+      ppcMemberLastActiveAt: computed.lastActiveAt,
+    },
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
+    },
+  });
+
+  const nextMember = eligible
+    ? buildMemberProgress({
+      rawScore: updated.ppcMemberScoreRaw || 0,
+      lastActiveAt: updated.ppcMemberLastActiveAt || null,
+    })
+    : undefined;
+
+  const rankUp = Boolean(
+    previousMember
+    && nextMember
+    && isMemberRankUpgrade(previousMember.rank, nextMember.rank),
+  );
+
+  const dto = mapUser(updated);
+  publish("user.updated", dto);
+  if (updated.isOnline) {
+    publish("presence.updated", dto);
+  }
+
+  if (options.emitRankUp !== false && rankUp && nextMember) {
+    await emitSystemMessage(
+      `${updated.username} ist auf ${memberRankLabel(nextMember.rank)} aufgestiegen · ${PPC_MEMBER_BRAND} ${nextMember.score}`,
+      { authorId: updated.id },
+    );
+  }
 }
 
 function readBehaviorEventMeta(raw: unknown): Record<string, unknown> {
@@ -951,6 +1226,13 @@ function mapMessage(
     questionId: message.questionMessageId ?? undefined,
     oldusername: message.questionMessage?.authorName ?? undefined,
     oldmessage: message.questionMessage?.content ?? undefined,
+    member:
+      message.author && isPpcMemberEligibleUser(message.author)
+        ? buildMemberProgress({
+          rawScore: message.author.ppcMemberScoreRaw || 0,
+          lastActiveAt: message.author.ppcMemberLastActiveAt || null,
+        })
+        : undefined,
     tagging: mapMessageTagging(message),
     reactions: mapMessageReactions(message, options.viewerUserId),
     poll:
@@ -1023,6 +1305,9 @@ async function updateMessageTaggingState(input: {
             : null,
         });
         publishTasteUpdated(updatedRow.authorId, "tagging");
+        if (input.status === AiJobStatus.COMPLETED) {
+          await recomputePpcMemberForUser(updatedRow.authorId);
+        }
       } catch (error) {
         console.error("Failed to persist tagging behavior event:", error);
       }
@@ -1115,6 +1400,8 @@ async function cleanupOfflineUsers(): Promise<void> {
       status: true,
       isOnline: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
 
@@ -1153,6 +1440,8 @@ export async function getOnlineUsers(): Promise<UserPresenceDTO[]> {
       status: true,
       isOnline: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
 
@@ -1173,6 +1462,8 @@ export async function getAiStatus(): Promise<AiStatusDTO> {
     select: {
       status: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
 
@@ -1197,6 +1488,8 @@ export async function getChatBackground(): Promise<ChatBackgroundDTO> {
       profilePicture: true,
       status: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
 
@@ -4033,6 +4326,8 @@ async function getUserByClientId(clientId: string) {
       status: true,
       isOnline: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
   assert(user, "Nutzersitzung nicht gefunden. Bitte erneut anmelden.", 401);
@@ -4192,7 +4487,7 @@ function toAuthSessionResponse(user: {
   id: string;
   clientId: string;
   loginName: string | null;
-  loginNameEncrypted: string | null;
+  loginNameEncrypted?: string | null;
   sessionToken: string | null;
   sessionExpiresAt: Date | null;
   username: string;
@@ -4200,6 +4495,8 @@ function toAuthSessionResponse(user: {
   status: string;
   isOnline: boolean;
   lastSeenAt: Date | null;
+  ppcMemberScoreRaw?: number | null;
+  ppcMemberLastActiveAt?: Date | null;
 }): AuthSessionDTO {
   assert(user.sessionToken, "Sitzung fehlt. Bitte erneut anmelden.", 401);
   assert(user.sessionExpiresAt, "Sitzung fehlt. Bitte erneut anmelden.", 401);
@@ -4267,7 +4564,7 @@ export async function signUpAccount(input: AuthSignUpRequest): Promise<AuthSessi
     id: string;
     clientId: string;
     loginName: string | null;
-    loginNameEncrypted: string | null;
+    loginNameEncrypted?: string | null;
     sessionToken: string | null;
     sessionExpiresAt: Date | null;
     username: string;
@@ -4275,6 +4572,8 @@ export async function signUpAccount(input: AuthSignUpRequest): Promise<AuthSessi
     status: string;
     isOnline: boolean;
     lastSeenAt: Date | null;
+    ppcMemberScoreRaw?: number | null;
+    ppcMemberLastActiveAt?: Date | null;
   };
   try {
     user = await prisma.user.create({
@@ -4308,6 +4607,8 @@ export async function signUpAccount(input: AuthSignUpRequest): Promise<AuthSessi
         status: true,
         isOnline: true,
         lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
       },
     }) as typeof user;
     markEncryptedLoginColumnsAvailableIfUnknown();
@@ -4339,6 +4640,8 @@ export async function signUpAccount(input: AuthSignUpRequest): Promise<AuthSessi
         status: true,
         isOnline: true,
         lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
       },
     }) as typeof user;
   }
@@ -4391,6 +4694,8 @@ export async function signInAccount(input: AuthSignInRequest): Promise<AuthSessi
         status: true,
         isOnline: true,
         lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
       },
     });
     markEncryptedLoginColumnsAvailableIfUnknown();
@@ -4412,6 +4717,8 @@ export async function signInAccount(input: AuthSignInRequest): Promise<AuthSessi
         status: true,
         isOnline: true,
         lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
       },
     });
     existing = legacyExisting
@@ -4423,7 +4730,19 @@ export async function signInAccount(input: AuthSignInRequest): Promise<AuthSessi
       : null;
   }
 
-  assert(existing, "Login fehlgeschlagen", 401);
+  if (!existing) {
+    const hasAnyAccount = await prisma.user.count({
+      where: {
+        passwordHash: {
+          not: null,
+        },
+      },
+    });
+    if (hasAnyAccount === 0) {
+      throw new AppError("Es existiert noch kein Konto. Bitte zuerst registrieren.", 401);
+    }
+    throw new AppError("Login fehlgeschlagen", 401);
+  }
   assert(existing.passwordHash, "Login fehlgeschlagen", 401);
   assert(verifyPassword(input.password, existing.passwordHash), "Login fehlgeschlagen", 401);
 
@@ -4438,7 +4757,7 @@ export async function signInAccount(input: AuthSignInRequest): Promise<AuthSessi
     id: string;
     clientId: string;
     loginName: string | null;
-    loginNameEncrypted: string | null;
+    loginNameEncrypted?: string | null;
     sessionToken: string | null;
     sessionExpiresAt: Date | null;
     username: string;
@@ -4446,6 +4765,8 @@ export async function signInAccount(input: AuthSignInRequest): Promise<AuthSessi
     status: string;
     isOnline: boolean;
     lastSeenAt: Date | null;
+    ppcMemberScoreRaw?: number | null;
+    ppcMemberLastActiveAt?: Date | null;
   };
   try {
     user = await prisma.user.update({
@@ -4476,6 +4797,8 @@ export async function signInAccount(input: AuthSignInRequest): Promise<AuthSessi
         status: true,
         isOnline: true,
         lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
       },
     }) as typeof user;
     if (supportsEncryptedLoginNameColumns) {
@@ -4505,6 +4828,8 @@ export async function signInAccount(input: AuthSignInRequest): Promise<AuthSessi
         status: true,
         isOnline: true,
         lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
       },
     }) as typeof user;
   }
@@ -4551,6 +4876,8 @@ export async function restoreSession(input: LoginRequest): Promise<LoginResponse
         status: true,
         isOnline: true,
         lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
       },
     });
     markEncryptedLoginColumnsAvailableIfUnknown();
@@ -4576,6 +4903,8 @@ export async function restoreSession(input: LoginRequest): Promise<LoginResponse
         status: true,
         isOnline: true,
         lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
       },
     });
     user = legacyUser
@@ -4617,6 +4946,8 @@ export async function restoreSession(input: LoginRequest): Promise<LoginResponse
         status: true,
         isOnline: true,
         lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
         sessionToken: true,
         sessionExpiresAt: true,
       },
@@ -4644,6 +4975,8 @@ export async function restoreSession(input: LoginRequest): Promise<LoginResponse
         status: true,
         isOnline: true,
         lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
         sessionToken: true,
         sessionExpiresAt: true,
       },
@@ -4712,6 +5045,8 @@ async function loginUserLegacy(input: {
       status: true,
       isOnline: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
 
@@ -4755,6 +5090,227 @@ export async function signOutAccount(input: { clientId: string }): Promise<void>
   });
 }
 
+export async function updateOwnAccount(input: UpdateOwnAccountRequest): Promise<AuthSessionDTO> {
+  const nextLoginName = input.newLoginName ? normalizeLoginName(input.newLoginName) : undefined;
+  const nextPassword = input.newPassword?.trim();
+  assert(nextLoginName || nextPassword, "Entweder newLoginName oder newPassword ist erforderlich", 400);
+
+  let supportsEncryptedLoginNameColumns = canUseEncryptedLoginColumns();
+  let current: {
+    id: string;
+    clientId: string;
+    loginName: string | null;
+    loginNameEncrypted: string | null;
+    passwordHash: string | null;
+    sessionToken: string | null;
+    sessionExpiresAt: Date | null;
+    username: string;
+    profilePicture: string;
+    status: string;
+    isOnline: boolean;
+    lastSeenAt: Date | null;
+    ppcMemberScoreRaw?: number | null;
+    ppcMemberLastActiveAt?: Date | null;
+  } | null = null;
+
+  if (supportsEncryptedLoginNameColumns) {
+    try {
+      current = await prisma.user.findUnique({
+        where: { clientId: input.clientId },
+        select: {
+          id: true,
+          clientId: true,
+          loginName: true,
+          loginNameEncrypted: true,
+          passwordHash: true,
+          sessionToken: true,
+          sessionExpiresAt: true,
+          username: true,
+          profilePicture: true,
+          status: true,
+          isOnline: true,
+          lastSeenAt: true,
+          ppcMemberScoreRaw: true,
+          ppcMemberLastActiveAt: true,
+        },
+      });
+      markEncryptedLoginColumnsAvailableIfUnknown();
+    } catch (error) {
+      if (!isMissingColumnError(error)) throw error;
+      supportsEncryptedLoginNameColumns = false;
+      markEncryptedLoginColumnsUnavailable();
+    }
+  }
+
+  if (!supportsEncryptedLoginNameColumns) {
+    const legacyCurrent = await prisma.user.findUnique({
+      where: { clientId: input.clientId },
+      select: {
+        id: true,
+        clientId: true,
+        loginName: true,
+        passwordHash: true,
+        sessionToken: true,
+        sessionExpiresAt: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+        ppcMemberScoreRaw: true,
+        ppcMemberLastActiveAt: true,
+      },
+    });
+    current = legacyCurrent
+      ? {
+        ...legacyCurrent,
+        loginNameEncrypted: null,
+      }
+      : null;
+  }
+
+  assert(current, "Nutzersitzung nicht gefunden. Bitte erneut anmelden.", 401);
+
+  const currentLoginName = current.loginNameEncrypted
+    ? decryptLoginName(current.loginNameEncrypted)
+    : current.loginName ? normalizeLoginName(current.loginName) : null;
+  const hasAccountPassword = Boolean(current.passwordHash && currentLoginName);
+  assert(hasAccountPassword, "Für diesen Nutzer ist kein Konto-Passwort hinterlegt.", 400);
+  assert(verifyPassword(input.currentPassword, current.passwordHash!), "Aktuelles Passwort ist falsch.", 401);
+
+  const shouldChangeLoginName = Boolean(nextLoginName && nextLoginName !== currentLoginName);
+  if (shouldChangeLoginName) {
+    let existing: { id: string } | null = null;
+    if (supportsEncryptedLoginNameColumns) {
+      try {
+        existing = await prisma.user.findFirst({
+          where: {
+            id: { not: current.id },
+            OR: [
+              { loginNameLookup: hashLoginNameLookup(nextLoginName as string) },
+              { loginName: nextLoginName },
+            ],
+          },
+          select: { id: true },
+        });
+        markEncryptedLoginColumnsAvailableIfUnknown();
+      } catch (error) {
+        if (!isMissingColumnError(error)) throw error;
+        supportsEncryptedLoginNameColumns = false;
+        markEncryptedLoginColumnsUnavailable();
+      }
+    }
+
+    if (!supportsEncryptedLoginNameColumns) {
+      existing = await prisma.user.findFirst({
+        where: {
+          id: { not: current.id },
+          loginName: nextLoginName,
+        },
+        select: { id: true },
+      });
+    }
+
+    assert(!existing, "Dieser Login-Name ist bereits vergeben", 409);
+  }
+
+  const sessionToken = createSessionToken();
+  const sessionExpiresAt = new Date(Date.now() + AUTH_SESSION_WINDOW_MS);
+  const now = new Date();
+  const baseData = {
+    sessionToken,
+    sessionExpiresAt,
+    isOnline: true,
+    status: "",
+    lastSeenAt: now,
+    ...(nextPassword ? { passwordHash: hashPassword(nextPassword) } : {}),
+  };
+
+  let updated: {
+    id: string;
+    clientId: string;
+    loginName: string | null;
+    loginNameEncrypted?: string | null;
+    sessionToken: string | null;
+    sessionExpiresAt: Date | null;
+    username: string;
+    profilePicture: string;
+    status: string;
+    isOnline: boolean;
+    lastSeenAt: Date | null;
+    ppcMemberScoreRaw?: number | null;
+    ppcMemberLastActiveAt?: Date | null;
+  } | null = null;
+
+  if (supportsEncryptedLoginNameColumns) {
+    try {
+      updated = await prisma.user.update({
+        where: { id: current.id },
+        data: {
+          ...baseData,
+          ...(shouldChangeLoginName
+            ? {
+              loginNameEncrypted: encryptLoginName(nextLoginName as string),
+              loginNameLookup: hashLoginNameLookup(nextLoginName as string),
+              loginName: null,
+            }
+            : {}),
+        },
+        select: {
+          id: true,
+          clientId: true,
+          loginName: true,
+          loginNameEncrypted: true,
+          sessionToken: true,
+          sessionExpiresAt: true,
+          username: true,
+          profilePicture: true,
+          status: true,
+          isOnline: true,
+          lastSeenAt: true,
+          ppcMemberScoreRaw: true,
+          ppcMemberLastActiveAt: true,
+        },
+      });
+      markEncryptedLoginColumnsAvailableIfUnknown();
+    } catch (error) {
+      if (!isMissingColumnError(error)) throw error;
+      supportsEncryptedLoginNameColumns = false;
+      markEncryptedLoginColumnsUnavailable();
+    }
+  }
+
+  if (!updated) {
+    updated = await prisma.user.update({
+      where: { id: current.id },
+      data: {
+        ...baseData,
+        ...(shouldChangeLoginName ? { loginName: nextLoginName } : {}),
+      },
+      select: {
+        id: true,
+        clientId: true,
+        loginName: true,
+        sessionToken: true,
+        sessionExpiresAt: true,
+        username: true,
+        profilePicture: true,
+        status: true,
+        isOnline: true,
+        lastSeenAt: true,
+        ppcMemberScoreRaw: true,
+        ppcMemberLastActiveAt: true,
+      },
+    });
+  }
+
+  const dto = mapUser(updated);
+  publish("user.updated", dto);
+  publish("presence.updated", dto);
+
+  return toAuthSessionResponse(updated);
+}
+
 export async function renameUser(input: {
   clientId: string;
   newUsername?: string;
@@ -4772,6 +5328,7 @@ export async function renameUser(input: {
     assert(newUsername.length >= 3, "Benutzername muss mindestens 3 Zeichen lang sein", 400);
     await assertUsernameAllowed(newUsername);
   }
+  const didRename = Boolean(newUsername && currentUser.username !== newUsername);
 
   const user = await prisma.user.update({
     where: { clientId: input.clientId },
@@ -4788,14 +5345,37 @@ export async function renameUser(input: {
       status: true,
       isOnline: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
 
   const dto = mapUser(user);
   publish("user.updated", dto);
 
-  if (newUsername && currentUser.username !== newUsername) {
+  if (didRename) {
     await emitSystemMessage(`${newUsername} ist dem Chat beigetreten`, { authorId: user.id });
+  }
+
+  if (didRename && isPpcMemberEligibleUser(user) && USERNAME_CHANGED_EVENT_TYPE) {
+    const nextUsername = newUsername as string;
+    try {
+      await createBehaviorEvent({
+        userId: currentUser.id,
+        type: USERNAME_CHANGED_EVENT_TYPE,
+        preview: `${currentUser.username} -> ${nextUsername}`,
+        meta: {
+          previousUsername: currentUser.username,
+          nextUsername,
+        },
+      });
+    } catch (error) {
+      if (!isMissingUsernameChangedEnumValueError(error)) {
+        throw error;
+      }
+      usernameChangedEnumValueAvailable = false;
+    }
+    await recomputePpcMemberForUser(currentUser.id);
   }
 
   return dto;
@@ -4813,6 +5393,8 @@ export async function pingPresence(input: { clientId: string }): Promise<UserPre
       status: true,
       isOnline: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
 
@@ -4834,6 +5416,8 @@ export async function setTypingStatus(input: { clientId: string; status: string 
       status: true,
       isOnline: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
 
@@ -4853,6 +5437,8 @@ export async function markUserOffline(input: { clientId: string }): Promise<User
       status: true,
       isOnline: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
   assert(user, "Nutzersitzung nicht gefunden. Bitte erneut anmelden.", 401);
@@ -4868,6 +5454,8 @@ export async function markUserOffline(input: { clientId: string }): Promise<User
       status: true,
       isOnline: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
 
@@ -5015,6 +5603,8 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
     publishTasteUpdated(user.id, "message");
   }
 
+  await recomputePpcMemberForUser(user.id);
+
   await queueTaggingForCreatedMessage({
     messageId: created.id,
     username: user.username,
@@ -5131,6 +5721,7 @@ export async function votePoll(input: {
     } as Prisma.InputJsonValue,
   });
   publishTasteUpdated(user.id, "poll");
+  await recomputePpcMemberForUser(user.id);
   return dto;
 }
 
@@ -5206,6 +5797,7 @@ export async function extendPoll(input: {
     } as Prisma.InputJsonValue,
   });
   publishTasteUpdated(user.id, "poll");
+  await recomputePpcMemberForUser(user.id);
   return dto;
 }
 
@@ -5349,11 +5941,13 @@ export async function reactToMessage(input: {
 
   await recomputeTasteProfileForUser(user.id);
   publishTasteUpdated(user.id, "reaction");
+  await recomputePpcMemberForUser(user.id);
   if (messageAuthorId) {
     await recomputeTasteProfileForUser(messageAuthorId);
     if (messageAuthorId !== user.id) {
       publishTasteUpdated(messageAuthorId, "reaction");
     }
+    await recomputePpcMemberForUser(messageAuthorId);
   }
 
   return dto;
@@ -5861,6 +6455,7 @@ async function getTasteWindowStats(input: {
 export async function getTasteProfileDetailed(input: { clientId: string }): Promise<TasteProfileDetailedDTO> {
   const user = await getUserByClientId(input.clientId);
   await cleanupExpiredBehaviorEvents();
+  const eligible = isPpcMemberEligibleUser(user);
 
   const windows = await Promise.all(
     TASTE_WINDOWS.map(async (windowConfig) => {
@@ -5878,9 +6473,35 @@ export async function getTasteProfileDetailed(input: { clientId: string }): Prom
     select: { createdAt: true },
   });
 
+  const memberData = eligible
+    ? await getPpcMemberBreakdown(user.id)
+    : {
+      breakdown: {
+        messagesCreated: 0,
+        reactionsGiven: 0,
+        reactionsReceived: 0,
+        aiMentions: 0,
+        pollsCreated: 0,
+        pollsExtended: 0,
+        pollVotes: 0,
+        taggingCompleted: 0,
+        usernameChanges: 0,
+        rawScore: 0,
+      },
+      rawScore: 0,
+      lastActiveAt: null as Date | null,
+    };
+
   return {
     userId: user.id,
     generatedAt: new Date().toISOString(),
+    member: eligible
+      ? buildMemberProgress({
+        rawScore: user.ppcMemberScoreRaw || memberData.rawScore,
+        lastActiveAt: user.ppcMemberLastActiveAt || memberData.lastActiveAt,
+      })
+      : undefined,
+    memberBreakdown: memberData.breakdown,
     windows: Object.fromEntries(windows) as Record<TasteWindowKey, TasteProfileDetailedDTO["windows"][TasteWindowKey]>,
     transparency: {
       eventRetentionDays: BEHAVIOR_EVENT_RETENTION_DAYS,
@@ -5891,7 +6512,56 @@ export async function getTasteProfileDetailed(input: { clientId: string }): Prom
         "Reaktionen auf deine Beiträge",
         "Umfrage-Aktionen (erstellen, erweitern, abstimmen)",
         "KI-Mentions in deinen Nachrichten",
+        "Anzeigename-Änderungen",
       ],
+    },
+  };
+}
+
+export async function getPublicUserProfile(input: {
+  viewerClientId: string;
+  targetClientId: string;
+}): Promise<PublicUserProfileDTO> {
+  await getUserByClientId(input.viewerClientId);
+
+  const targetUser = await prisma.user.findUnique({
+    where: { clientId: input.targetClientId },
+    select: {
+      id: true,
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      status: true,
+      isOnline: true,
+      lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
+    },
+  });
+  assert(targetUser, "Profil nicht gefunden.", 404);
+
+  const fullStats = await getTasteWindowStats({
+    userId: targetUser.id,
+    windowStart: null,
+  });
+  const presence = mapUser(targetUser);
+
+  return {
+    userId: presence.id,
+    clientId: presence.clientId,
+    username: presence.username,
+    profilePicture: presence.profilePicture,
+    status: presence.status,
+    isOnline: presence.isOnline,
+    lastSeenAt: presence.lastSeenAt,
+    member: presence.member,
+    stats: {
+      postsTotal: fullStats.activity.postsTotal,
+      reactionsGiven: fullStats.reactions.givenTotal,
+      reactionsReceived: fullStats.reactions.receivedTotal,
+      pollsCreated: fullStats.activity.pollsCreated,
+      pollVotes: fullStats.activity.pollVotesGiven,
+      activeDays: fullStats.activity.activeDays,
     },
   };
 }
@@ -6279,6 +6949,8 @@ export async function adminResetUserPassword(input: {
       status: true,
       isOnline: true,
       lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
     },
   });
 

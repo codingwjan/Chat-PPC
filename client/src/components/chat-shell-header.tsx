@@ -12,7 +12,6 @@ interface ChatShellHeaderProps {
   onOpenProfileEditor: () => void;
   onOpenSidebar: () => void;
   onOpenMedia: () => void;
-  onOpenTasteProfile: () => void;
 }
 
 export function ChatShellHeader({
@@ -24,7 +23,6 @@ export function ChatShellHeader({
   onOpenProfileEditor,
   onOpenSidebar,
   onOpenMedia,
-  onOpenTasteProfile,
 }: ChatShellHeaderProps) {
   return (
     <header className="sticky top-0 z-30 flex items-center gap-x-4 border-b border-slate-200 bg-white/90 px-4 py-3 backdrop-blur sm:px-6 lg:bg-white/75">
@@ -62,14 +60,6 @@ export function ChatShellHeader({
         </div>
         <p className="truncate text-xs text-slate-500 sm:text-sm">{subtitle}</p>
       </div>
-
-      <button
-        type="button"
-        onClick={onOpenTasteProfile}
-        className="rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-xs ring-1 ring-inset ring-slate-300 hover:bg-slate-50"
-      >
-        Taste Profile & Stats
-      </button>
 
       <button
         type="button"

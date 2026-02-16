@@ -15,7 +15,8 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "deploy:vercel": "prisma generate && prisma migrate deploy && next build --webpack",
     "import:legacy": "tsx scripts/import-legacy.ts",
-    "media:migrate-inline": "tsx scripts/migrate-inline-media-to-blob.ts"
+    "media:migrate-inline": "tsx scripts/migrate-inline-media-to-blob.ts",
+    "ppc-member:backfill": "tsx scripts/backfill-ppc-member-score.ts"
   },
   "dependencies": {
     "@headlessui/react": "^2.2.9",

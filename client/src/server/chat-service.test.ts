@@ -16,10 +16,12 @@ const prismaMock = vi.hoisted(() => ({
   },
   message: {
     findUnique: vi.fn(),
+    findFirst: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
     updateMany: vi.fn(),
     findMany: vi.fn(),
+    count: vi.fn(),
     upsert: vi.fn(),
   },
   pollChoiceVote: {
@@ -60,6 +62,7 @@ const prismaMock = vi.hoisted(() => ({
   },
   userBehaviorEvent: {
     create: vi.fn(),
+    groupBy: vi.fn(),
     findMany: vi.fn(),
     findFirst: vi.fn(),
     deleteMany: vi.fn(),
@@ -85,18 +88,21 @@ import {
   createMessage,
   extendPoll,
   getChatBackground,
+  getPublicUserProfile,
   getTasteProfileDetailed,
   getTasteProfileEvents,
   loginUser,
   markUserOffline,
   processTaggingQueue,
   processAiQueue,
+  recomputePpcMemberForUser,
   pingPresence,
   reactToMessage,
   renameUser,
   restoreSession,
   signInAccount,
   setChatBackground,
+  updateOwnAccount,
   votePoll,
 } from "@/server/chat-service";
 
@@ -194,8 +200,10 @@ describe("chat service", () => {
     });
     prismaMock.message.create.mockResolvedValue(baseMessage());
     prismaMock.message.findUnique.mockResolvedValue(null);
+    prismaMock.message.findFirst.mockResolvedValue(null);
     prismaMock.message.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.message.findMany.mockResolvedValue([]);
+    prismaMock.message.count.mockResolvedValue(0);
     prismaMock.pollChoiceVote.findMany.mockResolvedValue([]);
     prismaMock.pollChoiceVote.createMany.mockResolvedValue({ count: 1 });
     prismaMock.pollChoiceVote.deleteMany.mockResolvedValue({ count: 0 });
@@ -260,6 +268,7 @@ describe("chat service", () => {
       createdAt: new Date("2026-02-10T10:00:00.000Z"),
       expiresAt: new Date("2026-08-10T10:00:00.000Z"),
     });
+    prismaMock.userBehaviorEvent.groupBy.mockResolvedValue([]);
     prismaMock.userBehaviorEvent.findMany.mockResolvedValue([]);
     prismaMock.userBehaviorEvent.findFirst.mockResolvedValue(null);
     prismaMock.userBehaviorEvent.deleteMany.mockResolvedValue({ count: 0 });
@@ -693,6 +702,226 @@ Abstimmen und begründen.
     );
   });
 
+  it("rejects own-account security update when current password is wrong", async () => {
+    const encrypted = encryptLoginName("alice.login");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: "alice.login",
+      loginNameEncrypted: encrypted,
+      passwordHash: makePasswordHash("correctpass123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+
+    await expect(updateOwnAccount({
+      clientId: "client-1",
+      currentPassword: "wrongpass123",
+      newPassword: "newsecure123",
+    })).rejects.toThrow("Aktuelles Passwort ist falsch.");
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects own-account security update when login-name is already used", async () => {
+    const encrypted = encryptLoginName("alice.login");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: "alice.login",
+      loginNameEncrypted: encrypted,
+      passwordHash: makePasswordHash("correctpass123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.findFirst.mockResolvedValueOnce({ id: "other-user" });
+
+    await expect(updateOwnAccount({
+      clientId: "client-1",
+      currentPassword: "correctpass123",
+      newLoginName: "alice.new",
+    })).rejects.toThrow("Dieser Login-Name ist bereits vergeben");
+  });
+
+  it("updates own-account login-name only", async () => {
+    const encryptedCurrent = encryptLoginName("alice.login");
+    const encryptedNext = encryptLoginName("alice.new");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: "alice.login",
+      loginNameEncrypted: encryptedCurrent,
+      passwordHash: makePasswordHash("correctpass123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.findFirst.mockResolvedValueOnce(null);
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: null,
+      loginNameEncrypted: encryptedNext,
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    const result = await updateOwnAccount({
+      clientId: "client-1",
+      currentPassword: "correctpass123",
+      newLoginName: "alice.new",
+    });
+
+    expect(result.loginName).toBe("alice.new");
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          loginName: null,
+          loginNameEncrypted: expect.any(String),
+          loginNameLookup: expect.any(String),
+        }),
+      }),
+    );
+  });
+
+  it("updates own-account password only", async () => {
+    const encryptedCurrent = encryptLoginName("alice.login");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: "alice.login",
+      loginNameEncrypted: encryptedCurrent,
+      passwordHash: makePasswordHash("correctpass123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: null,
+      loginNameEncrypted: encryptedCurrent,
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    const result = await updateOwnAccount({
+      clientId: "client-1",
+      currentPassword: "correctpass123",
+      newPassword: "newsecure123",
+    });
+
+    expect(result.loginName).toBe("alice.login");
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          passwordHash: expect.any(String),
+        }),
+      }),
+    );
+  });
+
+  it("updates own-account login-name and password together", async () => {
+    const encryptedCurrent = encryptLoginName("alice.login");
+    const encryptedNext = encryptLoginName("alice.next");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: "alice.login",
+      loginNameEncrypted: encryptedCurrent,
+      passwordHash: makePasswordHash("correctpass123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.findFirst.mockResolvedValueOnce(null);
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: null,
+      loginNameEncrypted: encryptedNext,
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    const result = await updateOwnAccount({
+      clientId: "client-1",
+      currentPassword: "correctpass123",
+      newLoginName: "alice.next",
+      newPassword: "newsecure123",
+    });
+
+    expect(result.loginName).toBe("alice.next");
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          loginNameEncrypted: expect.any(String),
+          loginNameLookup: expect.any(String),
+          passwordHash: expect.any(String),
+        }),
+      }),
+    );
+  });
+
+  it("rejects own-account security update for passwordless legacy users", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "legacy-user",
+      clientId: "client-legacy",
+      loginName: "legacy-client-legacy",
+      loginNameEncrypted: null,
+      passwordHash: null,
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Legacy User",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+
+    await expect(updateOwnAccount({
+      clientId: "client-legacy",
+      currentPassword: "doesnotmatter123",
+      newPassword: "newsecure123",
+    })).rejects.toThrow("Für diesen Nutzer ist kein Konto-Passwort hinterlegt.");
+  });
+
   it("enables developer mode when unlock code is used as username", async () => {
     const previousUnlock = process.env.CHAT_DEV_UNLOCK_CODE;
     const previousSecret = process.env.CHAT_DEV_TOKEN_SECRET;
@@ -968,6 +1197,14 @@ Abstimmen und begründen.
           content: "newname ist dem Chat beigetreten",
           authorName: "System",
           authorId: "user-id",
+        }),
+      }),
+    );
+    expect(prismaMock.userBehaviorEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "USERNAME_CHANGED",
+          userId: "user-id",
         }),
       }),
     );
@@ -3422,6 +3659,55 @@ Alles klar, wir machen das sauber.
     expect(result.nextCursor).toBe("2026-02-11T10:00:00.000Z");
   });
 
+  it("liefert sanitisiertes öffentliches Nutzerprofil", async () => {
+    prismaMock.user.findUnique
+      .mockResolvedValueOnce({
+        id: "viewer-id",
+        clientId: "viewer-1",
+        username: "viewer",
+        profilePicture: "https://example.com/viewer.png",
+        status: "",
+        isOnline: true,
+        lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+        ppcMemberScoreRaw: 10,
+        ppcMemberLastActiveAt: new Date("2026-02-10T10:00:00.000Z"),
+      })
+      .mockResolvedValueOnce({
+        id: "target-id",
+        clientId: "target-1",
+        username: "alice",
+        profilePicture: "https://example.com/alice.png",
+        status: "online",
+        isOnline: true,
+        lastSeenAt: new Date("2026-02-12T11:00:00.000Z"),
+        ppcMemberScoreRaw: 120,
+        ppcMemberLastActiveAt: new Date("2026-02-12T11:00:00.000Z"),
+      });
+    prismaMock.message.findMany.mockResolvedValue([
+      {
+        id: "msg-1",
+        type: MessageType.MESSAGE,
+        content: "Hallo",
+        createdAt: new Date("2026-02-10T10:00:00.000Z"),
+        taggingStatus: "COMPLETED",
+        taggingPayload: null,
+      },
+    ]);
+    prismaMock.messageReaction.findMany.mockResolvedValue([]);
+    prismaMock.userBehaviorEvent.findMany.mockResolvedValue([]);
+    prismaMock.pollChoiceVote.findMany.mockResolvedValue([]);
+
+    const result = await getPublicUserProfile({
+      viewerClientId: "viewer-1",
+      targetClientId: "target-1",
+    });
+
+    expect(result.username).toBe("alice");
+    expect(result.stats.postsTotal).toBe(1);
+    expect(result.stats).not.toHaveProperty("tagging");
+    expect(result.stats).not.toHaveProperty("interests");
+  });
+
   it('emits "hat den Chat verlassen" when stale users are cleaned', async () => {
     prismaMock.user.update.mockResolvedValue({
       id: "user-id",
@@ -3498,6 +3784,176 @@ Alles klar, wir machen das sauber.
         data: expect.objectContaining({
           content: "tester hat den Chat verlassen",
           authorName: "System",
+        }),
+      }),
+    );
+  });
+
+  it("recomputes PPC Score rank and emits rank-up system message", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+      ppcMemberScoreRaw: 295,
+      ppcMemberLastActiveAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.userBehaviorEvent.groupBy.mockResolvedValueOnce([
+      { type: "MESSAGE_CREATED", _count: { type: 80 } },
+    ]);
+    prismaMock.messageReaction.count
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(0);
+    prismaMock.userBehaviorEvent.findFirst.mockResolvedValueOnce({
+      createdAt: new Date("2026-02-11T10:00:00.000Z"),
+    });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-11T10:00:00.000Z"),
+      ppcMemberScoreRaw: 400,
+      ppcMemberLastActiveAt: new Date("2026-02-11T10:00:00.000Z"),
+    });
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({
+        id: "sys-rank-up-1",
+        content: "tester ist auf Silber aufgestiegen · PPC Score 370",
+        authorName: "System",
+      }),
+    );
+
+    await recomputePpcMemberForUser("user-id");
+
+    expect(prismaMock.message.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          content: expect.stringMatching(/ist auf Silber aufgestiegen.*PPC Score/i),
+          authorName: "System",
+          authorId: "user-id",
+        }),
+      }),
+    );
+  });
+
+  it("falls back when USERNAME_CHANGED enum is missing in DB for latest-activity query", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-11T10:00:00.000Z"),
+      ppcMemberScoreRaw: 0,
+      ppcMemberLastActiveAt: null,
+    });
+    prismaMock.userBehaviorEvent.groupBy.mockResolvedValueOnce([]);
+    prismaMock.messageReaction.count
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(0);
+    prismaMock.userBehaviorEvent.findFirst
+      .mockRejectedValueOnce(new Error('Invalid input value for enum "UserBehaviorEventType": "USERNAME_CHANGED"'))
+      .mockResolvedValueOnce(null);
+    prismaMock.message.count.mockResolvedValueOnce(0);
+    prismaMock.message.findFirst.mockResolvedValueOnce(null);
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-11T10:00:00.000Z"),
+      ppcMemberScoreRaw: 0,
+      ppcMemberLastActiveAt: null,
+    });
+
+    await expect(recomputePpcMemberForUser("user-id", { emitRankUp: false })).resolves.toBeUndefined();
+    expect(prismaMock.userBehaviorEvent.findFirst).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts display-name changes from system join messages as fallback", async () => {
+    const renameAt = new Date("2026-02-16T13:10:47.816Z");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-16T13:11:00.000Z"),
+      ppcMemberScoreRaw: 0,
+      ppcMemberLastActiveAt: null,
+    });
+    prismaMock.userBehaviorEvent.groupBy.mockResolvedValueOnce([]);
+    prismaMock.messageReaction.count
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(0);
+    prismaMock.userBehaviorEvent.findFirst.mockResolvedValueOnce(null);
+    prismaMock.message.count.mockResolvedValueOnce(4);
+    prismaMock.message.findFirst.mockResolvedValueOnce({ createdAt: renameAt });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-16T13:11:00.000Z"),
+      ppcMemberScoreRaw: 15,
+      ppcMemberLastActiveAt: renameAt,
+    });
+
+    await recomputePpcMemberForUser("user-id", { emitRankUp: false });
+
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          ppcMemberScoreRaw: 15,
+          ppcMemberLastActiveAt: renameAt,
+        }),
+      }),
+    );
+  });
+
+  it("resets PPC Member values for excluded users", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-system-1",
+      clientId: "chatgpt-client",
+      username: "ChatGPT",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+      ppcMemberScoreRaw: 999,
+      ppcMemberLastActiveAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "user-system-1",
+      clientId: "chatgpt-client",
+      username: "ChatGPT",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+      ppcMemberScoreRaw: 0,
+      ppcMemberLastActiveAt: null,
+    });
+
+    await recomputePpcMemberForUser("user-system-1");
+
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          ppcMemberScoreRaw: 0,
+          ppcMemberLastActiveAt: null,
         }),
       }),
     );

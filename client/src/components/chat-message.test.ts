@@ -83,6 +83,18 @@ describe("ChatMessage rendering", () => {
     expect(html).toContain("BIG BRAIN");
   });
 
+  it("zeigt Rank-Up-Systemnachrichten und Reaktionen", () => {
+    const systemMessage = createBaseMessage({
+      username: "System",
+      message: "alice ist auf Gold aufgestiegen · PPC Score 901",
+    });
+
+    const html = renderMessage(systemMessage, { withReactions: true });
+    expect(html).toContain("alice ist auf Gold aufgestiegen");
+    expect(html).toContain("Like");
+    expect(html).toContain("BIG BRAIN");
+  });
+
   it("zeigt unter Join-Systemnachrichten keine Reaktions-Zusammenfassung", () => {
     const systemMessage = createBaseMessage({
       username: "System",
@@ -127,6 +139,24 @@ describe("ChatMessage rendering", () => {
     });
     const html = renderMessage(aiReply);
     expect(html).toContain("justify-end");
+  });
+
+  it("zeigt Rank und Score neben dem Username", () => {
+    const memberMessage = createBaseMessage({
+      username: "alice",
+      member: {
+        brand: "PPC Score",
+        score: 321,
+        rank: "SILBER",
+        nextRank: "GOLD",
+        pointsToNext: 579,
+        lastActiveAt: "2026-02-14T18:00:00.000Z",
+      },
+    });
+
+    const html = renderMessage(memberMessage);
+    expect(html).toContain("Silber");
+    expect(html).toContain("PPC Score 321");
   });
 
   it("zeigt Reply-Kontext bei gethreadeten Umfragen", () => {
