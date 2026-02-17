@@ -1,7 +1,9 @@
 "use client";
 /* eslint-disable @next/next/no-img-element */
 
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
+import { Bars3Icon } from "@heroicons/react/24/outline";
 import {
   memo,
   useCallback,
@@ -9,23 +11,21 @@ import {
   useMemo,
   useRef,
   useState,
+  useTransition,
   type ChangeEvent,
   type ClipboardEvent,
   type DragEvent,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
+import { createPortal } from "react-dom";
 import { ChatComposer, type ComposerMode } from "@/components/chat-composer";
 import { ChatMessage } from "@/components/chat-message";
-import { ChatShellHeader } from "@/components/chat-shell-header";
+import { MemberProgressInline } from "@/components/member-progress-inline";
 import { ChatShellSidebar } from "@/components/chat-shell-sidebar";
-import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
 import { UiToast } from "@/components/ui-toast";
 import { hasLeadingAiTag, toggleLeadingAiTag } from "@/lib/composer-ai-tags";
 import { apiJson } from "@/lib/http";
-import {
-  detectBrowserNotificationCapability,
-  type NotificationCapability,
-} from "@/lib/notification-capability";
+import { MEMBER_RANK_STEPS, PPC_MEMBER_POINT_RULES } from "@/lib/member-progress";
 import {
   clearSession,
   getDefaultProfilePicture,
@@ -35,9 +35,8 @@ import {
 } from "@/lib/session";
 import type {
   AdminActionRequest,
-  AdminActionResponse,
-  AdminOverviewDTO,
   AiStatusDTO,
+  AuthSessionDTO,
   ChatBackgroundDTO,
   CreateMessageRequest,
   ExtendPollRequest,
@@ -46,8 +45,17 @@ import type {
   MediaPageDTO,
   MessageDTO,
   MessagePageDTO,
+  PublicUserProfileDTO,
+  PublicUserProfileStatsDTO,
+  ReactMessageRequest,
+  ReactionType,
   RenameUserRequest,
   SnapshotDTO,
+  TasteProfileDetailedDTO,
+  TasteProfileEventDTO,
+  TasteProfileEventPageDTO,
+  TasteWindowKey,
+  UpdateOwnAccountRequest,
   UserPresenceDTO,
   VotePollRequest,
 } from "@/lib/types";
@@ -63,19 +71,95 @@ interface UploadedDraftImage {
   label: string;
 }
 
-const MESSAGE_PAGE_SIZE = 12;
+function OverlayDialogSkeleton() {
+  return (
+    <div className="fixed inset-0 z-[68] grid place-items-center bg-slate-900/45 backdrop-blur-sm p-3">
+      <div className="glass-panel-strong w-full max-w-2xl rounded-2xl p-6 animate-pulse">
+        <div className="h-5 w-40 rounded bg-slate-200/70" />
+        <div className="mt-3 h-4 w-64 rounded bg-slate-200/70" />
+        <div className="mt-6 space-y-3">
+          <div className="h-10 rounded-xl bg-slate-200/70" />
+          <div className="h-10 rounded-xl bg-slate-200/70" />
+          <div className="h-24 rounded-xl bg-slate-200/70" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MemberDrawerSkeleton() {
+  return (
+    <div className="fixed inset-0 z-[75] bg-slate-900/45 backdrop-blur-sm">
+      <div className="absolute inset-y-0 right-0 w-full max-w-xl p-2 sm:p-4">
+        <div className="glass-panel-strong h-full rounded-2xl p-5 animate-pulse">
+          <div className="h-5 w-28 rounded bg-slate-200/70" />
+          <div className="mt-6 h-28 rounded-2xl bg-slate-200/70" />
+          <div className="mt-4 space-y-3">
+            <div className="h-4 w-2/3 rounded bg-slate-200/70" />
+            <div className="h-4 w-1/2 rounded bg-slate-200/70" />
+            <div className="h-24 rounded-xl bg-slate-200/70" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ProfileCropSkeleton() {
+  return (
+    <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-900/55 p-4">
+      <div className="glass-panel-strong w-full max-w-xl rounded-2xl p-5 animate-pulse">
+        <div className="h-5 w-44 rounded bg-slate-200/70" />
+        <div className="mt-4 aspect-square w-full rounded-2xl bg-slate-200/70" />
+        <div className="mt-4 h-10 w-40 rounded-xl bg-slate-200/70" />
+      </div>
+    </div>
+  );
+}
+
+const AppOverlayDialog = dynamic(
+  () => import("@/components/app-overlay-dialog").then((module) => module.AppOverlayDialog),
+  {
+    ssr: false,
+    loading: () => <OverlayDialogSkeleton />,
+  },
+);
+
+const MemberProfileDrawer = dynamic(
+  () => import("@/components/member-profile-drawer").then((module) => module.MemberProfileDrawer),
+  {
+    ssr: false,
+    loading: () => <MemberDrawerSkeleton />,
+  },
+);
+
+const ProfileImageCropModal = dynamic(
+  () => import("@/components/profile-image-crop-modal").then((module) => module.ProfileImageCropModal),
+  {
+    ssr: false,
+    loading: () => <ProfileCropSkeleton />,
+  },
+);
+
+type IdleWindow = Window & {
+  requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+  cancelIdleCallback?: (handle: number) => void;
+};
+
+const MESSAGE_PAGE_SIZE = 36;
 const SNAPSHOT_LIMIT = 40;
 const RECONCILE_INTERVAL_MS = 30_000;
 const PRESENCE_PING_INTERVAL_MS = 20_000;
-const AUTO_SCROLL_NEAR_BOTTOM_PX = 600;
-const TOP_LOAD_TRIGGER_PX = 120;
+const AUTO_SCROLL_NEAR_BOTTOM_PX = 420;
+const TOP_LOAD_TRIGGER_PX = 160;
+const TOP_LOAD_COOLDOWN_MS = 750;
 const ONBOARDING_KEY = "chatppc.onboarding.v1";
-const MAX_MESSAGE_INPUT_LINES = 10;
 const MAX_VISIBLE_MESSAGES = Number.POSITIVE_INFINITY;
-const MESSAGE_RENDER_WINDOW = 40;
-const MESSAGE_RENDER_CHUNK = 20;
+const MESSAGE_RENDER_WINDOW = Number.POSITIVE_INFINITY;
+const MESSAGE_RENDER_CHUNK = 60;
 const SUPPORTED_CHAT_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
 const SUPPORTED_PROFILE_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const LOGIN_NAME_PATTERN = /^[a-z0-9._-]{3,32}$/;
 const MEDIA_PAGE_SIZE = 3;
 const MEDIA_CACHE_KEY = "chatppc.media.cache.v1";
 const MEDIA_CACHE_TTL_MS = 5 * 60 * 1_000;
@@ -83,17 +167,48 @@ const DEFAULT_COMPOSER_HEIGHT_PX = 208;
 const COMPOSER_BOTTOM_GAP_PX = 16;
 const LAST_MESSAGE_EXTRA_CLEARANCE_PX = 28;
 const HARD_BOTTOM_ATTACH_PX = 8;
+const MANUAL_DETACH_DELTA_PX = 24;
+const REACTION_OPTIONS: Array<{ reaction: ReactionType; emoji: string; label: string }> = [
+  { reaction: "LIKE", emoji: "❤️", label: "Like" },
+  { reaction: "LOL", emoji: "😂", label: "LOL" },
+  { reaction: "FIRE", emoji: "🔥", label: "FIRE" },
+  { reaction: "BASED", emoji: "🫡", label: "BASED" },
+  { reaction: "WTF", emoji: "💀", label: "WTF" },
+  { reaction: "BIG_BRAIN", emoji: "🧠", label: "BIG BRAIN" },
+];
+const AI_ASSISTANT_USERNAMES = new Set(["chatgpt", "grok"]);
+const AI_CLIENT_IDS = new Set(["chatgpt", "grok"]);
+const REACTION_SCORE_BY_TYPE: Record<ReactionType, number> = {
+  LIKE: 1.0,
+  LOL: 1.4,
+  FIRE: 1.2,
+  BASED: 1.1,
+  WTF: 1.0,
+  BIG_BRAIN: 1.2,
+};
 
 function hasChatGptMention(message: string): boolean {
   return /(^|\s)@chatgpt\b/i.test(message);
 }
 
-function hasGrokMention(message: string): boolean {
-  return /(^|\s)@grok\b/i.test(message);
+function aiTagForReplyMessage(message: MessageDTO): "chatgpt" | "grok" | null {
+  const normalizedUsername = message.username.trim().toLowerCase();
+  if (normalizedUsername === "chatgpt" || message.authorId === "chatgpt") return "chatgpt";
+  if (normalizedUsername === "grok" || message.authorId === "grok") return "grok";
+  return null;
 }
 
-function hasAiMention(message: string): boolean {
-  return hasChatGptMention(message) || hasGrokMention(message);
+function ensureLeadingAiReplyTag(draft: string, provider: "chatgpt" | "grok"): string {
+  const oppositeProvider = provider === "chatgpt" ? "grok" : "chatgpt";
+  let nextDraft = draft;
+
+  if (hasLeadingAiTag(nextDraft, oppositeProvider)) {
+    nextDraft = toggleLeadingAiTag(nextDraft, oppositeProvider);
+  }
+  if (!hasLeadingAiTag(nextDraft, provider)) {
+    nextDraft = toggleLeadingAiTag(nextDraft, provider);
+  }
+  return nextDraft;
 }
 
 function mergeUser(users: UserPresenceDTO[], next: UserPresenceDTO): UserPresenceDTO[] {
@@ -104,7 +219,11 @@ function mergeUser(users: UserPresenceDTO[], next: UserPresenceDTO): UserPresenc
   return copy;
 }
 
-function mergeMessage(messages: MessageDTO[], next: MessageDTO): MessageDTO[] {
+function mergeMessage(
+  messages: MessageDTO[],
+  next: MessageDTO,
+  options: { preserveViewerReaction?: boolean } = {},
+): MessageDTO[] {
   const index = messages.findIndex((message) => message.id === next.id);
   if (index === -1) {
     return [...messages, next].sort(
@@ -112,12 +231,33 @@ function mergeMessage(messages: MessageDTO[], next: MessageDTO): MessageDTO[] {
     );
   }
   const copy = [...messages];
+  const previous = copy[index];
+  const preserveViewerReaction =
+    Boolean(options.preserveViewerReaction) &&
+    previous?.reactions
+    && next.reactions
+    && next.reactions.viewerReaction === null
+    && previous.reactions.viewerReaction !== null;
+  if (preserveViewerReaction && previous.reactions && next.reactions) {
+    copy[index] = {
+      ...next,
+      reactions: {
+        ...next.reactions,
+        viewerReaction: previous.reactions.viewerReaction,
+      },
+    };
+    return copy;
+  }
   copy[index] = next;
   return copy;
 }
 
-function mergeMessages(messages: MessageDTO[], incoming: MessageDTO[]): MessageDTO[] {
-  return incoming.reduce((current, message) => mergeMessage(current, message), messages);
+function mergeMessages(
+  messages: MessageDTO[],
+  incoming: MessageDTO[],
+  options: { preserveViewerReaction?: boolean } = {},
+): MessageDTO[] {
+  return incoming.reduce((current, message) => mergeMessage(current, message, options), messages);
 }
 
 function limitVisibleMessages(messages: MessageDTO[]): MessageDTO[] {
@@ -146,6 +286,20 @@ function normalizeProfilePictureUrl(value: string | null | undefined, fallback =
   } catch {
     return fallback;
   }
+}
+
+function toSessionState(session: AuthSessionDTO): SessionState {
+  return {
+    id: session.id,
+    clientId: session.clientId,
+    loginName: session.loginName,
+    username: session.username,
+    profilePicture: session.profilePicture || getDefaultProfilePicture(),
+    sessionToken: session.sessionToken,
+    sessionExpiresAt: session.sessionExpiresAt,
+    devMode: session.devMode,
+    devAuthToken: session.devAuthToken,
+  };
 }
 
 function applyOptimisticPollVote(
@@ -218,22 +372,63 @@ function applyOptimisticPollVote(
   return changed ? nextMessages : messages;
 }
 
-function syncProfilePictureForUser(messages: MessageDTO[], user: UserPresenceDTO): MessageDTO[] {
-  const normalizedUserAvatar = normalizeProfilePictureUrl(user.profilePicture);
-  const normalizedUsername = user.username.trim().toLowerCase();
+function applyOptimisticReaction(
+  messages: MessageDTO[],
+  input: {
+    messageId: string;
+    reaction: ReactionType;
+  },
+): MessageDTO[] {
   let changed = false;
-  const nextMessages = messages.map((message) => {
-    const matchesUserByAuthor = Boolean(message.authorId) && message.authorId === user.id;
-    const matchesUserByUsername = message.username.trim().toLowerCase() === normalizedUsername;
-    const matchesUser = matchesUserByAuthor || matchesUserByUsername;
-    const normalizedMessageAvatar = normalizeProfilePictureUrl(message.profilePicture);
 
-    if (!matchesUser || normalizedMessageAvatar === normalizedUserAvatar) {
-      return message;
+  const nextMessages = messages.map((message) => {
+    if (message.id !== input.messageId || !message.reactions) return message;
+
+    const summaryMap = new Map<ReactionType, number>(
+      REACTION_OPTIONS.map((option) => [option.reaction, 0]),
+    );
+    const usersMap = new Map<
+      ReactionType,
+      Array<{ id: string; username: string; profilePicture: string }>
+    >(REACTION_OPTIONS.map((option) => [option.reaction, []]));
+    for (const entry of message.reactions.summary) {
+      summaryMap.set(entry.reaction, entry.count);
+      usersMap.set(entry.reaction, entry.users);
     }
+
+    const currentReaction = message.reactions.viewerReaction;
+    const nextReaction = currentReaction === input.reaction ? null : input.reaction;
+
+    if (currentReaction) {
+      summaryMap.set(currentReaction, Math.max(0, (summaryMap.get(currentReaction) || 0) - 1));
+    }
+    if (nextReaction) {
+      summaryMap.set(nextReaction, (summaryMap.get(nextReaction) || 0) + 1);
+    }
+
+    const summary = REACTION_OPTIONS.map((option) => ({
+      reaction: option.reaction,
+      count: summaryMap.get(option.reaction) || 0,
+      users: usersMap.get(option.reaction) || [],
+    }));
+    const total = summary.reduce((sum, entry) => sum + entry.count, 0);
+    const score = Math.round(
+      summary.reduce((sum, entry) => sum + entry.count * REACTION_SCORE_BY_TYPE[entry.reaction], 0) * 100,
+    ) / 100;
+
     changed = true;
-    return { ...message, profilePicture: normalizedUserAvatar };
+    return {
+      ...message,
+      reactions: {
+        ...message.reactions,
+        viewerReaction: nextReaction,
+        total,
+        score,
+        summary,
+      },
+    };
   });
+
   return changed ? nextMessages : messages;
 }
 
@@ -335,42 +530,38 @@ function formatPresenceStatus(user: UserPresenceDTO): string {
   return "online";
 }
 
-function describeNotificationState(capability: NotificationCapability): string {
-  if (capability.kind === "ios_home_screen_required") {
-    return "Auf iPhone/iPad funktionieren Browser-Benachrichtigungen nur als Home-Bildschirm-App. Nutze Teilen -> Zum Home-Bildschirm.";
-  }
-  if (capability.kind === "insecure_context") {
-    return "Benachrichtigungen sind nur über HTTPS verfügbar. Öffne ChatPPC über eine sichere URL.";
-  }
-  if (capability.kind === "unsupported") {
-    return "Dieser Browser unterstützt Web-Benachrichtigungen nicht.";
-  }
-  if (capability.permission === "denied") {
-    return "Benachrichtigungen sind blockiert. Aktiviere sie in den Browser-Einstellungen und versuche es erneut.";
-  }
-  if (capability.permission === "granted") {
-    return "Desktop-Benachrichtigungen für neue Nachrichten und Beitritte sind aktiviert.";
-  }
-  return "Aktiviere Desktop-Benachrichtigungen für neue Nachrichten und wenn jemand dem Chat beitritt.";
+function toSyntheticPublicProfile(user: UserPresenceDTO): PublicUserProfileDTO {
+  return {
+    userId: user.id,
+    clientId: user.clientId,
+    username: user.username,
+    profilePicture: normalizeProfilePictureUrl(user.profilePicture),
+    status: user.status,
+    isOnline: user.isOnline,
+    lastSeenAt: user.lastSeenAt,
+    member: user.member,
+    stats: {
+      postsTotal: 0,
+      reactionsGiven: 0,
+      reactionsReceived: 0,
+      pollsCreated: 0,
+      pollVotes: 0,
+      activeDays: 0,
+    },
+  };
 }
 
-function notificationButtonLabel(capability: NotificationCapability): string {
-  if (capability.kind === "ios_home_screen_required") return "Home-Bildschirm nötig";
-  if (capability.kind === "insecure_context") return "HTTPS erforderlich";
-  if (capability.kind === "unsupported") return "Nicht unterstützt";
-  if (capability.permission === "granted") return "Benachrichtigungen aktiv";
-  return "Benachrichtigungen aktivieren";
-}
+function isRightAlignedMessage(message: MessageDTO, currentUsername: string, currentUserId?: string): boolean {
+  if (currentUserId && message.authorId === currentUserId) return true;
 
-function isJoinSystemMessage(message: MessageDTO): boolean {
-  if (message.type !== "message" || message.username !== "System") return false;
-  const content = message.message.trim().toLowerCase();
-  return content.endsWith("joined the chat") || content.endsWith("ist dem chat beigetreten");
-}
+  const viewerUsernameNormalized = currentUsername.trim().toLowerCase();
+  if (!viewerUsernameNormalized) return false;
 
-function shouldNotifyMessage(message: MessageDTO): boolean {
-  if (isJoinSystemMessage(message)) return true;
-  return message.type === "message" && message.username !== "System";
+  const authorNameNormalized = message.username.trim().toLowerCase();
+  if (authorNameNormalized === viewerUsernameNormalized) return true;
+
+  return AI_ASSISTANT_USERNAMES.has(authorNameNormalized)
+    && message.oldusername?.trim().toLowerCase() === viewerUsernameNormalized;
 }
 
 function buildDownloadFileName(alt: string): string {
@@ -404,12 +595,15 @@ function createDefaultAiStatus(): AiStatusDTO {
   return {
     chatgpt: "online",
     grok: "online",
+    chatgptModel: "Modell dynamisch (Prompt)",
+    grokModel: "Modell wird geladen…",
     updatedAt: new Date().toISOString(),
   };
 }
 
 interface MessageListProps {
   messages: MessageDTO[];
+  currentUserId?: string;
   currentUsername: string;
   isDeveloperMode: boolean;
   pendingDeliveries: Record<string, true>;
@@ -417,15 +611,18 @@ interface MessageListProps {
   onAnswerDraftChange: (messageId: string, value: string) => void;
   onSubmitAnswer: (messageId: string) => void;
   onVote: (messageId: string, optionIds: string[]) => void;
+  onReact: (messageId: string, reaction: ReactionType) => void;
   onExtendPoll: (message: MessageDTO) => void;
   onDeleteMessage: (messageId: string) => void;
   onStartReply: (message: MessageDTO) => void;
   onOpenLightbox: (url: string, alt?: string) => void;
   onRemixImage: (url: string, alt?: string) => void;
+  onOpenAuthorProfile: (message: MessageDTO) => void;
 }
 
 const MessageList = memo(function MessageList({
   messages,
+  currentUserId,
   currentUsername,
   isDeveloperMode,
   pendingDeliveries,
@@ -433,36 +630,105 @@ const MessageList = memo(function MessageList({
   onAnswerDraftChange,
   onSubmitAnswer,
   onVote,
+  onReact,
   onExtendPoll,
   onDeleteMessage,
   onStartReply,
   onOpenLightbox,
   onRemixImage,
+  onOpenAuthorProfile,
 }: MessageListProps) {
+  const orderedMessages = useMemo(
+    () =>
+      [...messages].sort((a, b) => {
+        const timeDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+        if (timeDiff !== 0) return timeDiff;
+        return a.id.localeCompare(b.id);
+      }),
+    [messages],
+  );
+
+  const threadedEntries = useMemo(() => {
+    const messageById = new Map(orderedMessages.map((message) => [message.id, message] as const));
+
+    const resolveThreadRootId = (message: MessageDTO): string | null => {
+      if (!message.questionId) return null;
+
+      const visited = new Set<string>([message.id]);
+      let currentParentId: string | undefined = message.questionId;
+
+      while (currentParentId) {
+        if (visited.has(currentParentId)) return null;
+        visited.add(currentParentId);
+
+        const parent = messageById.get(currentParentId);
+        if (!parent) return null;
+        if (!parent.questionId) return parent.id;
+        currentParentId = parent.questionId;
+      }
+
+      return null;
+    };
+
+    return orderedMessages.map((message) => {
+      const threadRootId = resolveThreadRootId(message);
+      const isThreadChild = Boolean(threadRootId && threadRootId !== message.id);
+      return {
+        message,
+        threadKey: isThreadChild ? threadRootId : message.id,
+        isThreadChild,
+      };
+    });
+  }, [orderedMessages]);
+
+  const renderMessage = (message: MessageDTO) => {
+    return (
+      <ChatMessage
+        message={message}
+        currentUserId={currentUserId}
+        currentUsername={currentUsername}
+        isDeveloperMode={isDeveloperMode}
+        delivery={
+          pendingDeliveries[message.id] !== undefined
+            ? { status: "sending" }
+            : undefined
+        }
+        answerDraft={answerDrafts[message.id] || ""}
+        onAnswerDraftChange={onAnswerDraftChange}
+        onSubmitAnswer={onSubmitAnswer}
+        onVote={onVote}
+        onReact={onReact}
+        onExtendPoll={onExtendPoll}
+        onDeleteMessage={onDeleteMessage}
+        onStartReply={onStartReply}
+        onOpenLightbox={onOpenLightbox}
+        onRemixImage={onRemixImage}
+        onOpenAuthorProfile={onOpenAuthorProfile}
+      />
+    );
+  };
+
   return (
     <>
-      {messages.map((message) => (
-        <ChatMessage
-          key={message.id}
-          message={message}
-          currentUsername={currentUsername}
-          isDeveloperMode={isDeveloperMode}
-          delivery={
-            pendingDeliveries[message.id] !== undefined
-              ? { status: "sending" }
-              : undefined
-          }
-          answerDraft={answerDrafts[message.id] || ""}
-          onAnswerDraftChange={onAnswerDraftChange}
-          onSubmitAnswer={onSubmitAnswer}
-          onVote={onVote}
-          onExtendPoll={onExtendPoll}
-          onDeleteMessage={onDeleteMessage}
-          onStartReply={onStartReply}
-          onOpenLightbox={onOpenLightbox}
-          onRemixImage={onRemixImage}
-        />
-      ))}
+      {threadedEntries.map((entry, index) => {
+        const previous = threadedEntries[index - 1];
+        const next = threadedEntries[index + 1];
+        const connectsToPrevious = entry.isThreadChild && previous?.threadKey === entry.threadKey;
+        const connectsToNext = entry.isThreadChild && next?.isThreadChild && next.threadKey === entry.threadKey;
+        const showThreadRail = connectsToPrevious || connectsToNext;
+        const railClassName = isRightAlignedMessage(entry.message, currentUsername, currentUserId)
+          ? "mr-2 border-r border-slate-200 pr-2 sm:mr-6 sm:pr-3"
+          : "ml-2 border-l border-slate-200 pl-2 sm:ml-6 sm:pl-3";
+
+        return (
+          <div
+            key={`message-row-${entry.message.id}`}
+            className={showThreadRail ? `min-w-0 space-y-2 ${railClassName}` : "min-w-0 space-y-2"}
+          >
+            {renderMessage(entry.message)}
+          </div>
+        );
+      })}
     </>
   );
 });
@@ -470,19 +736,29 @@ const MessageList = memo(function MessageList({
 interface OnlineUsersListProps {
   users: UserPresenceDTO[];
   avatarSizeClassName: string;
-  onOpenLightbox: (url: string, alt?: string) => void;
+  onOpenMemberProfile: (user: UserPresenceDTO) => void;
 }
 
-const OnlineUsersList = memo(function OnlineUsersList({ users, avatarSizeClassName, onOpenLightbox }: OnlineUsersListProps) {
+const OnlineUsersList = memo(function OnlineUsersList({
+  users,
+  avatarSizeClassName,
+  onOpenMemberProfile,
+}: OnlineUsersListProps) {
   const defaultProfilePicture = normalizeProfilePictureUrl(undefined);
   return (
     <>
       {users.map((user) => {
         const avatarUrl = normalizeProfilePictureUrl(user.profilePicture);
-        const isFallbackAvatar = avatarUrl === defaultProfilePicture;
+        const status = formatPresenceStatus(user);
         return (
-          <div key={user.clientId} className="flex items-center gap-2 rounded-xl bg-slate-50 p-2">
-            {isFallbackAvatar ? (
+          <button
+            key={user.clientId}
+            type="button"
+            onClick={() => onOpenMemberProfile(user)}
+            className="flex w-full items-center gap-3 rounded-xl border border-slate-200 bg-slate-100 px-2.5 py-2 text-left transition hover:bg-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+            aria-label={`Profil von ${user.username} öffnen`}
+          >
+            {avatarUrl === defaultProfilePicture ? (
               <div className={`${avatarSizeClassName} shrink-0 overflow-hidden rounded-full border border-slate-200`}>
                 <img
                   src={avatarUrl}
@@ -490,27 +766,31 @@ const OnlineUsersList = memo(function OnlineUsersList({ users, avatarSizeClassNa
                   className="h-full w-full object-cover"
                   loading="lazy"
                   decoding="async"
+                  width={44}
+                  height={44}
                 />
               </div>
             ) : (
-              <button
-                type="button"
-                onClick={() => onOpenLightbox(avatarUrl, `Profilbild von ${user.username}`)}
-                className={`${avatarSizeClassName} shrink-0 cursor-zoom-in overflow-hidden rounded-full border border-slate-200 object-cover transition hover:scale-[1.02] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300`}
-                aria-label={`Profilbild von ${user.username} öffnen`}
-              >
+              <div className={`${avatarSizeClassName} shrink-0 overflow-hidden rounded-full border border-slate-200`}>
                 <img
                   src={avatarUrl}
                   alt={`${user.username} Profilbild`}
                   className="h-full w-full object-cover"
                   loading="lazy"
                   decoding="async"
+                  width={44}
+                  height={44}
                 />
-              </button>
+              </div>
             )}
             <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-slate-900">{user.username}</p>
-              <p className="truncate text-xs text-slate-500">{formatPresenceStatus(user)}</p>
+              <p className="truncate text-sm font-semibold text-slate-900">{user.username}</p>
+              <div className="mt-1 space-y-1">
+                <p className="truncate text-xs text-slate-600">{status}</p>
+                <div>
+                  <MemberProgressInline member={user.member} variant="list" />
+                </div>
+              </div>
               {shouldShowAiProgress(user) ? (
                 <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
                   <div
@@ -520,7 +800,7 @@ const OnlineUsersList = memo(function OnlineUsersList({ users, avatarSizeClassNa
                 </div>
               ) : null}
             </div>
-          </div>
+          </button>
         );
       })}
     </>
@@ -546,22 +826,31 @@ export function ChatApp() {
   const lastSentStatusRef = useRef<string>("");
   const prependAnchorRef = useRef<{ height: number; top: number } | null>(null);
   const optimisticVoteRollbackRef = useRef<MessageDTO[] | null>(null);
+  const optimisticReactionRollbackRef = useRef<MessageDTO[] | null>(null);
   const draftBeforeHistoryRef = useRef("");
   const dragDepthRef = useRef(0);
-  const messageInputLineHeightRef = useRef<number | null>(null);
-  const messageInputResizeFrameRef = useRef<number | null>(null);
   const lightboxCopyResetTimeoutRef = useRef<number | null>(null);
+  const validationToastResetTimeoutRef = useRef<number | null>(null);
   const bottomStickFrameRef = useRef<number | null>(null);
   const previousScrollTopRef = useRef(0);
   const lastKnownScrollHeightRef = useRef(0);
-  const notificationCapabilityLoggedRef = useRef(false);
+  const lastKnownBottomOffsetRef = useRef(0);
+  const topLoadCooldownUntilRef = useRef(0);
+  const topLoadInFlightRef = useRef(false);
   const userDetachedFromBottomRef = useRef(false);
+  const tasteModalRefetchTimeoutRef = useRef<number | null>(null);
+  const tasteModalOpenRef = useRef(false);
+  const memberHighlightResetTimeoutRef = useRef<number | null>(null);
+  const previousOwnMemberScoreRef = useRef<number | null>(null);
+  const publicProfileCacheRef = useRef<Record<string, PublicUserProfileDTO>>({});
 
   const [session, setSession] = useState<SessionState | null>(() => loadSession());
   const [users, setUsers] = useState<UserPresenceDTO[]>([]);
   const [messages, setMessages] = useState<MessageDTO[]>([]);
   const [messageWindowSize, setMessageWindowSize] = useState(MESSAGE_RENDER_WINDOW);
   const [error, setError] = useState<string | null>(null);
+  const [validationNotice, setValidationNotice] = useState<{ title: string; message: string } | null>(null);
+  const [highlightOwnMember, setHighlightOwnMember] = useState(false);
   const [aiStatus, setAiStatus] = useState<AiStatusDTO>(() => createDefaultAiStatus());
   const [uploadingChat, setUploadingChat] = useState(false);
   const [uploadingBackground, setUploadingBackground] = useState(false);
@@ -571,8 +860,12 @@ export function ChatApp() {
   const [mediaTotalCount, setMediaTotalCount] = useState(0);
   const [loadingMedia, setLoadingMedia] = useState(false);
   const [loadingMediaMore, setLoadingMediaMore] = useState(false);
+  const [mediaVisibleCount, setMediaVisibleCount] = useState(60);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [showMedia, setShowMedia] = useState(false);
+  const [showPointsInfo, setShowPointsInfo] = useState(false);
+  const [showBackgroundModal, setShowBackgroundModal] = useState(false);
+  const [backgroundDraftUrl, setBackgroundDraftUrl] = useState("");
   const [composerMode, setComposerMode] = useState<ComposerMode>("message");
   const [hasMoreOlder, setHasMoreOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -583,15 +876,17 @@ export function ChatApp() {
     return !document.hidden;
   });
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [notificationCapability, setNotificationCapability] = useState<NotificationCapability>(
-    () => detectBrowserNotificationCapability(),
-  );
-  const [adminOverview, setAdminOverview] = useState<AdminOverviewDTO | null>(null);
-  const [adminBusy, setAdminBusy] = useState(false);
-  const [adminNotice, setAdminNotice] = useState<string | null>(null);
-  const [showAdminPanel, setShowAdminPanel] = useState(false);
-  const [adminTargetUsername, setAdminTargetUsername] = useState("");
-  const [adminTargetMessageId, setAdminTargetMessageId] = useState("");
+  const [initialMessagesLoaded, setInitialMessagesLoaded] = useState(false);
+  const [showTasteProfileModal, setShowTasteProfileModal] = useState(false);
+  const [tasteWindow, setTasteWindow] = useState<TasteWindowKey>("30d");
+  const [tasteProfileDetailed, setTasteProfileDetailed] = useState<TasteProfileDetailedDTO | null>(null);
+  const [tasteProfileEvents, setTasteProfileEvents] = useState<TasteProfileEventDTO[]>([]);
+  const [tasteEventsCursor, setTasteEventsCursor] = useState<string | null>(null);
+  const [tasteEventsHasMore, setTasteEventsHasMore] = useState(false);
+  const [tasteProfileLoading, setTasteProfileLoading] = useState(false);
+  const [tasteEventsLoading, setTasteEventsLoading] = useState(false);
+  const [tasteEventsLoadingMore, setTasteEventsLoadingMore] = useState(false);
+  const [tasteProfileError, setTasteProfileError] = useState<string | null>(null);
   const [pendingDeliveries, setPendingDeliveries] = useState<Record<string, true>>({});
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
   const [lightboxCopyState, setLightboxCopyState] = useState<LightboxCopyState>("idle");
@@ -607,9 +902,20 @@ export function ChatApp() {
   const [pollExtendDraft, setPollExtendDraft] = useState<PollExtendDraftState | null>(null);
 
   const [editingProfile, setEditingProfile] = useState(false);
+  const [memberDrawerOpen, setMemberDrawerOpen] = useState(false);
+  const [memberDrawerProfile, setMemberDrawerProfile] = useState<PublicUserProfileDTO | null>(null);
+  const [memberDrawerOwnStats, setMemberDrawerOwnStats] = useState<PublicUserProfileStatsDTO | null>(null);
+  const [memberDrawerLoading, setMemberDrawerLoading] = useState(false);
+  const [memberDrawerError, setMemberDrawerError] = useState<string | null>(null);
   const [uploadingProfile, setUploadingProfile] = useState(false);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const [savingSecurity, setSavingSecurity] = useState(false);
   const [profileCropFile, setProfileCropFile] = useState<File | null>(null);
   const [usernameDraft, setUsernameDraft] = useState(() => loadSession()?.username || "");
+  const [loginNameDraft, setLoginNameDraft] = useState(() => loadSession()?.loginName || "");
+  const [currentPasswordDraft, setCurrentPasswordDraft] = useState("");
+  const [newPasswordDraft, setNewPasswordDraft] = useState("");
+  const [confirmNewPasswordDraft, setConfirmNewPasswordDraft] = useState("");
   const [profilePictureDraft, setProfilePictureDraft] = useState(
     () => loadSession()?.profilePicture || getDefaultProfilePicture(),
   );
@@ -621,12 +927,60 @@ export function ChatApp() {
   const [isDraggingUpload, setIsDraggingUpload] = useState(false);
   const [profileDropActive, setProfileDropActive] = useState(false);
   const [composerHeightPx, setComposerHeightPx] = useState(DEFAULT_COMPOSER_HEIGHT_PX);
+  const [, startUiTransition] = useTransition();
   const isDeveloperMode = Boolean(session?.devMode && session.devAuthToken);
-  const showNotificationPrompt = notificationCapability.kind !== "available" || notificationCapability.permission !== "granted";
 
   const sessionProfilePicture = useMemo(
     () => normalizeProfilePictureUrl(session?.profilePicture),
     [session?.profilePicture],
+  );
+  const ownPresence = useMemo(
+    () => (session ? users.find((user) => user.clientId === session.clientId) : undefined),
+    [session, users],
+  );
+  const ownMember = ownPresence?.member;
+  const ownWindowStats = tasteProfileDetailed?.windows.all;
+  const mediaVisibleCountRef = useRef(mediaVisibleCount);
+  const mediaItemsWithDateLabel = useMemo(
+    () =>
+      mediaItems.map((item) => ({
+        ...item,
+        createdAtLabel: new Date(item.createdAt).toLocaleString("de-DE"),
+      })),
+    [mediaItems],
+  );
+  const visibleMediaItems = useMemo(
+    () => mediaItemsWithDateLabel.slice(0, mediaVisibleCount),
+    [mediaItemsWithDateLabel, mediaVisibleCount],
+  );
+  const mediaHasHiddenLocalItems = mediaVisibleCount < mediaItemsWithDateLabel.length;
+  const ownProfileStats = useMemo(
+    () => ({
+      postsTotal: ownWindowStats?.activity.postsTotal ?? 0,
+      reactionsGiven: ownWindowStats?.reactions.givenTotal ?? 0,
+      reactionsReceived: ownWindowStats?.reactions.receivedTotal ?? 0,
+      pollsCreated: ownWindowStats?.activity.pollsCreated ?? 0,
+      pollVotes: ownWindowStats?.activity.pollVotesGiven ?? 0,
+      activeDays: ownWindowStats?.activity.activeDays ?? 0,
+    }),
+    [ownWindowStats],
+  );
+  const ownScore = ownMember?.score ?? 0;
+  const ownProgressPercent = useMemo(() => {
+    if (!ownMember) return 0;
+    if (!ownMember.nextRank) return 100;
+    const currentThreshold = MEMBER_RANK_STEPS.find((step) => step.rank === ownMember.rank)?.minScore ?? 0;
+    const nextThreshold = MEMBER_RANK_STEPS.find((step) => step.rank === ownMember.nextRank)?.minScore ?? ownMember.score;
+    const range = Math.max(1, nextThreshold - currentThreshold);
+    return Math.max(0, Math.min(100, ((ownMember.score - currentThreshold) / range) * 100));
+  }, [ownMember]);
+  const ownRankMilestones = useMemo(
+    () => MEMBER_RANK_STEPS.map((step) => ({
+      ...step,
+      reached: ownScore >= step.minScore,
+      remaining: Math.max(0, step.minScore - ownScore),
+    })),
+    [ownScore],
   );
 
   const onlineUsers = useMemo(
@@ -658,6 +1012,15 @@ export function ChatApp() {
         })),
     ],
     [users, aiStatus],
+  );
+
+  const sidebarOnlineUsers = useMemo(
+    () =>
+      onlineUsers.filter((user) => {
+        const normalized = user.username.trim().toLowerCase();
+        return !(normalized === "developer" || normalized.startsWith("developer-"));
+      }),
+    [onlineUsers],
   );
 
   const filteredMentionUsers = useMemo(() => {
@@ -694,11 +1057,23 @@ export function ChatApp() {
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     if (!scrollRef.current) return;
+    prependAnchorRef.current = null;
     scrollRef.current.scrollTo({
       top: scrollRef.current.scrollHeight,
       behavior,
     });
+    lastKnownBottomOffsetRef.current = 0;
   }, []);
+
+  const getDistanceFromBottom = useCallback((): number => {
+    const element = scrollRef.current;
+    if (!element) return 0;
+    return Math.max(0, element.scrollHeight - (element.scrollTop + element.clientHeight));
+  }, []);
+
+  const isWithinAutoFollowRange = useCallback((): boolean => {
+    return getDistanceFromBottom() <= AUTO_SCROLL_NEAR_BOTTOM_PX;
+  }, [getDistanceFromBottom]);
 
   const captureScrollAnchor = useCallback(() => {
     const element = scrollRef.current;
@@ -711,11 +1086,12 @@ export function ChatApp() {
   }, []);
 
   const scheduleBottomStick = useCallback(() => {
-    if (!isAtBottomRef.current) return;
+    if (!isAtBottomRef.current || userDetachedFromBottomRef.current) return;
     if (bottomStickFrameRef.current !== null) return;
 
     bottomStickFrameRef.current = window.requestAnimationFrame(() => {
       bottomStickFrameRef.current = null;
+      if (!isAtBottomRef.current || userDetachedFromBottomRef.current) return;
       scrollToBottom("auto");
     });
   }, [scrollToBottom]);
@@ -742,11 +1118,7 @@ export function ChatApp() {
 
   const appendOptimisticMessage = useCallback(
     (message: MessageDTO) => {
-      const element = scrollRef.current;
-      const distanceFromBottom = element
-        ? element.scrollHeight - (element.scrollTop + element.clientHeight)
-        : 0;
-      const shouldAutoScroll = !userDetachedFromBottomRef.current && distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX;
+      const shouldAutoScroll = isWithinAutoFollowRange();
 
       setMessages((current) => limitVisibleMessages(mergeMessage(current, message)));
       if (!shouldAutoScroll) {
@@ -762,37 +1134,13 @@ export function ChatApp() {
         requestAnimationFrame(() => scrollToBottom("auto"));
       });
     },
-    [scrollToBottom],
+    [isWithinAutoFollowRange, scrollToBottom],
   );
 
   const removeOptimisticMessage = useCallback((messageId: string) => {
     knownMessageIdsRef.current.delete(messageId);
     setMessages((current) => current.filter((message) => message.id !== messageId));
   }, []);
-
-  const resizeMessageInput = useCallback(() => {
-    const textarea = messageInputRef.current;
-    if (!textarea) return;
-
-    textarea.style.height = "auto";
-    let lineHeight = messageInputLineHeightRef.current;
-    if (!lineHeight || !Number.isFinite(lineHeight) || lineHeight <= 0) {
-      lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight || "20") || 20;
-      messageInputLineHeightRef.current = lineHeight;
-    }
-    const maxHeight = lineHeight * MAX_MESSAGE_INPUT_LINES;
-    const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
-    textarea.style.height = `${Math.max(lineHeight, nextHeight)}px`;
-    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
-  }, []);
-
-  const scheduleMessageInputResize = useCallback(() => {
-    if (messageInputResizeFrameRef.current !== null) return;
-    messageInputResizeFrameRef.current = window.requestAnimationFrame(() => {
-      messageInputResizeFrameRef.current = null;
-      resizeMessageInput();
-    });
-  }, [resizeMessageInput]);
 
   const handleMessageDraftChange = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {
@@ -802,20 +1150,22 @@ export function ChatApp() {
       draftBeforeHistoryRef.current = "";
 
       const cursor = event.target.selectionStart ?? value.length;
-      const textBefore = value.slice(0, cursor);
-      const match = textBefore.match(/@(\w*)$/);
+      const textBefore = value.slice(Math.max(0, cursor - 80), cursor);
+      const match = textBefore.match(/(?:^|\s)@(\w*)$/);
       if (match) {
         const nextFilter = match[1];
-        setShowMentionSuggestions((current) => (current ? current : true));
-        setMentionFilter((current) => (current === nextFilter ? current : nextFilter));
-        setMentionIndex((current) => (current === 0 ? current : 0));
+        startUiTransition(() => {
+          setShowMentionSuggestions((current) => (current ? current : true));
+          setMentionFilter((current) => (current === nextFilter ? current : nextFilter));
+          setMentionIndex((current) => (current === 0 ? current : 0));
+        });
       } else {
-        setShowMentionSuggestions((current) => (current ? false : current));
+        startUiTransition(() => {
+          setShowMentionSuggestions((current) => (current ? false : current));
+        });
       }
-
-      scheduleMessageInputResize();
     },
-    [scheduleMessageInputResize],
+    [startUiTransition],
   );
 
   const activateAskChatGpt = useCallback(() => {
@@ -850,35 +1200,6 @@ export function ChatApp() {
     }
   }, []);
 
-  const notifyMessages = useCallback(
-    (incoming: MessageDTO[]) => {
-      if (
-        notificationCapability.kind !== "available"
-        || notificationCapability.permission !== "granted"
-        || isLeavingRef.current
-      ) return;
-
-      const currentUsername = session?.username?.trim().toLowerCase() ?? "";
-
-      for (const payload of incoming) {
-        const isOwnByClientId = Boolean(session?.clientId) && payload.authorId === session?.clientId;
-        const isOwnByUsername = currentUsername.length > 0 && payload.username.trim().toLowerCase() === currentUsername;
-        if (isOwnByClientId || isOwnByUsername) continue;
-        if (!shouldNotifyMessage(payload)) continue;
-
-        const compactMessage = payload.message.replace(/\s+/g, " ").trim();
-        const title = isJoinSystemMessage(payload)
-          ? "Neue Anmeldung"
-          : `${payload.username}: ${compactMessage || "Neue Nachricht"}`;
-        new window.Notification(title, {
-          body: isJoinSystemMessage(payload) ? compactMessage : undefined,
-          icon: payload.profilePicture,
-        });
-      }
-    },
-    [notificationCapability.kind, notificationCapability.permission, session?.clientId, session?.username],
-  );
-
   const fetchMessagePage = useCallback(async (params: {
     limit?: number;
     before?: string;
@@ -886,10 +1207,13 @@ export function ChatApp() {
   }): Promise<MessagePageDTO> => {
     const searchParams = new URLSearchParams();
     searchParams.set("limit", String(params.limit ?? MESSAGE_PAGE_SIZE));
+    if (session?.clientId) {
+      searchParams.set("clientId", session.clientId);
+    }
     if (params.before) searchParams.set("before", params.before);
     if (params.after) searchParams.set("after", params.after);
     return apiJson<MessagePageDTO>(`/api/messages?${searchParams.toString()}`);
-  }, []);
+  }, [session?.clientId]);
 
   const fetchPresence = useCallback(async (): Promise<UserPresenceDTO[]> => {
     return apiJson<UserPresenceDTO[]>("/api/presence");
@@ -902,6 +1226,46 @@ export function ChatApp() {
   const fetchChatBackground = useCallback(async (): Promise<ChatBackgroundDTO> => {
     return apiJson<ChatBackgroundDTO>("/api/chat/background");
   }, []);
+
+  const fetchPublicUserProfile = useCallback(async (targetClientId: string): Promise<PublicUserProfileDTO> => {
+    if (!session?.clientId) {
+      throw new Error("Sitzung nicht verfügbar.");
+    }
+    const searchParams = new URLSearchParams({
+      viewerClientId: session.clientId,
+      targetClientId,
+    });
+    return apiJson<PublicUserProfileDTO>(`/api/users/profile?${searchParams.toString()}`, {
+      cache: "no-store",
+    });
+  }, [session?.clientId]);
+
+  const fetchTasteProfileDetailed = useCallback(async (): Promise<TasteProfileDetailedDTO | null> => {
+    if (!session?.clientId) return null;
+    return apiJson<TasteProfileDetailedDTO>(
+      `/api/me/taste/profile?clientId=${encodeURIComponent(session.clientId)}`,
+      { cache: "no-store" },
+    );
+  }, [session?.clientId]);
+
+  const fetchTasteEventsPage = useCallback(async (input: {
+    limit?: number;
+    before?: string | null;
+  } = {}): Promise<TasteProfileEventPageDTO> => {
+    if (!session?.clientId) {
+      return { items: [], hasMore: false, nextCursor: null };
+    }
+    const searchParams = new URLSearchParams({
+      clientId: session.clientId,
+      limit: String(Math.max(1, Math.min(200, input.limit ?? 50))),
+    });
+    if (input.before) {
+      searchParams.set("before", input.before);
+    }
+    return apiJson<TasteProfileEventPageDTO>(`/api/me/taste/events?${searchParams.toString()}`, {
+      cache: "no-store",
+    });
+  }, [session?.clientId]);
 
   const hydrateMediaCache = useCallback(() => {
     if (typeof window === "undefined") return false;
@@ -1011,10 +1375,10 @@ export function ChatApp() {
   );
 
   const applyIncomingMessages = useCallback(
-    (incoming: MessageDTO[], options: { notify: boolean }) => {
+    (incoming: MessageDTO[], options: { notify: boolean; preserveViewerReaction?: boolean }) => {
       if (incoming.length === 0) return;
 
-      const shouldStickToBottom = isAtBottomRef.current;
+      const shouldStickToBottom = isWithinAutoFollowRange();
       const fresh = incoming.filter((message) => !knownMessageIdsRef.current.has(message.id));
 
       if (!shouldStickToBottom && fresh.length > 0) {
@@ -1022,15 +1386,13 @@ export function ChatApp() {
         setMessageWindowSize((current) => Math.min(MAX_VISIBLE_MESSAGES, current + fresh.length));
       }
 
-      setMessages((current) => limitVisibleMessages(mergeMessages(current, incoming)));
+      setMessages((current) =>
+        limitVisibleMessages(mergeMessages(current, incoming, { preserveViewerReaction: options.preserveViewerReaction })),
+      );
       updateLatestMessageCursor(incoming);
 
       for (const message of fresh) {
         knownMessageIdsRef.current.add(message.id);
-      }
-
-      if (options.notify && fresh.length > 0) {
-        notifyMessages(fresh);
       }
 
       if (showMedia && fresh.length > 0) {
@@ -1038,10 +1400,13 @@ export function ChatApp() {
       }
 
       if (shouldStickToBottom) {
+        userDetachedFromBottomRef.current = false;
+        isAtBottomRef.current = true;
+        setIsAtBottom(true);
         scheduleBottomStick();
       }
     },
-    [captureScrollAnchor, fetchMediaItems, notifyMessages, scheduleBottomStick, showMedia, updateLatestMessageCursor],
+    [captureScrollAnchor, fetchMediaItems, isWithinAutoFollowRange, scheduleBottomStick, showMedia, updateLatestMessageCursor],
   );
 
   const applySnapshot = useCallback(
@@ -1131,16 +1496,19 @@ export function ChatApp() {
     const restored = await apiJson<LoginResponseDTO>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify({
-        username: session.username,
         clientId: session.clientId,
-        profilePicture: normalizeProfilePictureUrl(session.profilePicture),
+        sessionToken: session.sessionToken,
       }),
     });
 
     const nextSession: SessionState = {
+      id: restored.id,
       clientId: restored.clientId,
+      loginName: restored.loginName,
       username: restored.username,
       profilePicture: restored.profilePicture || getDefaultProfilePicture(),
+      sessionToken: restored.sessionToken,
+      sessionExpiresAt: restored.sessionExpiresAt,
       devMode: restored.devMode || Boolean(session.devMode && session.devAuthToken),
       devAuthToken: restored.devAuthToken || session.devAuthToken,
     };
@@ -1152,6 +1520,8 @@ export function ChatApp() {
         current.clientId === nextSession.clientId &&
         current.username === nextSession.username &&
         current.profilePicture === nextSession.profilePicture &&
+        (current.sessionToken || "") === (nextSession.sessionToken || "") &&
+        (current.sessionExpiresAt || "") === (nextSession.sessionExpiresAt || "") &&
         Boolean(current.devMode) === Boolean(nextSession.devMode) &&
         (current.devAuthToken || "") === (nextSession.devAuthToken || "")
       ) {
@@ -1162,12 +1532,48 @@ export function ChatApp() {
     });
   }, [session]);
 
+  const syncSessionIdentityFromPresence = useCallback(
+    (presenceUser: UserPresenceDTO | undefined): void => {
+      if (!session || !presenceUser) return;
+      if (presenceUser.clientId !== session.clientId) return;
+
+      const nextProfilePicture = presenceUser.profilePicture || getDefaultProfilePicture();
+      const nextId = session.id || presenceUser.id;
+      const identityUnchanged = session.username === presenceUser.username
+        && session.profilePicture === nextProfilePicture
+        && (session.id || "") === (nextId || "");
+      if (identityUnchanged) return;
+
+      const nextSession: SessionState = {
+        ...session,
+        id: nextId,
+        username: presenceUser.username,
+        profilePicture: nextProfilePicture,
+      };
+
+      saveSession(nextSession);
+      setSession((current) => {
+        if (!current || current.clientId !== nextSession.clientId) return current;
+        return {
+          ...current,
+          id: current.id || nextSession.id,
+          username: nextSession.username,
+          profilePicture: nextSession.profilePicture,
+        };
+      });
+    },
+    [session],
+  );
+
   const ensureSessionInPresence = useCallback(
     async (presence: UserPresenceDTO[]): Promise<void> => {
       if (!session || isLeavingRef.current) return;
 
-      const hasCurrentUser = presence.some((user) => user.clientId === session.clientId);
-      if (hasCurrentUser) return;
+      const currentUser = presence.find((user) => user.clientId === session.clientId);
+      if (currentUser) {
+        syncSessionIdentityFromPresence(currentUser);
+        return;
+      }
 
       try {
         await restoreSessionPresence();
@@ -1179,29 +1585,67 @@ export function ChatApp() {
         throw new Error("Sitzung konnte nicht wiederhergestellt werden. Bitte erneut anmelden.");
       }
     },
-    [restoreSessionPresence, router, session, syncChatState],
+    [restoreSessionPresence, router, session, syncChatState, syncSessionIdentityFromPresence],
   );
 
-  const fetchAdminOverview = useCallback(async () => {
-    if (!session?.clientId || !session.devAuthToken) {
-      setAdminOverview(null);
-      return;
+  const loadTasteProfileModalData = useCallback(async (): Promise<void> => {
+    if (!session?.clientId) return;
+    setTasteProfileError(null);
+    setTasteProfileLoading(true);
+    setTasteEventsLoading(true);
+    try {
+      const [profile, eventsPage] = await Promise.all([
+        fetchTasteProfileDetailed(),
+        fetchTasteEventsPage({ limit: 50 }),
+      ]);
+      setTasteProfileDetailed(profile);
+      setTasteProfileEvents(eventsPage.items);
+      setTasteEventsCursor(eventsPage.nextCursor);
+      setTasteEventsHasMore(eventsPage.hasMore);
+      setError(null);
+    } catch (tasteError) {
+      setTasteProfileError(
+        tasteError instanceof Error ? tasteError.message : "Taste-Profil konnte nicht geladen werden.",
+      );
+    } finally {
+      setTasteProfileLoading(false);
+      setTasteEventsLoading(false);
     }
+  }, [fetchTasteEventsPage, fetchTasteProfileDetailed, session?.clientId]);
 
-    const searchParams = new URLSearchParams({
-      clientId: session.clientId,
-      devAuthToken: session.devAuthToken,
-    });
-    const overview = await apiJson<AdminOverviewDTO>(`/api/admin?${searchParams.toString()}`);
-    setAdminOverview(overview);
-  }, [session?.clientId, session?.devAuthToken]);
+  const loadMoreTasteProfileEvents = useCallback(async (): Promise<void> => {
+    if (!session?.clientId || !tasteEventsHasMore || !tasteEventsCursor) return;
+    setTasteEventsLoadingMore(true);
+    try {
+      const nextPage = await fetchTasteEventsPage({ limit: 50, before: tasteEventsCursor });
+      setTasteProfileEvents((current) => {
+        const known = new Set(current.map((item) => item.id));
+        const merged = [...current];
+        for (const item of nextPage.items) {
+          if (known.has(item.id)) continue;
+          known.add(item.id);
+          merged.push(item);
+        }
+        return merged;
+      });
+      setTasteEventsCursor(nextPage.nextCursor);
+      setTasteEventsHasMore(nextPage.hasMore);
+    } catch {
+      // Best effort.
+    } finally {
+      setTasteEventsLoadingMore(false);
+    }
+  }, [fetchTasteEventsPage, session?.clientId, tasteEventsCursor, tasteEventsHasMore]);
 
   const runAdminAction = useCallback(
     async (
       action: AdminActionRequest["action"],
       options?: {
+        targetUserId?: string;
         targetUsername?: string;
         targetMessageId?: string;
+        targetScore?: number;
+        targetRank?: "BRONZE" | "SILBER" | "GOLD" | "PLATIN";
       },
     ) => {
       if (!session?.clientId || !session.devAuthToken) {
@@ -1209,31 +1653,32 @@ export function ChatApp() {
         return;
       }
 
-      setAdminBusy(true);
-      setAdminNotice(null);
       try {
         const payload: AdminActionRequest = {
           clientId: session.clientId,
           devAuthToken: session.devAuthToken,
           action,
+          targetUserId: options?.targetUserId,
           targetUsername: options?.targetUsername,
           targetMessageId: options?.targetMessageId,
+          targetScore: options?.targetScore,
+          targetRank: options?.targetRank,
         };
 
-        const result = await apiJson<AdminActionResponse>("/api/admin", {
+        const result = await apiJson<{ message: string }>("/api/admin", {
           method: "POST",
           body: JSON.stringify(payload),
         });
 
-        setAdminOverview(result.overview);
-        setAdminNotice(result.message);
+        setValidationNotice({
+          title: "Admin",
+          message: result.message,
+        });
         setError(null);
         await syncChatState();
         requestAnimationFrame(() => scrollToBottom("auto"));
       } catch (actionError) {
         setError(actionError instanceof Error ? actionError.message : "Admin-Aktion fehlgeschlagen.");
-      } finally {
-        setAdminBusy(false);
       }
     },
     [scrollToBottom, session?.clientId, session?.devAuthToken, syncChatState],
@@ -1263,22 +1708,6 @@ export function ChatApp() {
       paddingBottom: `${dynamicPadding}px`,
     };
   }, [composerHeightPx]);
-
-  const refreshNotificationState = useCallback(() => {
-    setNotificationCapability(detectBrowserNotificationCapability());
-  }, []);
-
-  const requestNotificationPermission = useCallback(async (): Promise<void> => {
-    const capability = detectBrowserNotificationCapability();
-    setNotificationCapability(capability);
-
-    if (typeof window === "undefined" || capability.kind !== "available" || !capability.canRequest) {
-      return;
-    }
-
-    await window.Notification.requestPermission();
-    setNotificationCapability(detectBrowserNotificationCapability());
-  }, []);
 
   const pushPresenceStatus = useCallback(
     async (status: string): Promise<void> => {
@@ -1347,9 +1776,8 @@ export function ChatApp() {
   }, [mediaItems]);
 
   useEffect(() => {
-    if (composerMode !== "message") return;
-    scheduleMessageInputResize();
-  }, [composerMode, messageDraft, scheduleMessageInputResize, uploadedDraftImages.length]);
+    mediaVisibleCountRef.current = mediaVisibleCount;
+  }, [mediaVisibleCount]);
 
   useEffect(() => {
     setMessageWindowSize((current) => {
@@ -1386,25 +1814,49 @@ export function ChatApp() {
   }, [router, session]);
 
   useEffect(() => {
+    setInitialMessagesLoaded(false);
+  }, [session?.clientId]);
+
+  useEffect(() => {
+    if (!initialMessagesLoaded) return;
+
+    let cancelled = false;
+    const stickToBottomOnce = () => {
+      if (cancelled) return;
+      userDetachedFromBottomRef.current = false;
+      isAtBottomRef.current = true;
+      setIsAtBottom(true);
+      scrollToBottom("auto");
+      requestAnimationFrame(() => scrollToBottom("auto"));
+    };
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(stickToBottomOnce);
+    });
+    const settleTimer = window.setTimeout(stickToBottomOnce, 260);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(settleTimer);
+    };
+  }, [initialMessagesLoaded, scrollToBottom]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
 
     let frame: number | null = null;
     const updateViewportMetrics = () => {
       const element = scrollRef.current;
       if (!element) return;
+      if (!isAtBottomRef.current || userDetachedFromBottomRef.current) return;
       const distanceFromBottom = element.scrollHeight - (element.scrollTop + element.clientHeight);
-      const forceAttach = distanceFromBottom <= HARD_BOTTOM_ATTACH_PX;
-      if (forceAttach) {
+      if (distanceFromBottom > AUTO_SCROLL_NEAR_BOTTOM_PX * 2) return;
+      if (distanceFromBottom <= HARD_BOTTOM_ATTACH_PX) {
         userDetachedFromBottomRef.current = false;
-      }
-      if (
-        (forceAttach || distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX)
-        && !userDetachedFromBottomRef.current
-      ) {
         isAtBottomRef.current = true;
         setIsAtBottom(true);
-        scheduleBottomStick();
       }
+      scheduleBottomStick();
     };
 
     const scheduleViewportUpdate = () => {
@@ -1419,7 +1871,6 @@ export function ChatApp() {
     window.addEventListener("resize", scheduleViewportUpdate);
     window.addEventListener("orientationchange", scheduleViewportUpdate);
     window.visualViewport?.addEventListener("resize", scheduleViewportUpdate);
-    window.visualViewport?.addEventListener("scroll", scheduleViewportUpdate);
 
     return () => {
       if (frame !== null) {
@@ -1428,16 +1879,11 @@ export function ChatApp() {
       window.removeEventListener("resize", scheduleViewportUpdate);
       window.removeEventListener("orientationchange", scheduleViewportUpdate);
       window.visualViewport?.removeEventListener("resize", scheduleViewportUpdate);
-      window.visualViewport?.removeEventListener("scroll", scheduleViewportUpdate);
     };
   }, [scheduleBottomStick]);
 
   useEffect(() => {
     return () => {
-      if (messageInputResizeFrameRef.current !== null) {
-        window.cancelAnimationFrame(messageInputResizeFrameRef.current);
-        messageInputResizeFrameRef.current = null;
-      }
       if (bottomStickFrameRef.current !== null) {
         window.cancelAnimationFrame(bottomStickFrameRef.current);
         bottomStickFrameRef.current = null;
@@ -1446,25 +1892,38 @@ export function ChatApp() {
   }, []);
 
   useEffect(() => {
-    refreshNotificationState();
-    window.addEventListener("focus", refreshNotificationState);
-    document.addEventListener("visibilitychange", refreshNotificationState);
-    return () => {
-      window.removeEventListener("focus", refreshNotificationState);
-      document.removeEventListener("visibilitychange", refreshNotificationState);
-    };
-  }, [refreshNotificationState]);
+    if (typeof window === "undefined") return;
+    const idleWindow = window as IdleWindow;
+    let idleHandle: number | null = null;
+    let timeoutHandle: number | null = null;
 
-  useEffect(() => {
-    if (!isDeveloperMode || notificationCapabilityLoggedRef.current) return;
-    notificationCapabilityLoggedRef.current = true;
-    console.info("[notifications] capability", {
-      kind: notificationCapability.kind,
-      permission: notificationCapability.permission,
-      isSecureContext: notificationCapability.isSecureContext,
-      isStandalone: notificationCapability.isStandalone,
-    });
-  }, [isDeveloperMode, notificationCapability]);
+    const warmUpOverlays = () => {
+      void Promise.allSettled([
+        import("@/components/app-overlay-dialog"),
+        import("@/components/member-profile-drawer"),
+        import("@/components/profile-image-crop-modal"),
+      ]);
+    };
+
+    if (typeof idleWindow.requestIdleCallback === "function") {
+      idleHandle = idleWindow.requestIdleCallback(() => {
+        warmUpOverlays();
+      }, { timeout: 1_500 });
+    } else {
+      timeoutHandle = window.setTimeout(() => {
+        warmUpOverlays();
+      }, 700);
+    }
+
+    return () => {
+      if (idleHandle !== null && typeof idleWindow.cancelIdleCallback === "function") {
+        idleWindow.cancelIdleCallback(idleHandle);
+      }
+      if (timeoutHandle !== null) {
+        window.clearTimeout(timeoutHandle);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!session) return;
@@ -1510,8 +1969,7 @@ export function ChatApp() {
         hydrateMediaCache();
         if (cancelled) return;
         setError(null);
-
-        requestAnimationFrame(() => scrollToBottom("auto"));
+        setInitialMessagesLoaded(true);
         const onboardingDone = window.localStorage.getItem(ONBOARDING_KEY) === "done";
         setShowOnboarding(!onboardingDone);
       } catch (loadError) {
@@ -1536,12 +1994,14 @@ export function ChatApp() {
   useEffect(() => {
     if (!showMedia) return;
 
+    setMediaVisibleCount(60);
     const hasCache = hydrateMediaCache();
     void fetchMediaItems({ silent: hasCache });
   }, [fetchMediaItems, hydrateMediaCache, showMedia]);
 
   useEffect(() => {
-    if (!showMedia || !mediaHasMore || loadingMedia || loadingMediaMore) return;
+    if (!showMedia || loadingMedia || loadingMediaMore) return;
+    if (!mediaHasMore && !mediaHasHiddenLocalItems) return;
     const container = mediaScrollRef.current;
     if (!container) return;
     let requesting = false;
@@ -1550,6 +2010,12 @@ export function ChatApp() {
       if (requesting) return;
       const nearBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 80;
       if (!nearBottom) return;
+      const hiddenLocalItems = mediaVisibleCountRef.current < mediaItemsRef.current.length;
+      if (hiddenLocalItems) {
+        setMediaVisibleCount((current) => Math.min(current + 40, mediaItemsRef.current.length));
+        return;
+      }
+      if (!mediaHasMore) return;
       requesting = true;
       void fetchMediaItems({ append: true, silent: true }).finally(() => {
         requesting = false;
@@ -1560,48 +2026,84 @@ export function ChatApp() {
     return () => {
       container.removeEventListener("scroll", onScroll);
     };
-  }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasMore, showMedia]);
+  }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasHiddenLocalItems, mediaHasMore, showMedia]);
 
   useEffect(() => {
-    if (!showMedia || !mediaHasMore || loadingMedia || loadingMediaMore) return;
+    if (!showMedia || loadingMedia || loadingMediaMore) return;
+    if (!mediaHasMore && !mediaHasHiddenLocalItems) return;
     const container = mediaScrollRef.current;
     if (!container) return;
 
     const canScroll = container.scrollHeight > container.clientHeight + 8;
     if (canScroll) return;
-
-    void fetchMediaItems({ append: true, silent: true });
-  }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasMore, mediaItems.length, showMedia]);
-
-  useEffect(() => {
-    if (!isDeveloperMode) {
-      setAdminOverview(null);
+    if (mediaHasHiddenLocalItems) {
+      setMediaVisibleCount((current) => Math.min(current + 40, mediaItemsRef.current.length));
       return;
     }
 
-    let cancelled = false;
+    void fetchMediaItems({ append: true, silent: true });
+  }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasHiddenLocalItems, mediaHasMore, mediaItems.length, showMedia]);
 
-    const loadOverview = async () => {
-      try {
-        await fetchAdminOverview();
-      } catch (overviewError) {
-        if (!cancelled) {
-          setError(overviewError instanceof Error ? overviewError.message : "Entwicklerwerkzeuge konnten nicht geladen werden.");
-        }
+  useEffect(() => {
+    if (!session?.clientId) {
+      setShowTasteProfileModal(false);
+      setTasteProfileDetailed(null);
+      setTasteProfileEvents([]);
+      setTasteEventsCursor(null);
+      setTasteEventsHasMore(false);
+      setTasteProfileError(null);
+    }
+  }, [session?.clientId]);
+
+  useEffect(() => {
+    tasteModalOpenRef.current = showTasteProfileModal;
+  }, [showTasteProfileModal]);
+
+  useEffect(() => {
+    if (!showTasteProfileModal || !session?.clientId) return;
+    void loadTasteProfileModalData();
+  }, [loadTasteProfileModalData, session?.clientId, showTasteProfileModal]);
+
+  useEffect(() => {
+    return () => {
+      if (tasteModalRefetchTimeoutRef.current !== null) {
+        window.clearTimeout(tasteModalRefetchTimeoutRef.current);
+        tasteModalRefetchTimeoutRef.current = null;
       }
     };
+  }, []);
 
-    void loadOverview();
+  useEffect(() => {
+    const currentScore = ownMember?.score;
+    const previousScore = previousOwnMemberScoreRef.current;
+    if (typeof currentScore === "number" && typeof previousScore === "number" && currentScore > previousScore) {
+      setHighlightOwnMember(true);
+      if (memberHighlightResetTimeoutRef.current !== null) {
+        window.clearTimeout(memberHighlightResetTimeoutRef.current);
+      }
+      memberHighlightResetTimeoutRef.current = window.setTimeout(() => {
+        setHighlightOwnMember(false);
+        memberHighlightResetTimeoutRef.current = null;
+      }, 1_300);
+    }
+    previousOwnMemberScoreRef.current = typeof currentScore === "number" ? currentScore : null;
+  }, [ownMember?.score]);
 
+  useEffect(() => {
     return () => {
-      cancelled = true;
+      if (memberHighlightResetTimeoutRef.current !== null) {
+        window.clearTimeout(memberHighlightResetTimeoutRef.current);
+        memberHighlightResetTimeoutRef.current = null;
+      }
     };
-  }, [fetchAdminOverview, isDeveloperMode]);
+  }, []);
 
   useEffect(() => {
     if (!session) return;
 
-    const stream = new EventSource(`/api/stream?limit=${SNAPSHOT_LIMIT}`);
+    const stream = new EventSource(
+      `/api/stream?limit=${SNAPSHOT_LIMIT}&clientId=${encodeURIComponent(session.clientId)}`,
+    );
 
     const parseEvent = <TValue,>(event: MessageEvent<string>): TValue | null => {
       try {
@@ -1622,13 +2124,14 @@ export function ChatApp() {
       const parsed = parseEvent<UserPresenceDTO>(event as MessageEvent<string>);
       if (!parsed || isLeavingRef.current) return;
       setUsers((current) => mergeUser(current, parsed));
+      syncSessionIdentityFromPresence(parsed);
     };
 
     const onUserUpdated = (event: Event) => {
       const parsed = parseEvent<UserPresenceDTO>(event as MessageEvent<string>);
       if (!parsed || isLeavingRef.current) return;
       setUsers((current) => mergeUser(current, parsed));
-      setMessages((current) => limitVisibleMessages(syncProfilePictureForUser(current, parsed)));
+      syncSessionIdentityFromPresence(parsed);
     };
 
     const onMessageCreated = (event: Event) => {
@@ -1637,21 +2140,82 @@ export function ChatApp() {
       applyIncomingMessages([parsed], { notify: true });
     };
 
+    const onMessageUpdated = (event: Event) => {
+      const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
+      if (!parsed || isLeavingRef.current) return;
+      applyIncomingMessages([parsed], { notify: false, preserveViewerReaction: true });
+    };
+
+    const onReactionReceived = (event: Event) => {
+      const parsed = parseEvent<{
+        targetUserId?: string;
+        targetUsername: string;
+        fromUsername: string;
+        messageId: string;
+        reaction: ReactionType;
+        messagePreview: string;
+        createdAt: string;
+      }>(event as MessageEvent<string>);
+      if (!parsed || isLeavingRef.current) return;
+
+      const currentUsername = session.username.trim().toLowerCase();
+      if (!currentUsername) return;
+      if (parsed.targetUserId && session.id && parsed.targetUserId !== session.id) return;
+      if (parsed.targetUsername.trim().toLowerCase() !== currentUsername) return;
+
+      const reactionMeta = REACTION_OPTIONS.find((entry) => entry.reaction === parsed.reaction);
+      const reactionLabel = reactionMeta ? `${reactionMeta.emoji} ${reactionMeta.label}` : parsed.reaction;
+      const message = `${parsed.fromUsername} hat mit ${reactionLabel} reagiert`;
+
+      setValidationNotice({
+        title: "Neue Reaktion",
+        message,
+      });
+
+      if (validationToastResetTimeoutRef.current !== null) {
+        window.clearTimeout(validationToastResetTimeoutRef.current);
+      }
+      validationToastResetTimeoutRef.current = window.setTimeout(() => {
+        setValidationNotice(null);
+        validationToastResetTimeoutRef.current = null;
+      }, 4_000);
+    };
+
+    const onTasteUpdated = (event: Event) => {
+      const parsed = parseEvent<{ userId: string; updatedAt: string; reason: "message" | "reaction" | "poll" | "tagging" }>(
+        event as MessageEvent<string>,
+      );
+      if (!parsed || !session.id) return;
+      if (parsed.userId !== session.id) return;
+
+      if (!tasteModalOpenRef.current) return;
+      if (tasteModalRefetchTimeoutRef.current !== null) {
+        window.clearTimeout(tasteModalRefetchTimeoutRef.current);
+      }
+      tasteModalRefetchTimeoutRef.current = window.setTimeout(() => {
+        void loadTasteProfileModalData();
+        tasteModalRefetchTimeoutRef.current = null;
+      }, 350);
+    };
+
     const onPollUpdated = (event: Event) => {
       const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
       if (!parsed || isLeavingRef.current) return;
-      applyIncomingMessages([parsed], { notify: false });
+      applyIncomingMessages([parsed], { notify: false, preserveViewerReaction: true });
     };
 
     const onAiStatus = (event: Event) => {
-      const parsed = parseEvent<{ status: string; provider?: "chatgpt" | "grok" }>(event as MessageEvent<string>);
+      const parsed = parseEvent<{ status: string; provider?: "chatgpt" | "grok"; model?: string }>(event as MessageEvent<string>);
       if (!parsed || isLeavingRef.current) return;
       const status = parsed.status || "online";
       setAiStatus((current) => {
         const nextProvider = parsed.provider || "chatgpt";
+        const model = parsed.model?.trim();
         return {
           ...current,
           [nextProvider]: status,
+          ...(nextProvider === "chatgpt" && model ? { chatgptModel: model } : {}),
+          ...(nextProvider === "grok" && model ? { grokModel: model } : {}),
           updatedAt: new Date().toISOString(),
         };
       });
@@ -1667,6 +2231,9 @@ export function ChatApp() {
     stream.addEventListener("presence.updated", onPresenceUpdated);
     stream.addEventListener("user.updated", onUserUpdated);
     stream.addEventListener("message.created", onMessageCreated);
+    stream.addEventListener("message.updated", onMessageUpdated);
+    stream.addEventListener("reaction.received", onReactionReceived);
+    stream.addEventListener("taste.updated", onTasteUpdated);
     stream.addEventListener("poll.updated", onPollUpdated);
     stream.addEventListener("ai.status", onAiStatus);
     stream.addEventListener("chat.background.updated", onBackgroundUpdated);
@@ -1676,9 +2243,19 @@ export function ChatApp() {
     };
 
     return () => {
+      if (tasteModalRefetchTimeoutRef.current !== null) {
+        window.clearTimeout(tasteModalRefetchTimeoutRef.current);
+        tasteModalRefetchTimeoutRef.current = null;
+      }
       stream.close();
     };
-  }, [applyIncomingMessages, applySnapshot, session]);
+  }, [
+    applyIncomingMessages,
+    applySnapshot,
+    loadTasteProfileModalData,
+    session,
+    syncSessionIdentityFromPresence,
+  ]);
 
   useEffect(() => {
     if (!session) return;
@@ -1752,60 +2329,25 @@ export function ChatApp() {
     const element = scrollRef.current;
     if (!element) return;
     lastKnownScrollHeightRef.current = element.scrollHeight;
-    let frame: number | null = null;
-    let pendingAnchorPreservation = false;
-    let pendingBottomStick = false;
 
-    const flushHeightDelta = () => {
-      if (frame !== null) return;
-      frame = window.requestAnimationFrame(() => {
-        frame = null;
-        const previousHeight = lastKnownScrollHeightRef.current || element.scrollHeight;
-        const nextHeight = element.scrollHeight;
-        const delta = nextHeight - previousHeight;
-
-        if (pendingAnchorPreservation && delta !== 0) {
-          element.scrollTop += delta;
-        } else if (pendingBottomStick) {
-          scheduleBottomStick();
-        }
-
-        pendingAnchorPreservation = false;
-        pendingBottomStick = false;
-        lastKnownScrollHeightRef.current = nextHeight;
-      });
-    };
-
-    const onLoadCapture = (event: Event) => {
-      const target = event.target instanceof HTMLElement ? event.target : null;
-      const wasAtBottom = isAtBottomRef.current;
-      const containerRect = element.getBoundingClientRect();
-      const targetRect = target?.getBoundingClientRect();
-      const canAffectViewport = targetRect
-        ? targetRect.top < containerRect.bottom
-        : false;
-
-      if (!wasAtBottom && canAffectViewport) {
-        pendingAnchorPreservation = true;
+    const onLoadCapture = () => {
+      lastKnownScrollHeightRef.current = element.scrollHeight;
+      if (isAtBottomRef.current && !userDetachedFromBottomRef.current) {
+        scheduleBottomStick();
       }
-      if (wasAtBottom) {
-        pendingBottomStick = true;
-      }
-      flushHeightDelta();
     };
 
     const observer = new MutationObserver(() => {
       lastKnownScrollHeightRef.current = element.scrollHeight;
-      scheduleBottomStick();
+      if (isAtBottomRef.current && !userDetachedFromBottomRef.current) {
+        scheduleBottomStick();
+      }
     });
 
     element.addEventListener("load", onLoadCapture, true);
     observer.observe(element, { childList: true, subtree: true });
 
     return () => {
-      if (frame !== null) {
-        window.cancelAnimationFrame(frame);
-      }
       element.removeEventListener("load", onLoadCapture, true);
       observer.disconnect();
     };
@@ -1816,30 +2358,49 @@ export function ChatApp() {
     if (!element) return;
     lastKnownScrollHeightRef.current = element.scrollHeight;
     previousScrollTopRef.current = element.scrollTop;
+    lastKnownBottomOffsetRef.current = Math.max(
+      0,
+      element.scrollHeight - (element.scrollTop + element.clientHeight),
+    );
 
     const onScroll = () => {
-      const currentScrollTop = element.scrollTop;
+      const currentScrollTop = Math.max(0, element.scrollTop);
       const previousScrollTop = previousScrollTopRef.current;
+      const previousBottomOffset = lastKnownBottomOffsetRef.current;
       previousScrollTopRef.current = currentScrollTop;
       lastKnownScrollHeightRef.current = element.scrollHeight;
 
       const distanceFromBottom = element.scrollHeight - (currentScrollTop + element.clientHeight);
+      lastKnownBottomOffsetRef.current = Math.max(0, distanceFromBottom);
+      const movingUp = currentScrollTop < previousScrollTop;
       if (distanceFromBottom <= HARD_BOTTOM_ATTACH_PX) {
         userDetachedFromBottomRef.current = false;
-      } else if (currentScrollTop < previousScrollTop) {
+      } else if (
+        movingUp
+        && distanceFromBottom > AUTO_SCROLL_NEAR_BOTTOM_PX
+        && distanceFromBottom > previousBottomOffset + MANUAL_DETACH_DELTA_PX
+      ) {
         userDetachedFromBottomRef.current = true;
+      } else if (distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX) {
+        userDetachedFromBottomRef.current = false;
       }
 
       const atBottom = !userDetachedFromBottomRef.current && distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX;
       isAtBottomRef.current = atBottom;
+      if (atBottom) {
+        prependAnchorRef.current = null;
+      }
       setIsAtBottom((current) => (current === atBottom ? current : atBottom));
 
-      const crossedTopThresholdUpward =
-        currentScrollTop < TOP_LOAD_TRIGGER_PX &&
-        previousScrollTop >= TOP_LOAD_TRIGGER_PX &&
-        currentScrollTop < previousScrollTop;
+      const reachedTopTrigger = currentScrollTop <= TOP_LOAD_TRIGGER_PX;
+      const closeToAbsoluteTop = currentScrollTop <= 4;
+      const shouldAttemptTopLoad = reachedTopTrigger && (movingUp || closeToAbsoluteTop);
+      const now = Date.now();
+      const cooldownElapsed = now >= topLoadCooldownUntilRef.current;
+      const canTopLoad = !loadingOlder && !topLoadInFlightRef.current;
 
-      if (crossedTopThresholdUpward && !loadingOlder) {
+      if (shouldAttemptTopLoad && cooldownElapsed && canTopLoad) {
+        topLoadCooldownUntilRef.current = now + TOP_LOAD_COOLDOWN_MS;
         if (messageWindowSize < messages.length) {
           captureScrollAnchor();
           setMessageWindowSize((current) => Math.min(messages.length, current + MESSAGE_RENDER_CHUNK));
@@ -1847,7 +2408,10 @@ export function ChatApp() {
         }
 
         if (hasMoreOlder) {
-          void loadOlderMessages();
+          topLoadInFlightRef.current = true;
+          void loadOlderMessages().finally(() => {
+            topLoadInFlightRef.current = false;
+          });
         }
       }
     };
@@ -1866,6 +2430,14 @@ export function ChatApp() {
     if (!anchor || !element) return;
 
     const delta = element.scrollHeight - anchor.height;
+    if (isAtBottomRef.current && !userDetachedFromBottomRef.current) {
+      prependAnchorRef.current = null;
+      return;
+    }
+    if (delta <= 0) {
+      prependAnchorRef.current = null;
+      return;
+    }
     element.scrollTop = anchor.top + delta;
     prependAnchorRef.current = null;
   }, [messages.length, messageWindowSize]);
@@ -1882,6 +2454,9 @@ export function ChatApp() {
         setLightbox(null);
         setMobileSidebarOpen(false);
         setEditingProfile(false);
+        setMemberDrawerOpen(false);
+        setShowBackgroundModal(false);
+        setShowPointsInfo(false);
       }
       if (
         event.key === "?" &&
@@ -1905,7 +2480,6 @@ export function ChatApp() {
       });
 
       setUsers((current) => mergeUser(current, user));
-      setMessages((current) => limitVisibleMessages(syncProfilePictureForUser(current, user)));
 
       const nextSession = {
         ...session,
@@ -1918,8 +2492,31 @@ export function ChatApp() {
     [session],
   );
 
+  const updateOwnAccount = useCallback(
+    async (payload: Omit<UpdateOwnAccountRequest, "clientId">) => {
+      if (!session) return;
+      const updatedSession = await apiJson<AuthSessionDTO>("/api/users/me/account", {
+        method: "PATCH",
+        body: JSON.stringify({ clientId: session.clientId, ...payload } satisfies UpdateOwnAccountRequest),
+      });
+
+      setUsers((current) => mergeUser(current, updatedSession));
+      const nextSession = toSessionState(updatedSession);
+      setSession(nextSession);
+      saveSession(nextSession);
+    },
+    [session],
+  );
+
   const sendMessage = useCallback(async (payload: CreateMessageRequest) => {
     return apiJson<MessageDTO>("/api/messages", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }, []);
+
+  const sendReaction = useCallback(async (payload: ReactMessageRequest) => {
+    return apiJson<MessageDTO>("/api/messages/react", {
       method: "POST",
       body: JSON.stringify(payload),
     });
@@ -1972,12 +2569,11 @@ export function ChatApp() {
           .join("\n");
         const combinedMessage = [content, uploadedImageMarkdown].filter(Boolean).join("\n\n");
         if (!combinedMessage) return;
-        const shouldTriggerAiWorker = hasAiMention(combinedMessage);
 
         tempMessageId = createTempMessageId();
         appendOptimisticMessage({
           id: tempMessageId,
-          authorId: session.clientId,
+          authorId: session.id,
           type: "message",
           message: combinedMessage,
           username: session.username,
@@ -2003,9 +2599,6 @@ export function ChatApp() {
         clearPendingDelivery(tempMessageId);
         removeOptimisticMessage(tempMessageId);
         applyIncomingMessages([created], { notify: false });
-        if (shouldTriggerAiWorker) {
-          kickOffAiWorker();
-        }
         setReplyTarget(null);
       } else if (composerMode === "question") {
         const content = questionDraft.trim();
@@ -2014,7 +2607,7 @@ export function ChatApp() {
         tempMessageId = createTempMessageId();
         appendOptimisticMessage({
           id: tempMessageId,
-          authorId: session.clientId,
+          authorId: session.id,
           type: "question",
           message: content,
           username: session.username,
@@ -2080,12 +2673,15 @@ export function ChatApp() {
           tempMessageId = createTempMessageId();
           appendOptimisticMessage({
             id: tempMessageId,
-            authorId: session.clientId,
+            authorId: session.id,
             type: "votingPoll",
             message: question,
             username: session.username,
             profilePicture: sessionProfilePicture,
             createdAt: new Date().toISOString(),
+            questionId: replyTarget?.id,
+            oldusername: replyTarget?.username,
+            oldmessage: replyTarget?.message,
             poll: {
               options: options.map((option, index) => ({
                 id: `${tempMessageId}-opt-${index}`,
@@ -2109,6 +2705,7 @@ export function ChatApp() {
             message: question,
             pollOptions: options,
             pollMultiSelect,
+            questionId: replyTarget?.id,
           });
           clearPendingDelivery(tempMessageId);
           removeOptimisticMessage(tempMessageId);
@@ -2117,9 +2714,11 @@ export function ChatApp() {
           setPollQuestion("");
           setPollOptions(["", ""]);
           setPollMultiSelect(false);
+          setReplyTarget(null);
         }
       }
 
+      kickOffAiWorker();
       setError(null);
     } catch (submitError) {
       if (tempMessageId) {
@@ -2160,7 +2759,7 @@ export function ChatApp() {
       const questionContext = messages.find((message) => message.id === questionMessageId);
       appendOptimisticMessage({
         id: tempMessageId,
-        authorId: session.clientId,
+        authorId: session.id,
         type: "answer",
         message: draft,
         username: session.username,
@@ -2249,6 +2848,40 @@ export function ChatApp() {
     [applyIncomingMessages, session, sessionProfilePicture],
   );
 
+  const handleReact = useCallback(
+    async (messageId: string, reaction: ReactionType) => {
+      if (!session) return;
+      optimisticReactionRollbackRef.current = null;
+
+      setMessages((current) => {
+        const optimistic = applyOptimisticReaction(current, { messageId, reaction });
+        if (optimistic !== current) {
+          optimisticReactionRollbackRef.current = current;
+        }
+        return limitVisibleMessages(optimistic);
+      });
+
+      try {
+        const payload: ReactMessageRequest = {
+          clientId: session.clientId,
+          messageId,
+          reaction,
+        };
+        const updated = await sendReaction(payload);
+        optimisticReactionRollbackRef.current = null;
+        setMessages((current) => limitVisibleMessages(mergeMessage(current, updated)));
+      } catch (reactionError) {
+        const rollback = optimisticReactionRollbackRef.current;
+        if (rollback) {
+          setMessages(limitVisibleMessages(rollback));
+        }
+        optimisticReactionRollbackRef.current = null;
+        setError(reactionError instanceof Error ? reactionError.message : "Reaktion konnte nicht gespeichert werden.");
+      }
+    },
+    [sendReaction, session],
+  );
+
   const handleExtendPoll = useCallback(
     async (message: MessageDTO) => {
       if (message.type !== "votingPoll") return;
@@ -2296,6 +2929,12 @@ export function ChatApp() {
       username: message.username,
       message: message.message,
     });
+
+    const aiProviderTag = aiTagForReplyMessage(message);
+    if (aiProviderTag) {
+      setMessageDraft((current) => ensureLeadingAiReplyTag(current, aiProviderTag));
+    }
+
     setComposerMode("message");
     requestAnimationFrame(() => {
       messageInputRef.current?.focus();
@@ -2461,6 +3100,10 @@ export function ChatApp() {
         window.clearTimeout(lightboxCopyResetTimeoutRef.current);
         lightboxCopyResetTimeoutRef.current = null;
       }
+      if (validationToastResetTimeoutRef.current !== null) {
+        window.clearTimeout(validationToastResetTimeoutRef.current);
+        validationToastResetTimeoutRef.current = null;
+      }
     };
   }, []);
 
@@ -2479,9 +3122,82 @@ export function ChatApp() {
       setError("Der Benutzername muss mindestens 3 Zeichen lang sein.");
       return;
     }
-    await updateUser({ newUsername: username, profilePicture });
-    setProfilePictureDraft(profilePicture);
-    setEditingProfile(false);
+    setSavingProfile(true);
+    try {
+      await updateUser({ newUsername: username, profilePicture });
+      setProfilePictureDraft(profilePicture);
+      setError(null);
+      setValidationNotice({
+        title: "Profil gespeichert",
+        message: "Anzeigename und Profilbild wurden aktualisiert.",
+      });
+    } catch (profileError) {
+      setError(profileError instanceof Error ? profileError.message : "Profil konnte nicht gespeichert werden.");
+    } finally {
+      setSavingProfile(false);
+    }
+  }
+
+  async function saveSecurity(): Promise<void> {
+    if (!session) return;
+
+    const currentPassword = currentPasswordDraft.trim();
+    const nextLoginName = loginNameDraft.trim().toLowerCase();
+    const currentLoginName = (session.loginName || "").trim().toLowerCase();
+    const loginNameChanged = nextLoginName !== currentLoginName;
+    const nextPassword = newPasswordDraft.trim();
+    const confirmPassword = confirmNewPasswordDraft.trim();
+
+    if (!loginNameChanged && !nextPassword) {
+      setError("Keine Sicherheitsänderung erkannt.");
+      return;
+    }
+    if (loginNameChanged && !LOGIN_NAME_PATTERN.test(nextLoginName)) {
+      setError("Der Login-Name muss 3-32 Zeichen haben (a-z, 0-9, ., _, -).");
+      return;
+    }
+    if (!currentPassword) {
+      setError("Bitte aktuelles Passwort eingeben.");
+      return;
+    }
+    if (currentPassword.length < 8) {
+      setError("Das aktuelle Passwort muss mindestens 8 Zeichen haben.");
+      return;
+    }
+    if (!nextPassword && confirmPassword) {
+      setError("Bitte neues Passwort eingeben.");
+      return;
+    }
+    if (nextPassword && nextPassword.length < 8) {
+      setError("Das neue Passwort muss mindestens 8 Zeichen haben.");
+      return;
+    }
+    if (nextPassword && confirmPassword !== nextPassword) {
+      setError("Die neuen Passwörter stimmen nicht überein.");
+      return;
+    }
+
+    setSavingSecurity(true);
+    try {
+      await updateOwnAccount({
+        currentPassword,
+        ...(loginNameChanged ? { newLoginName: nextLoginName } : {}),
+        ...(nextPassword ? { newPassword: nextPassword } : {}),
+      });
+      setLoginNameDraft(nextLoginName);
+      setCurrentPasswordDraft("");
+      setNewPasswordDraft("");
+      setConfirmNewPasswordDraft("");
+      setError(null);
+      setValidationNotice({
+        title: "Sicherheit gespeichert",
+        message: "Login-Name/Passwort wurden aktualisiert.",
+      });
+    } catch (securityError) {
+      setError(securityError instanceof Error ? securityError.message : "Sicherheitseinstellungen konnten nicht gespeichert werden.");
+    } finally {
+      setSavingSecurity(false);
+    }
   }
 
   async function onProfileImageUpload(file: File | undefined) {
@@ -2683,14 +3399,18 @@ export function ChatApp() {
 
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      void submitComposer();
+      window.setTimeout(() => {
+        void submitComposer();
+      }, 0);
     }
   }
 
   function onQuestionInputKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): void {
     if (event.key !== "Enter") return;
     event.preventDefault();
-    void submitComposer();
+    window.setTimeout(() => {
+      void submitComposer();
+    }, 0);
   }
 
   async function saveChatBackground(url: string | null): Promise<void> {
@@ -2708,6 +3428,10 @@ export function ChatApp() {
 
   async function onBackgroundImageUpload(file: File | undefined): Promise<void> {
     if (!file) return;
+    if (!SUPPORTED_CHAT_UPLOAD_MIME_TYPES.has(file.type)) {
+      setError("Nur png, jpg, webp oder gif werden unterstützt.");
+      return;
+    }
     setUploadingBackground(true);
     try {
       const formData = new FormData();
@@ -2715,13 +3439,28 @@ export function ChatApp() {
       const response = await fetch("/api/uploads/chat", { method: "POST", body: formData });
       if (!response.ok) throw new Error(await readApiError(response, "Upload fehlgeschlagen"));
       const payload = (await response.json()) as UploadResponse;
-      await saveChatBackground(payload.url);
+      setBackgroundDraftUrl(payload.url);
       setError(null);
     } catch (uploadError) {
       setError(uploadError instanceof Error ? uploadError.message : "Chat-Hintergrund konnte nicht aktualisiert werden.");
     } finally {
       setUploadingBackground(false);
       if (backgroundUploadRef.current) backgroundUploadRef.current.value = "";
+    }
+  }
+
+  function onBackgroundModalPaste(event: ClipboardEvent<HTMLDivElement>): void {
+    const imageFiles = extractSupportedImageFiles(event.clipboardData, SUPPORTED_CHAT_UPLOAD_MIME_TYPES);
+    if (imageFiles.length > 0) {
+      event.preventDefault();
+      void onBackgroundImageUpload(imageFiles[0]);
+      return;
+    }
+
+    const pastedText = event.clipboardData.getData("text/plain").trim();
+    if (/^https?:\/\/\S+/i.test(pastedText)) {
+      event.preventDefault();
+      setBackgroundDraftUrl(pastedText);
     }
   }
 
@@ -2744,6 +3483,10 @@ export function ChatApp() {
       keepalive: true,
     }).catch(() => {});
 
+    await fetch("/api/auth/session", {
+      method: "DELETE",
+    }).catch(() => {});
+
     clearSession();
     router.replace("/login");
   }
@@ -2753,238 +3496,237 @@ export function ChatApp() {
     setShowOnboarding(false);
   }
 
-  async function enableNotificationsFromOnboarding(): Promise<void> {
-    await requestNotificationPermission();
-    finishOnboarding();
-  }
-
-  async function enableNotificationsFromSidebar(): Promise<void> {
-    await requestNotificationPermission();
-  }
-
-  function openProfileEditor(): void {
+  const openProfileEditor = useCallback((): void => {
     if (!session) return;
     setUsernameDraft(session.username);
+    setLoginNameDraft(session.loginName || "");
     setProfilePictureDraft(session.profilePicture || getDefaultProfilePicture());
+    setCurrentPasswordDraft("");
+    setNewPasswordDraft("");
+    setConfirmNewPasswordDraft("");
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setProfileDropActive(false);
+      setMemberDrawerOpen(false);
+      setEditingProfile(true);
+    });
+    window.setTimeout(() => {
+      void loadTasteProfileModalData();
+    }, 0);
+  }, [loadTasteProfileModalData, session, startUiTransition]);
+
+  const closeProfileEditor = useCallback((): void => {
+    startUiTransition(() => {
+      setProfileDropActive(false);
+      setEditingProfile(false);
+    });
+
+    window.setTimeout(() => {
+      setCurrentPasswordDraft("");
+      setNewPasswordDraft("");
+      setConfirmNewPasswordDraft("");
+    }, 0);
+  }, [startUiTransition]);
+
+  const openSharedBackgroundModal = useCallback((): void => {
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setBackgroundDraftUrl("");
+      setShowBackgroundModal(true);
+    });
+  }, [startUiTransition]);
+
+  const openPointsInfoModal = useCallback((): void => {
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setShowPointsInfo(true);
+    });
+  }, [startUiTransition]);
+
+  const openMediaModal = useCallback((): void => {
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setMediaVisibleCount(60);
+      setShowMedia(true);
+    });
+  }, [startUiTransition]);
+
+  const openDevMenu = useCallback((): void => {
+    if (!isDeveloperMode) return;
     setMobileSidebarOpen(false);
-    setProfileDropActive(false);
-    setEditingProfile(true);
+    router.push("/dev");
+  }, [isDeveloperMode, router]);
+
+  async function saveBackgroundDraft(): Promise<void> {
+    setUploadingBackground(true);
+    try {
+      await saveChatBackground(backgroundDraftUrl.trim() || null);
+      setShowBackgroundModal(false);
+      setError(null);
+    } catch (backgroundError) {
+      setError(backgroundError instanceof Error ? backgroundError.message : "Chat-Hintergrund konnte nicht gespeichert werden.");
+    } finally {
+      setUploadingBackground(false);
+    }
   }
 
-  function closeProfileEditor(): void {
-    setProfileDropActive(false);
-    setEditingProfile(false);
-  }
+  const openMemberProfile = useCallback(async (user: UserPresenceDTO): Promise<void> => {
+    const ownCachedProfile = session?.clientId ? publicProfileCacheRef.current[session.clientId] : undefined;
+    const fallbackOwnStats = ownWindowStats ? ownProfileStats : null;
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setMemberDrawerOpen(true);
+      setMemberDrawerError(null);
+      setMemberDrawerOwnStats(ownCachedProfile?.stats ?? fallbackOwnStats);
+    });
 
-  const backgroundControls = (
-    <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
-      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Geteilter Chat-Hintergrund</p>
-      <div className="mt-2 flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() => backgroundUploadRef.current?.click()}
-          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
-          disabled={uploadingBackground}
-        >
-          {uploadingBackground ? "Wird hochgeladen…" : "Hintergrund hochladen"}
-        </button>
-        <button
-          type="button"
-          onClick={() => {
-            void saveChatBackground(null).catch(() => {
-              setError("Chat-Hintergrund konnte nicht zurückgesetzt werden.");
-            });
-          }}
-          className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-medium text-slate-700"
-        >
-          Zurücksetzen
-        </button>
-      </div>
-    </div>
+    if (AI_CLIENT_IDS.has(user.clientId)) {
+      setMemberDrawerLoading(false);
+      setMemberDrawerProfile(toSyntheticPublicProfile(user));
+      return;
+    }
+
+    const cached = publicProfileCacheRef.current[user.clientId];
+    if (cached) {
+      setMemberDrawerLoading(false);
+      setMemberDrawerProfile(cached);
+      if (session?.clientId === user.clientId) {
+        setMemberDrawerOwnStats(cached.stats);
+      } else if (!ownCachedProfile && session?.clientId) {
+        try {
+          const ownProfile = await fetchPublicUserProfile(session.clientId);
+          publicProfileCacheRef.current[ownProfile.clientId] = ownProfile;
+          setMemberDrawerOwnStats(ownProfile.stats);
+        } catch {
+          // Keep fallback own stats when own profile cannot be loaded.
+        }
+      }
+      return;
+    }
+
+    setMemberDrawerLoading(true);
+    setMemberDrawerProfile(null);
+    try {
+      const ownProfilePromise: Promise<PublicUserProfileDTO | null> = session?.clientId
+        ? user.clientId === session.clientId
+          ? Promise.resolve(null)
+          : ownCachedProfile
+            ? Promise.resolve(ownCachedProfile)
+            : fetchPublicUserProfile(session.clientId).catch(() => null)
+        : Promise.resolve(null);
+      const profile = await fetchPublicUserProfile(user.clientId);
+      publicProfileCacheRef.current[user.clientId] = profile;
+      setMemberDrawerProfile(profile);
+      const ownProfile = user.clientId === session?.clientId ? profile : await ownProfilePromise;
+      if (ownProfile) {
+        publicProfileCacheRef.current[ownProfile.clientId] = ownProfile;
+      }
+      setMemberDrawerOwnStats(
+        ownProfile?.stats ?? (session?.clientId === user.clientId ? profile.stats : fallbackOwnStats),
+      );
+    } catch (profileError) {
+      setMemberDrawerError(profileError instanceof Error ? profileError.message : "Profil konnte nicht geladen werden.");
+    } finally {
+      setMemberDrawerLoading(false);
+    }
+  }, [fetchPublicUserProfile, ownProfileStats, ownWindowStats, session?.clientId, startUiTransition]);
+
+  const openMessageAuthorProfile = useCallback((message: MessageDTO): void => {
+    const normalizedAuthor = message.username.trim().toLowerCase();
+    const matchedOnlineUserById = message.authorId
+      ? users.find((user) => user.id === message.authorId)
+      : undefined;
+    const matchedOnlineUserByName = users.find((user) => user.username.trim().toLowerCase() === normalizedAuthor);
+    const matchedAiUser = AI_ASSISTANT_USERNAMES.has(normalizedAuthor)
+      ? onlineUsers.find((user) => user.username.trim().toLowerCase() === normalizedAuthor)
+      : undefined;
+    const matched = matchedOnlineUserById || matchedOnlineUserByName || matchedAiUser;
+
+    if (matched) {
+      void openMemberProfile(matched);
+      return;
+    }
+
+    const ownCachedProfile = session?.clientId ? publicProfileCacheRef.current[session.clientId] : undefined;
+    const fallbackProfile = toSyntheticPublicProfile({
+      id: message.authorId || `message-author-${message.id}`,
+      clientId: AI_CLIENT_IDS.has(normalizedAuthor) ? normalizedAuthor : `message-author-${message.id}`,
+      username: message.username,
+      profilePicture: normalizeProfilePictureUrl(message.profilePicture),
+      status: "",
+      isOnline: false,
+      lastSeenAt: null,
+      member: message.member,
+    });
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setMemberDrawerOpen(true);
+      setMemberDrawerLoading(false);
+      setMemberDrawerError(null);
+      setMemberDrawerOwnStats(ownCachedProfile?.stats ?? (ownWindowStats ? ownProfileStats : null));
+      setMemberDrawerProfile(fallbackProfile);
+    });
+  }, [onlineUsers, openMemberProfile, ownProfileStats, ownWindowStats, session?.clientId, startUiTransition, users]);
+
+  const closeMobileSidebar = useCallback((): void => {
+    setMobileSidebarOpen(false);
+  }, []);
+
+  const openMobileSidebar = useCallback((): void => {
+    setMobileSidebarOpen(true);
+  }, []);
+
+  const handleOpenSidebarMemberProfile = useCallback((user: UserPresenceDTO): void => {
+    void openMemberProfile(user);
+  }, [openMemberProfile]);
+
+  const sidebarOnlineUsersContent = useMemo(
+    () => (
+      <OnlineUsersList
+        users={sidebarOnlineUsers}
+        avatarSizeClassName="h-11 w-11"
+        onOpenMemberProfile={handleOpenSidebarMemberProfile}
+      />
+    ),
+    [handleOpenSidebarMemberProfile, sidebarOnlineUsers],
   );
 
-  const notificationControls = showNotificationPrompt ? (
-    <div className="rounded-xl border border-slate-100 bg-slate-50 p-3">
-      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Benachrichtigungen</p>
-      <p className="mt-1 text-xs text-slate-600">{describeNotificationState(notificationCapability)}</p>
-      <button
-        type="button"
-        onClick={() => void enableNotificationsFromSidebar()}
-        disabled={!notificationCapability.canRequest}
-        className="mt-2 h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 disabled:opacity-60"
-      >
-        {notificationButtonLabel(notificationCapability)}
-      </button>
-    </div>
-  ) : undefined;
-
-  const developerControls = isDeveloperMode ? (
-    <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-amber-900">Entwicklerwerkzeuge</p>
-        <button
-          type="button"
-          onClick={() => setShowAdminPanel((value) => !value)}
-          className="h-7 rounded-lg border border-amber-300 bg-white px-2 text-[11px] font-semibold text-amber-900"
-        >
-          {showAdminPanel ? "Ausblenden" : "Öffnen"}
-        </button>
-      </div>
-      {showAdminPanel ? (
-        <div className="mt-2 space-y-2">
-          <div className="grid grid-cols-2 gap-2 text-[11px] text-amber-900">
-            <div className="rounded-lg bg-white px-2 py-1">
-              Nutzer: <span className="font-semibold">{adminOverview?.usersTotal ?? "-"}</span>
-            </div>
-            <div className="rounded-lg bg-white px-2 py-1">
-              Online: <span className="font-semibold">{adminOverview?.usersOnline ?? "-"}</span>
-            </div>
-            <div className="rounded-lg bg-white px-2 py-1">
-              Nachrichten: <span className="font-semibold">{adminOverview?.messagesTotal ?? "-"}</span>
-            </div>
-            <div className="rounded-lg bg-white px-2 py-1">
-              Sperrliste: <span className="font-semibold">{adminOverview?.blacklistTotal ?? "-"}</span>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => void fetchAdminOverview()}
-              disabled={adminBusy}
-              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-            >
-              Aktualisieren
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (!window.confirm("Alle Chat-Nachrichten und Umfragen löschen?")) return;
-                void runAdminAction("delete_all_messages");
-              }}
-              disabled={adminBusy}
-              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-            >
-              Nachrichten löschen
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (!window.confirm("Alle Nutzer außer dir abmelden?")) return;
-                void runAdminAction("logout_all_users");
-              }}
-              disabled={adminBusy}
-              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-            >
-              Nutzer abmelden
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (!window.confirm("Sperrliste für Benutzernamen leeren?")) return;
-                void runAdminAction("clear_blacklist");
-              }}
-              disabled={adminBusy}
-              className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-            >
-              Sperrliste leeren
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                if (!window.confirm("Alles zurücksetzen? Nachrichten, Nutzer und Sperrliste werden gelöscht.")) return;
-                void runAdminAction("reset_all");
-              }}
-              disabled={adminBusy}
-              className="h-8 rounded-lg bg-amber-600 px-3 text-[11px] font-semibold text-white disabled:opacity-60"
-            >
-              Alles zurücksetzen
-            </button>
-          </div>
-          <div className="space-y-2">
-            <div className="flex gap-2">
-              <input
-                value={adminTargetUsername}
-                onChange={(event) => setAdminTargetUsername(event.target.value)}
-                placeholder="Benutzername zum Löschen…"
-                className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  const target = adminTargetUsername.trim();
-                  if (!target) return;
-                  if (!window.confirm(`Nutzer ${target} löschen?`)) return;
-                  void runAdminAction("delete_user", { targetUsername: target });
-                }}
-                disabled={adminBusy}
-                className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-              >
-                Nutzer löschen
-              </button>
-            </div>
-            <div className="flex gap-2">
-              <input
-                value={adminTargetMessageId}
-                onChange={(event) => setAdminTargetMessageId(event.target.value)}
-                placeholder="Nachrichten-ID zum Löschen…"
-                className="h-8 flex-1 rounded-lg border border-amber-300 bg-white px-2 text-xs text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  const target = adminTargetMessageId.trim();
-                  if (!target) return;
-                  if (!window.confirm(`Nachricht ${target} löschen?`)) return;
-                  void runAdminAction("delete_message", { targetMessageId: target });
-                }}
-                disabled={adminBusy}
-                className="h-8 rounded-lg border border-amber-300 bg-white px-3 text-[11px] font-semibold text-amber-900 disabled:opacity-60"
-              >
-                Nachricht löschen
-              </button>
-            </div>
-          </div>
-          {adminNotice ? <p className="text-[11px] font-medium text-amber-900">{adminNotice}</p> : null}
+  if (!session) {
+    return (
+      <div className="brand-surface min-h-[100svh] p-6">
+        <div className="glass-panel-strong mx-auto max-w-5xl rounded-2xl p-5 animate-pulse">
+          <div className="h-5 w-36 rounded bg-slate-200/70" />
+          <div className="mt-4 h-12 rounded-xl bg-slate-200/70" />
+          <div className="mt-3 h-12 rounded-xl bg-slate-200/70" />
+          <div className="mt-3 h-40 rounded-2xl bg-slate-200/70" />
         </div>
-      ) : null}
-    </div>
-  ) : undefined;
-
-  if (!session) return <div className="p-6 text-sm text-slate-500">Wird geladen…</div>;
+      </div>
+    );
+  }
 
   return (
     <main
       style={chatBackgroundStyle}
-      className="relative h-[100svh] w-full overflow-hidden bg-[radial-gradient(circle_at_top_right,_#dbeafe_0%,_#f8fafc_45%,_#eff6ff_100%)]"
+      className="brand-surface relative h-[100dvh] w-full overflow-x-hidden overflow-y-hidden [touch-action:manipulation]"
     >
       <ChatShellSidebar
         mobileOpen={mobileSidebarOpen}
-        onCloseMobile={() => setMobileSidebarOpen(false)}
+        onCloseMobile={closeMobileSidebar}
         username={session.username}
         profilePicture={sessionProfilePicture}
-        statusLabel={isDeveloperMode ? "Entwicklermodus" : "online"}
+        member={ownMember}
+        memberHighlight={highlightOwnMember}
         onOpenProfileEditor={openProfileEditor}
-        onLogout={() => void logout()}
-        onlineUsersContent={<OnlineUsersList users={onlineUsers} avatarSizeClassName="h-11 w-11" onOpenLightbox={handleOpenLightbox} />}
-        notificationContent={notificationControls}
-        backgroundContent={backgroundControls}
-        developerContent={developerControls}
+        onOpenDevMenu={isDeveloperMode ? openDevMenu : undefined}
+        onOpenSharedBackground={openSharedBackgroundModal}
+        onOpenMedia={openMediaModal}
+        onOpenPointsInfo={openPointsInfoModal}
+        onlineUsersContent={sidebarOnlineUsersContent}
       />
 
       <div className="flex h-full min-h-0 flex-col lg:pl-72">
-        <ChatShellHeader
-          title="ChatPPC"
-          subtitle="Chatte mit deiner Gruppe. Erwähne @chatgpt oder @grok für KI-Antworten."
-          isDeveloperMode={isDeveloperMode}
-          sessionProfilePicture={sessionProfilePicture}
-          sessionUsername={session.username}
-          onOpenProfileEditor={openProfileEditor}
-          onOpenSidebar={() => setMobileSidebarOpen(true)}
-          onOpenMedia={() => setShowMedia(true)}
-        />
-
         <section
-          className="relative flex min-h-0 flex-1 flex-col"
+          className="relative flex min-h-0 flex-1 flex-col pt-[calc(env(safe-area-inset-top)+3.5rem)] lg:pt-0"
           onDragEnter={(event) => {
             event.preventDefault();
             dragDepthRef.current += 1;
@@ -3011,6 +3753,16 @@ export function ChatApp() {
             void onChatImageDrop(event.dataTransfer.files);
           }}
         >
+          <button
+            type="button"
+            onClick={openMobileSidebar}
+            className="absolute left-3 top-3 z-30 rounded-full border border-slate-200 bg-white p-2.5 text-slate-700 shadow-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 lg:hidden"
+            aria-label="Sidebar öffnen"
+            style={{ top: "calc(env(safe-area-inset-top) + 0.5rem)" }}
+          >
+            <Bars3Icon aria-hidden="true" className="size-5" />
+          </button>
+
           {isDraggingUpload ? (
             <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-sky-500/12 backdrop-blur-[1px]">
               <div className="rounded-2xl border-2 border-dashed border-sky-400 bg-white/95 px-6 py-5 text-center shadow-lg">
@@ -3022,15 +3774,20 @@ export function ChatApp() {
 
           <div
             ref={scrollRef}
-            className="min-h-0 flex-1 overflow-y-auto p-3 [overscroll-behavior:contain] [-webkit-overflow-scrolling:touch] sm:p-4"
+            className="relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto p-3 [overscroll-behavior:contain] [overflow-anchor:none] [-webkit-overflow-scrolling:touch] [touch-action:pan-y] sm:p-4"
             style={scrollContainerStyle}
           >
             {loadingOlder ? (
-              <p className="text-center text-xs text-slate-500">Ältere Nachrichten werden geladen…</p>
+              <div className="pointer-events-none absolute inset-x-0 top-3 z-10 flex justify-center">
+                <p className="rounded-full bg-white/90 px-3 py-1 text-xs text-slate-600 shadow-sm animate-pulse">
+                  Ältere Nachrichten werden geladen…
+                </p>
+              </div>
             ) : null}
             <div className="space-y-3">
               <MessageList
                 messages={visibleMessages}
+                currentUserId={session.id}
                 currentUsername={session.username}
                 isDeveloperMode={isDeveloperMode}
                 pendingDeliveries={pendingDeliveries}
@@ -3038,11 +3795,13 @@ export function ChatApp() {
                 onAnswerDraftChange={handleAnswerDraftChange}
                 onSubmitAnswer={submitAnswer}
                 onVote={handleVote}
+                onReact={handleReact}
                 onExtendPoll={handleExtendPoll}
                 onDeleteMessage={handleDeleteMessage}
                 onStartReply={handleStartReply}
                 onOpenLightbox={handleOpenLightbox}
                 onRemixImage={handleRemixImage}
+                onOpenAuthorProfile={openMessageAuthorProfile}
               />
             </div>
           </div>
@@ -3058,6 +3817,7 @@ export function ChatApp() {
                   setIsAtBottom(true);
                   setMessageWindowSize(Math.min(messages.length, MESSAGE_RENDER_WINDOW));
                   scrollToBottom("smooth");
+                  requestAnimationFrame(() => requestAnimationFrame(() => scrollToBottom("auto")));
                 }}
               >
                 Zu neuesten springen
@@ -3066,17 +3826,6 @@ export function ChatApp() {
           ) : null}
 
           <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-2 pb-[calc(env(safe-area-inset-bottom)+0.6rem)] pt-16 sm:px-3">
-            <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 h-36">
-              <div className="absolute inset-0 bg-gradient-to-t from-white/85 via-white/30 to-transparent" />
-              <div
-                className="absolute inset-0 backdrop-blur-md"
-                style={{
-                  maskImage: "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 100%)",
-                  WebkitMaskImage:
-                    "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 100%)",
-                }}
-              />
-            </div>
             <div className="pointer-events-auto relative mx-auto w-full max-w-[960px]">
               <ChatComposer
                 composerRef={composerRef}
@@ -3139,13 +3888,193 @@ export function ChatApp() {
         </section>
       </div>
 
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-36">
+        <div className="absolute inset-0 bg-gradient-to-t from-white/85 via-white/30 to-transparent" />
+        <div
+          className="absolute inset-0 sm:backdrop-blur-md"
+          style={{
+            maskImage: "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 100%)",
+            WebkitMaskImage:
+              "linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.55) 45%, rgba(0,0,0,0) 100%)",
+          }}
+        />
+      </div>
+
       <UiToast
         show={Boolean(error)}
-        title="Hinweis"
+        title="Fehler"
         message={error || ""}
         tone="error"
         onClose={() => setError(null)}
       />
+
+      <UiToast
+        show={Boolean(validationNotice)}
+        title={validationNotice?.title}
+        message={validationNotice?.message || ""}
+        tone="info"
+        onClose={() => {
+          if (validationToastResetTimeoutRef.current !== null) {
+            window.clearTimeout(validationToastResetTimeoutRef.current);
+            validationToastResetTimeoutRef.current = null;
+          }
+          setValidationNotice(null);
+        }}
+      />
+
+      {memberDrawerOpen ? (
+        <MemberProfileDrawer
+          open={memberDrawerOpen}
+          onClose={() => setMemberDrawerOpen(false)}
+          loading={memberDrawerLoading}
+          error={memberDrawerError}
+          profile={memberDrawerProfile}
+          ownStats={memberDrawerOwnStats}
+          aiModels={{ chatgpt: aiStatus.chatgptModel, grok: aiStatus.grokModel }}
+          onOpenProfileImage={(url, alt) => setLightbox({ url, alt })}
+        />
+      ) : null}
+
+      {showPointsInfo ? (
+        <AppOverlayDialog
+          open={showPointsInfo}
+          onClose={() => setShowPointsInfo(false)}
+          title="Wie bekomme ich PPC Score?"
+          description="Diese Aktionen geben dir Punkte."
+          maxWidthClassName="sm:max-w-lg"
+          bodyClassName="space-y-4"
+          footer={(
+            <div className="flex flex-wrap gap-2 sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setShowPointsInfo(false)}
+                className="inline-flex w-full justify-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-xs inset-ring-1 inset-ring-slate-300 hover:bg-slate-50 sm:w-auto"
+              >
+                Schließen
+              </button>
+            </div>
+          )}
+        >
+          <div className="space-y-2">
+            {PPC_MEMBER_POINT_RULES.map((rule) => (
+              <div key={rule.id} className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                <p className="text-sm text-slate-700">{rule.label}</p>
+                <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">
+                  +{rule.points}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Ränge & Schwellen</p>
+            <div className="mt-2 space-y-2">
+              {ownRankMilestones.map((step) => (
+                <div
+                  key={step.rank}
+                  className={`flex items-center justify-between rounded-lg border px-3 py-2 ${
+                    step.reached
+                      ? "border-emerald-200 bg-emerald-50"
+                      : "border-slate-200 bg-white"
+                  }`}
+                >
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">{step.label}</p>
+                    <p className="text-xs text-slate-600">ab {step.minScore} Punkten</p>
+                  </div>
+                  <p className={`text-xs font-semibold ${step.reached ? "text-emerald-700" : "text-slate-700"}`}>
+                    {step.reached ? "erreicht" : `noch ${step.remaining} Punkte`}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </AppOverlayDialog>
+      ) : null}
+
+      {showBackgroundModal ? (
+        <AppOverlayDialog
+          open={showBackgroundModal}
+          onClose={() => setShowBackgroundModal(false)}
+          title="Geteilter Chat-Hintergrund"
+          description="URL einfügen, Bild per Copy/Paste übernehmen oder hochladen."
+          maxWidthClassName="sm:max-w-xl"
+          bodyClassName="space-y-3"
+          footer={(
+            <div className="flex flex-wrap gap-2 sm:flex-row-reverse sm:justify-start">
+              <button
+                type="button"
+                onClick={() => void saveBackgroundDraft()}
+                className="inline-flex w-full justify-center rounded-md bg-slate-900 px-3 py-2 text-sm font-semibold text-white shadow-xs hover:bg-slate-800 disabled:opacity-60 sm:ml-3 sm:w-auto"
+                disabled={uploadingBackground}
+              >
+                {uploadingBackground ? "Speichert…" : "Speichern"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowBackgroundModal(false)}
+                className="inline-flex w-full justify-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-xs inset-ring-1 inset-ring-slate-300 hover:bg-slate-50 sm:w-auto"
+              >
+                Abbrechen
+              </button>
+            </div>
+          )}
+        >
+          <div className="space-y-3" onPaste={onBackgroundModalPaste}>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Aktuelle Vorschau</p>
+              <div className="mt-2 overflow-hidden rounded-lg border border-slate-200 bg-white">
+                {chatBackgroundUrl ? (
+                  <img
+                    src={chatBackgroundUrl}
+                    alt="Aktueller Chat-Hintergrund"
+                    className="aspect-video w-full bg-slate-100 object-contain"
+                    loading="lazy"
+                    decoding="async"
+                    width={960}
+                    height={540}
+                  />
+                ) : (
+                  <div className="grid aspect-video place-items-center bg-slate-100 text-xs text-slate-500">Kein Hintergrund gesetzt</div>
+                )}
+              </div>
+            </div>
+
+            <label className="block text-sm font-medium text-slate-900" htmlFor="chat-background-url">Bild-URL</label>
+            <input
+              id="chat-background-url"
+              name="chat-background-url"
+              type="url"
+              value={backgroundDraftUrl}
+              onChange={(event) => setBackgroundDraftUrl(event.target.value)}
+              placeholder="https://example.com/background.jpg…"
+              className="h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+              autoComplete="off"
+            />
+
+            <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-3">
+              <p className="text-xs text-slate-600">Tipp: Hier hinein klicken und dann ein Bild einfügen (Cmd/Ctrl + V).</p>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => backgroundUploadRef.current?.click()}
+                  className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  disabled={uploadingBackground}
+                >
+                  {uploadingBackground ? "Wird hochgeladen…" : "Datei hochladen"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setBackgroundDraftUrl("")}
+                  className="h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                >
+                  Zurücksetzen
+                </button>
+              </div>
+            </div>
+          </div>
+        </AppOverlayDialog>
+      ) : null}
 
       <input
         ref={profileUploadRef}
@@ -3156,91 +4085,210 @@ export function ChatApp() {
       />
 
       {editingProfile ? (
-        <div className="fixed inset-0 z-[65] grid place-items-center bg-slate-900/45 p-4" onClick={closeProfileEditor}>
-          <div
-            className="w-full max-w-2xl rounded-3xl border border-white/70 bg-white/95 p-5 shadow-2xl backdrop-blur sm:p-6"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Profil bearbeiten"
-          >
-            <div className="flex items-center gap-3 rounded-2xl border border-slate-100 bg-slate-50 p-3">
+        <AppOverlayDialog
+          open={editingProfile}
+          onClose={closeProfileEditor}
+          title="Mein Profil"
+          description="Profil, Sicherheit und Statistik."
+          maxWidthClassName="sm:max-w-2xl"
+          bodyClassName="space-y-4"
+          footer={(
+            <div className="flex flex-wrap gap-2 sm:justify-end">
+              <button
+                type="button"
+                onClick={closeProfileEditor}
+                className="inline-flex w-full justify-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-xs inset-ring-1 inset-ring-slate-300 hover:bg-slate-50 sm:w-auto"
+              >
+                Schließen
+              </button>
+            </div>
+          )}
+        >
+          <section className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4" onPaste={onProfileImagePaste}>
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">Profil</h3>
+              <button
+                type="button"
+                onClick={() => void saveProfile()}
+                className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white disabled:opacity-60"
+                disabled={uploadingProfile || savingProfile || isLeaving}
+              >
+                {savingProfile ? "Speichert…" : "Speichern"}
+              </button>
+            </div>
+
+            <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
               <img
                 src={profilePictureDraft || getDefaultProfilePicture()}
                 alt="Profilbild-Vorschau"
-                className="h-16 w-16 rounded-full border border-slate-200 object-cover"
+                className="h-20 w-20 rounded-full border border-slate-200 object-cover"
                 loading="lazy"
                 decoding="async"
+                width={80}
+                height={80}
               />
               <div className="min-w-0">
-                <p className="truncate text-2xl font-bold leading-tight text-slate-900">{usernameDraft || session.username}</p>
+                <p className="truncate text-xl font-semibold text-slate-900">{usernameDraft || session.username}</p>
                 <p className={`mt-1 text-sm font-medium ${isDeveloperMode ? "text-amber-600" : "text-sky-500"}`}>
                   {isDeveloperMode ? "Entwicklermodus" : "online"}
                 </p>
               </div>
             </div>
 
+            <label className="block text-sm font-medium text-slate-900" htmlFor="profile-display-name">Anzeigename</label>
+            <input
+              id="profile-display-name"
+              value={usernameDraft}
+              onChange={(event) => setUsernameDraft(event.target.value)}
+              placeholder="Benutzername…"
+              className="h-12 w-full rounded-xl border border-slate-200 px-4 text-base text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+            />
+
+            <div
+              className={`space-y-3 rounded-xl border border-dashed p-3 transition ${
+                profileDropActive
+                  ? "border-sky-400 bg-sky-50"
+                  : "border-slate-300 bg-white"
+              }`}
+              tabIndex={0}
+              onDragOver={onProfileImageDragOver}
+              onDragEnter={onProfileImageDragOver}
+              onDragLeave={onProfileImageDragLeave}
+              onDrop={onProfileImageDrop}
+            >
+              <p className="text-sm text-slate-500">Vor dem Speichern Profilbild hochladen und zuschneiden.</p>
+              <p className="text-xs text-slate-500">
+                Bild hierher ziehen oder per Einfügen (Cmd/Ctrl + V) übernehmen.
+              </p>
+              <button
+                type="button"
+                onClick={() => profileUploadRef.current?.click()}
+                className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 disabled:opacity-60"
+                disabled={uploadingProfile || savingProfile || isLeaving}
+              >
+                {uploadingProfile ? "Wird hochgeladen…" : "Hochladen"}
+              </button>
+            </div>
+
             <button
               type="button"
-              onClick={closeProfileEditor}
-              className="mt-4 h-12 w-full rounded-2xl border border-slate-200 bg-white text-base font-medium text-slate-700 transition hover:bg-slate-50"
+              onClick={() => void logout()}
+              className="h-11 w-full rounded-xl border border-rose-200 bg-rose-50 px-4 text-sm font-semibold text-rose-700 hover:bg-rose-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-300 disabled:cursor-not-allowed disabled:opacity-60"
+              disabled={isLeaving}
             >
-              Profil schließen
+              {isLeaving ? "Meldet ab…" : "Abmelden"}
             </button>
+          </section>
 
-            <div className="mt-4 space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4" onPaste={onProfileImagePaste}>
-              <input
-                value={usernameDraft}
-                onChange={(event) => setUsernameDraft(event.target.value)}
-                placeholder="Benutzername…"
-                className="h-12 w-full rounded-xl border border-slate-200 px-4 text-base text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-              />
+          <section className="space-y-3 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+            <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">Statistik</h3>
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-sm font-semibold text-slate-900">PPC Score</p>
+              <p className="text-sm font-semibold text-sky-700">{ownMember?.score ?? 0}</p>
+            </div>
+            <div className="h-2 overflow-hidden rounded-full bg-slate-200">
               <div
-                className={`space-y-3 rounded-xl border border-dashed p-3 transition ${
-                  profileDropActive
-                    ? "border-sky-400 bg-sky-50"
-                    : "border-slate-300 bg-white"
-                }`}
-                tabIndex={0}
-                onDragOver={onProfileImageDragOver}
-                onDragEnter={onProfileImageDragOver}
-                onDragLeave={onProfileImageDragLeave}
-                onDrop={onProfileImageDrop}
+                className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out"
+                style={{ width: `${ownProgressPercent}%` }}
+              />
+            </div>
+            <p className="text-xs text-slate-600">
+              {ownMember?.nextRank
+                ? `Noch ${ownMember.pointsToNext ?? 0} bis zum nächsten Rang`
+                : "Höchster Rang erreicht"}
+            </p>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {ownRankMilestones.map((step) => (
+                <div key={`profile-rank-${step.rank}`} className="rounded-lg border border-slate-200 bg-white px-2 py-2">
+                  <p className="text-xs font-semibold text-slate-800">{step.label}</p>
+                  <p className="text-[11px] text-slate-600">
+                    {step.reached ? "Erreicht" : `Noch ${step.remaining} bis ${step.minScore}`}
+                  </p>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-2 text-xs text-slate-700 sm:grid-cols-3">
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Posts: <span className="font-semibold">{ownProfileStats.postsTotal}</span></div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Reaktionen erhalten: <span className="font-semibold">{ownProfileStats.reactionsReceived}</span></div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Reaktionen gegeben: <span className="font-semibold">{ownProfileStats.reactionsGiven}</span></div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Umfragen erstellt: <span className="font-semibold">{ownProfileStats.pollsCreated}</span></div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Umfrage-Stimmen: <span className="font-semibold">{ownProfileStats.pollVotes}</span></div>
+              <div className="rounded-lg border border-slate-200 bg-white px-2 py-2">Aktive Tage: <span className="font-semibold">{ownProfileStats.activeDays}</span></div>
+            </div>
+          </section>
+
+          <section className="space-y-4 rounded-2xl border border-slate-100 bg-slate-50 p-4">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-700">Sicherheit</h3>
+              <button
+                type="button"
+                onClick={() => void saveSecurity()}
+                className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white disabled:opacity-60"
+                disabled={savingSecurity || isLeaving}
               >
-                <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-3">
-                  <img
-                    src={profilePictureDraft || getDefaultProfilePicture()}
-                    alt="Profilbild-Vorschau"
-                    className="h-16 w-16 rounded-full border border-slate-200 object-cover"
-                    loading="lazy"
-                    decoding="async"
-                  />
-                  <p className="text-sm text-slate-500">Vor dem Speichern Profilbild hochladen und zuschneiden.</p>
-                </div>
-                <p className="text-xs text-slate-500">
-                  Bild hierher ziehen oder per Einfügen (Cmd/Ctrl + V) übernehmen.
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={() => profileUploadRef.current?.click()}
-                    className="h-11 rounded-xl border border-slate-200 bg-white px-5 text-sm font-medium text-slate-700"
-                  >
-                    {uploadingProfile ? "Wird hochgeladen…" : "Hochladen"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void saveProfile()}
-                    className="h-11 rounded-xl bg-slate-900 px-5 text-sm font-semibold text-white disabled:opacity-60"
-                    disabled={uploadingProfile}
-                  >
-                    Speichern
-                  </button>
-                </div>
+                {savingSecurity ? "Speichert…" : "Speichern"}
+              </button>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-slate-900" htmlFor="profile-login-name">Login-Name</label>
+              <input
+                id="profile-login-name"
+                value={loginNameDraft}
+                onChange={(event) => setLoginNameDraft(event.target.value)}
+                placeholder="z. B. vorname.nachname"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                disabled={savingSecurity || isLeaving}
+              />
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <label className="block text-sm font-medium text-slate-900" htmlFor="profile-current-password">Aktuelles Passwort</label>
+                <input
+                  id="profile-current-password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={currentPasswordDraft}
+                  onChange={(event) => setCurrentPasswordDraft(event.target.value)}
+                  className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  disabled={savingSecurity || isLeaving}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-900" htmlFor="profile-new-password">Neues Passwort</label>
+                <input
+                  id="profile-new-password"
+                  type="password"
+                  autoComplete="new-password"
+                  value={newPasswordDraft}
+                  onChange={(event) => setNewPasswordDraft(event.target.value)}
+                  className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  disabled={savingSecurity || isLeaving}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-900" htmlFor="profile-confirm-password">Neues Passwort bestätigen</label>
+                <input
+                  id="profile-confirm-password"
+                  type="password"
+                  autoComplete="new-password"
+                  value={confirmNewPasswordDraft}
+                  onChange={(event) => setConfirmNewPasswordDraft(event.target.value)}
+                  className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  disabled={savingSecurity || isLeaving}
+                />
               </div>
             </div>
-          </div>
-        </div>
+
+            <p className="text-xs text-slate-500">
+              Für Login-Name- oder Passwort-Änderungen ist das aktuelle Passwort erforderlich.
+            </p>
+          </section>
+        </AppOverlayDialog>
       ) : null}
 
       <input
@@ -3261,76 +4309,83 @@ export function ChatApp() {
         />
       ) : null}
 
-      {lightbox ? (
-        <div
-          className="fixed inset-0 z-[70] grid place-items-center bg-slate-950/85 p-4"
-          onClick={() => setLightbox(null)}
-        >
+      {lightbox && typeof document !== "undefined"
+        ? createPortal(
           <div
-            className="relative max-h-[92vh] max-w-[92vw]"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Bildansicht"
+            className="fixed inset-0 z-[1000] grid place-items-center bg-slate-950/85 p-4 pointer-events-auto"
+            onClick={() => setLightbox(null)}
           >
-            <div className="absolute right-2 top-2 z-10 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => void shareLightboxImage()}
-                className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
+            <div
+              className="relative max-h-[92vh] max-w-[92vw] pointer-events-auto"
+              onClick={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Bildansicht"
+            >
+              <div
+                className="absolute left-2 right-2 top-2 z-10 flex flex-wrap items-center justify-end gap-2 pointer-events-auto"
+                onPointerDown={(event) => event.stopPropagation()}
               >
-                Teilen
-              </button>
-              <button
-                type="button"
-                onClick={() => void copyLightboxImage()}
-                className={`h-9 rounded-full px-3 text-xs font-semibold text-white ${
-                  lightboxCopyState === "success"
-                    ? "bg-emerald-600/90"
+                <button
+                  type="button"
+                  onClick={() => void shareLightboxImage()}
+                  className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white backdrop-blur-sm"
+                >
+                  Teilen
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void copyLightboxImage()}
+                  className={`h-9 rounded-full px-3 text-xs font-semibold text-white backdrop-blur-sm ${
+                    lightboxCopyState === "success"
+                      ? "bg-emerald-600/90"
+                      : lightboxCopyState === "link"
+                        ? "bg-sky-600/90"
+                      : lightboxCopyState === "error"
+                        ? "bg-rose-600/90"
+                        : "bg-black/65"
+                  }`}
+                >
+                  {lightboxCopyState === "success"
+                    ? "Bild kopiert"
                     : lightboxCopyState === "link"
-                      ? "bg-sky-600/90"
+                      ? "Link kopiert"
                     : lightboxCopyState === "error"
-                      ? "bg-rose-600/90"
-                      : "bg-black/65"
-                }`}
-              >
-                {lightboxCopyState === "success"
-                  ? "Bild kopiert"
-                  : lightboxCopyState === "link"
-                    ? "Link kopiert"
-                  : lightboxCopyState === "error"
-                    ? "Kopieren nicht möglich"
-                    : "Bild kopieren"}
-              </button>
-              <button
-                type="button"
-                onClick={downloadLightboxImage}
-                className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
-              >
-                Herunterladen
-              </button>
-              <button
-                type="button"
-                onClick={() => setLightbox(null)}
-                className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white"
-              >
-                Schließen
-              </button>
+                      ? "Kopieren nicht möglich"
+                      : "Bild kopieren"}
+                </button>
+                <button
+                  type="button"
+                  onClick={downloadLightboxImage}
+                  className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white backdrop-blur-sm"
+                >
+                  Herunterladen
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLightbox(null)}
+                  className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white backdrop-blur-sm"
+                >
+                  Schließen
+                </button>
+              </div>
+              <img
+                src={lightbox.url}
+                alt={lightbox.alt}
+                decoding="async"
+                className="max-h-[92vh] max-w-[92vw] rounded-2xl object-contain shadow-2xl"
+              />
             </div>
-            <img
-              src={lightbox.url}
-              alt={lightbox.alt}
-              decoding="async"
-              className="max-h-[92vh] max-w-[92vw] rounded-2xl object-contain shadow-2xl"
-            />
-          </div>
-        </div>
-      ) : null}
+          </div>,
+          document.body,
+        )
+        : null}
 
       {showOnboarding ? (
-        <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-900/55 p-4">
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-900/50 backdrop-blur-sm p-2 sm:p-4">
           <div
-            className="w-full max-w-xl rounded-3xl border border-white/70 bg-white p-6 shadow-2xl"
+            className="glass-panel-strong w-full max-w-xl max-h-[92dvh] overflow-y-auto rounded-3xl p-6 [overscroll-behavior:contain]"
             role="dialog"
             aria-modal="true"
             aria-label="Schnellstart"
@@ -3345,106 +4400,104 @@ export function ChatApp() {
               <p>3. Teile Bilder und GIFs per Drag-and-drop.</p>
               <p>4. Erwähne <span className="font-semibold text-slate-900">@chatgpt</span> oder <span className="font-semibold text-slate-900">@grok</span>, wenn du KI-Antworten möchtest.</p>
             </div>
-            <div className="mt-5 rounded-2xl border border-sky-100 bg-sky-50 p-3 text-sm text-sky-900">
-              Nächster Schritt: Benachrichtigungen aktivieren, damit du nichts verpasst.
-            </div>
             <div className="mt-5 flex flex-wrap gap-2">
               <button
                 type="button"
-                onClick={() => void enableNotificationsFromOnboarding()}
-                disabled={!notificationCapability.canRequest}
+                onClick={finishOnboarding}
                 className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
               >
-                {notificationButtonLabel(notificationCapability)}
-              </button>
-              <button
-                type="button"
-                onClick={finishOnboarding}
-                className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-              >
-                Jetzt ohne Benachrichtigungen fortfahren
+                Los geht&apos;s
               </button>
             </div>
-            <p className="mt-3 text-xs text-slate-500">{describeNotificationState(notificationCapability)}</p>
           </div>
         </div>
       ) : null}
 
       {showMedia ? (
-        <div
-          className="fixed inset-0 z-50 grid place-items-center bg-slate-900/40 p-4"
-          onClick={() => setShowMedia(false)}
-        >
-          <div
-            className="w-full max-w-5xl rounded-2xl bg-white p-5 shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-label="Medienansicht"
-          >
-            <div className="mb-4 flex items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-900">Medien</h2>
-                <p className="text-sm text-slate-500">
-                  {loadingMedia && mediaItems.length === 0
-                    ? "Vollständige Medienhistorie wird geladen…"
-                    : `${mediaTotalCount} Bild${mediaTotalCount === 1 ? "" : "er"} in der Datenbank`}
-                </p>
-              </div>
+        <AppOverlayDialog
+          open={showMedia}
+          onClose={() => setShowMedia(false)}
+          title="Medien"
+          description={
+            loadingMedia && mediaItems.length === 0
+              ? "Vollständige Medienhistorie wird geladen…"
+              : `${mediaTotalCount} Bild${mediaTotalCount === 1 ? "" : "er"} in der Datenbank`
+          }
+          maxWidthClassName="sm:max-w-5xl"
+          footer={(
+            <div className="flex flex-wrap gap-2 sm:justify-end">
               <button
-                className="h-9 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700"
+                type="button"
                 onClick={() => setShowMedia(false)}
+                className="inline-flex w-full justify-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-xs inset-ring-1 inset-ring-slate-300 hover:bg-slate-50 sm:w-auto"
               >
                 Schließen
               </button>
             </div>
-
-            {loadingMedia && mediaItems.length === 0 ? (
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
-                Medien werden geladen…
+          )}
+        >
+          {loadingMedia && mediaItems.length === 0 ? (
+            <div className="space-y-4">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 animate-pulse">
+                <div className="h-4 w-48 rounded bg-slate-200/70" />
               </div>
-            ) : mediaItems.length === 0 ? (
-              <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
-                Noch keine Bilder geteilt.
-              </div>
-            ) : (
-              <div ref={mediaScrollRef} className="max-h-[70vh] overflow-y-auto pr-1">
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                  {mediaItems.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setLightbox({ url: item.url, alt: `Geteilt von ${item.username}` })}
-                      className="group overflow-hidden rounded-xl border border-slate-200 bg-slate-50 text-left"
-                      title={`Geteilt von ${item.username}`}
-                    >
-                      <div className="relative aspect-square w-full bg-slate-100">
-                        <img
-                          src={item.url}
-                          alt="Geteiltes Medium"
-                          className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.03]"
-                          loading="lazy"
-                          decoding="async"
-                        />
-                      </div>
-                      <div className="px-2 py-1.5">
-                        <p className="truncate text-[11px] font-medium text-slate-700">{item.username}</p>
-                        <p className="text-[10px] text-slate-500">{new Date(item.createdAt).toLocaleString("de-DE")}</p>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-                {mediaHasMore || loadingMediaMore ? (
-                  <div className="mt-3 flex justify-center">
-                    <p className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-600">
-                      {loadingMediaMore ? "Weitere werden geladen…" : "Zum automatischen Nachladen scrollen"}
-                    </p>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                {Array.from({ length: 10 }).map((_, index) => (
+                  <div key={`media-skeleton-${index}`} className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50 animate-pulse">
+                    <div className="aspect-square w-full bg-slate-200/70" />
+                    <div className="space-y-1.5 px-2 py-2">
+                      <div className="h-3 w-3/4 rounded bg-slate-200/70" />
+                      <div className="h-3 w-1/2 rounded bg-slate-200/70" />
+                    </div>
                   </div>
-                ) : null}
+                ))}
               </div>
-            )}
-          </div>
-        </div>
+            </div>
+          ) : mediaItems.length === 0 ? (
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
+              Noch keine Bilder geteilt.
+            </div>
+          ) : (
+            <div ref={mediaScrollRef} className="max-h-[70vh] overflow-y-auto pr-1">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
+                {visibleMediaItems.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setLightbox({ url: item.url, alt: `Geteilt von ${item.username}` })}
+                    className="group overflow-hidden rounded-xl border border-slate-200 bg-slate-50 text-left"
+                    title={`Geteilt von ${item.username}`}
+                  >
+                    <div className="relative aspect-square w-full bg-slate-100">
+                      <img
+                        src={item.url}
+                        alt="Geteiltes Medium"
+                        className="h-full w-full object-cover transition duration-200 group-hover:scale-[1.03]"
+                        loading="lazy"
+                        decoding="async"
+                      />
+                    </div>
+                    <div className="px-2 py-1.5">
+                      <p className="truncate text-[11px] font-medium text-slate-700">{item.username}</p>
+                      <p className="text-[10px] text-slate-500">{item.createdAtLabel}</p>
+                    </div>
+                  </button>
+                ))}
+              </div>
+              {mediaHasMore || loadingMediaMore || mediaHasHiddenLocalItems ? (
+                <div className="mt-3 flex justify-center">
+                  <p className={`rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-600 ${loadingMediaMore ? "animate-pulse" : ""}`}>
+                    {loadingMediaMore
+                      ? "Weitere werden geladen…"
+                      : mediaHasHiddenLocalItems
+                        ? "Zum Einblenden weiter scrollen"
+                        : "Zum automatischen Nachladen scrollen"}
+                  </p>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </AppOverlayDialog>
       ) : null}
     </main>
   );

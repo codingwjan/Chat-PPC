@@ -26,6 +26,8 @@ Required values:
 - `OPENAI_API_KEY` optional, needed for real `@chatgpt` model responses
 - `GROK_API_KEY` optional, needed for real `@grok` model responses
 - `ALLOW_INLINE_UPLOADS` optional dev-only escape hatch (`true|false`, default `false`)
+- `CHAT_LOGIN_NAME_ENCRYPTION_KEY` required in production for login-name at-rest encryption (32-byte key, base64/base64url)
+- `CHAT_LOGIN_NAME_LOOKUP_SECRET` required in production for deterministic login lookup hashing
 
 OpenAI runtime configuration (all optional, defaults can be kept as shown in your current `client/.env`):
 
@@ -59,7 +61,7 @@ Grok runtime configuration (all optional except `GROK_API_KEY` if you use `@grok
 
 Developer mode configuration (optional):
 
-- `CHAT_DEV_UNLOCK_CODE` private 16-digit value; typing this as username activates dev mode
+- `CHAT_DEV_UNLOCK_CODE` private 16-digit value; using this as account login-name (or legacy username) activates dev mode
 - `CHAT_DEV_TOKEN_SECRET` signing secret for dev-mode admin APIs (recommended)
 
 ## Install
@@ -135,6 +137,8 @@ Implemented route handlers:
 - `GET /api/link-preview`
 - `GET /api/admin`
 - `POST /api/admin`
+- `GET /api/admin/users`
+- `POST /api/admin/users/reset-password`
 - `POST /api/uploads/profile`
 - `POST /api/uploads/chat`
 - `GET /api/stream`
@@ -145,8 +149,10 @@ Implemented route handlers:
 
 - Typing state, online presence, poll voting, question/answer threading, and `@chatgpt`/`@grok` message triggers are preserved from the legacy app behavior.
 - Poll voting is now enforced server-side (one vote per user per poll).
-- Login creates a system message in chat: `"username joined the chat"`.
+- New signup and username-change create a system message in chat: `"username ist dem Chat beigetreten"`.
+- Normal account sign-in does not create a join system message.
 - Going offline creates a system message in chat: `"username left the chat"`.
+- Unauthenticated root `/` now routes to `/signup` (signup-first flow), while authenticated users still land on `/chat`.
 - In production, uploads require `BLOB_READ_WRITE_TOKEN`; inline data URL uploads are blocked.
 - Inline uploads can be temporarily enabled only outside production by setting `ALLOW_INLINE_UPLOADS=true`.
 

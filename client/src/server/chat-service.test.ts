@@ -1,5 +1,7 @@
 import { MessageType } from "@prisma/client";
+import { scryptSync } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { encryptLoginName, hashLoginNameLookup } from "@/server/login-name-crypto";
 
 const prismaMock = vi.hoisted(() => ({
   blacklistEntry: { findUnique: vi.fn() },
@@ -14,9 +16,12 @@ const prismaMock = vi.hoisted(() => ({
   },
   message: {
     findUnique: vi.fn(),
+    findFirst: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
+    updateMany: vi.fn(),
     findMany: vi.fn(),
+    count: vi.fn(),
     upsert: vi.fn(),
   },
   pollChoiceVote: {
@@ -30,6 +35,37 @@ const prismaMock = vi.hoisted(() => ({
     create: vi.fn(),
     update: vi.fn(),
     updateMany: vi.fn(),
+  },
+  messageTagJob: {
+    count: vi.fn(),
+    create: vi.fn(),
+    update: vi.fn(),
+    updateMany: vi.fn(),
+  },
+  messageReaction: {
+    findUnique: vi.fn(),
+    findMany: vi.fn(),
+    count: vi.fn(),
+    create: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+  },
+  notification: {
+    create: vi.fn(),
+    findMany: vi.fn(),
+    count: vi.fn(),
+    updateMany: vi.fn(),
+  },
+  userTasteProfile: {
+    upsert: vi.fn(),
+    findUnique: vi.fn(),
+  },
+  userBehaviorEvent: {
+    create: vi.fn(),
+    groupBy: vi.fn(),
+    findMany: vi.fn(),
+    findFirst: vi.fn(),
+    deleteMany: vi.fn(),
   },
   $queryRaw: vi.fn(),
   $queryRawUnsafe: vi.fn(),
@@ -52,12 +88,21 @@ import {
   createMessage,
   extendPoll,
   getChatBackground,
+  getPublicUserProfile,
+  getTasteProfileDetailed,
+  getTasteProfileEvents,
   loginUser,
   markUserOffline,
+  processTaggingQueue,
   processAiQueue,
+  recomputePpcMemberForUser,
   pingPresence,
+  reactToMessage,
   renameUser,
+  restoreSession,
+  signInAccount,
   setChatBackground,
+  updateOwnAccount,
   votePoll,
 } from "@/server/chat-service";
 
@@ -76,12 +121,46 @@ function baseMessage(overrides: Record<string, unknown> = {}) {
     pollMultiSelect: false,
     pollAllowVoteChange: false,
     questionMessageId: null,
+    taggingStatus: null,
+    taggingPayload: null,
+    taggingUpdatedAt: null,
+    taggingError: null,
     createdAt: new Date("2026-02-10T10:00:00.000Z"),
     questionMessage: null,
     pollOptions: [],
+    reactions: [],
     author: null,
     ...overrides,
   };
+}
+
+function baseReaction(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "reaction-1",
+    messageId: "m1",
+    userId: "user-id",
+    reaction: "LOL",
+    createdAt: new Date("2026-02-10T10:00:00.000Z"),
+    updatedAt: new Date("2026-02-10T10:00:00.000Z"),
+    user: {
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+      createdAt: new Date("2026-02-10T10:00:00.000Z"),
+      updatedAt: new Date("2026-02-10T10:00:00.000Z"),
+    },
+    ...overrides,
+  };
+}
+
+function makePasswordHash(password: string): string {
+  const salt = "testsalt";
+  const hash = scryptSync(password, salt, 64).toString("hex");
+  return `${salt}:${hash}`;
 }
 
 describe("chat service", () => {
@@ -120,7 +199,11 @@ describe("chat service", () => {
       lastSeenAt: null,
     });
     prismaMock.message.create.mockResolvedValue(baseMessage());
+    prismaMock.message.findUnique.mockResolvedValue(null);
+    prismaMock.message.findFirst.mockResolvedValue(null);
+    prismaMock.message.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.message.findMany.mockResolvedValue([]);
+    prismaMock.message.count.mockResolvedValue(0);
     prismaMock.pollChoiceVote.findMany.mockResolvedValue([]);
     prismaMock.pollChoiceVote.createMany.mockResolvedValue({ count: 1 });
     prismaMock.pollChoiceVote.deleteMany.mockResolvedValue({ count: 0 });
@@ -129,6 +212,66 @@ describe("chat service", () => {
     prismaMock.aiJob.create.mockResolvedValue({ id: "job-1" });
     prismaMock.aiJob.update.mockResolvedValue({ id: "job-1" });
     prismaMock.aiJob.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.messageTagJob.count.mockResolvedValue(0);
+    prismaMock.messageTagJob.create.mockResolvedValue({ id: "tag-job-1" });
+    prismaMock.messageTagJob.update.mockResolvedValue({ id: "tag-job-1" });
+    prismaMock.messageTagJob.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.messageReaction.findUnique.mockResolvedValue(null);
+    prismaMock.messageReaction.findMany.mockResolvedValue([]);
+    prismaMock.messageReaction.count.mockResolvedValue(0);
+    prismaMock.messageReaction.create.mockResolvedValue({ id: "reaction-1" });
+    prismaMock.messageReaction.update.mockResolvedValue({ id: "reaction-1" });
+    prismaMock.messageReaction.delete.mockResolvedValue({ id: "reaction-1" });
+    prismaMock.notification.create.mockResolvedValue({
+      id: "notification-1",
+      userId: "author-1",
+      actorUserId: "user-id",
+      actorUsernameSnapshot: "tester",
+      messageId: "m1",
+      reaction: "LOL",
+      messagePreview: "hello",
+      isRead: false,
+      createdAt: new Date("2026-02-10T10:00:00.000Z"),
+      readAt: null,
+      updatedAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.notification.findMany.mockResolvedValue([]);
+    prismaMock.notification.count.mockResolvedValue(0);
+    prismaMock.notification.updateMany.mockResolvedValue({ count: 0 });
+    prismaMock.userTasteProfile.upsert.mockResolvedValue({
+      id: "taste-1",
+      userId: "user-id",
+      windowDays: 30,
+      payload: {},
+      updatedAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.userTasteProfile.findUnique.mockResolvedValue({
+      id: "taste-1",
+      userId: "user-id",
+      windowDays: 30,
+      payload: {
+        reactionsReceived: 0,
+        reactionDistribution: [],
+        topTags: [],
+      },
+      updatedAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.userBehaviorEvent.create.mockResolvedValue({
+      id: "behavior-1",
+      userId: "user-id",
+      type: "MESSAGE_CREATED",
+      messageId: "m1",
+      relatedUserId: null,
+      reaction: null,
+      preview: "hello",
+      meta: null,
+      createdAt: new Date("2026-02-10T10:00:00.000Z"),
+      expiresAt: new Date("2026-08-10T10:00:00.000Z"),
+    });
+    prismaMock.userBehaviorEvent.groupBy.mockResolvedValue([]);
+    prismaMock.userBehaviorEvent.findMany.mockResolvedValue([]);
+    prismaMock.userBehaviorEvent.findFirst.mockResolvedValue(null);
+    prismaMock.userBehaviorEvent.deleteMany.mockResolvedValue({ count: 0 });
     prismaMock.$queryRaw.mockResolvedValue([{ locked: true }]);
     prismaMock.$queryRawUnsafe.mockResolvedValue([]);
     openAiCreateMock.mockResolvedValue({ output_text: "", output: [] });
@@ -229,7 +372,7 @@ Abstimmen und begründen.
     );
   });
 
-  it('posts "ist dem Chat beigetreten" system message on login', async () => {
+  it('posts "ist dem Chat beigetreten" system message when legacy account is created', async () => {
     prismaMock.user.findUnique.mockResolvedValueOnce(null);
     prismaMock.user.upsert.mockResolvedValue({
       id: "user-id",
@@ -255,9 +398,51 @@ Abstimmen und begründen.
         data: expect.objectContaining({
           content: "tester ist dem Chat beigetreten",
           authorName: "System",
+          authorId: "user-id",
         }),
       }),
     );
+  });
+
+  it("continues legacy login when system message columns are missing", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce(null);
+    prismaMock.user.upsert.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.message.create
+      .mockRejectedValueOnce(new Error("The column `(not available)` does not exist in the current database."))
+      .mockResolvedValueOnce({ id: "sys-join-fallback" });
+
+    await expect(loginUser({ username: "tester", clientId: "client-1" })).resolves.toMatchObject({
+      username: "tester",
+      clientId: "client-1",
+    });
+    expect(prismaMock.message.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not post system message on legacy login of an existing account", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      isOnline: false,
+    });
+    prismaMock.user.upsert.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+
+    await loginUser({ username: "tester", clientId: "client-1" });
+
+    expect(prismaMock.message.create).not.toHaveBeenCalled();
   });
 
   it("allows username reuse when previous owner is offline", async () => {
@@ -316,6 +501,427 @@ Abstimmen und begründen.
     );
   });
 
+  it("signs in with encrypted login lookup", async () => {
+    const encrypted = encryptLoginName("alice.login");
+    const lookup = hashLoginNameLookup("alice.login");
+    prismaMock.user.findFirst.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: null,
+      loginNameEncrypted: encrypted,
+      loginNameLookup: lookup,
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: false,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: null,
+      loginNameEncrypted: encrypted,
+      loginNameLookup: lookup,
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+      createdAt: new Date("2026-02-10T09:00:00.000Z"),
+      updatedAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    const result = await signInAccount({
+      loginName: "alice.login",
+      password: "supersecure123",
+    });
+
+    expect(result.clientId).toBe("client-1");
+    expect(result.loginName).toBe("alice.login");
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.not.objectContaining({
+          loginName: null,
+        }),
+      }),
+    );
+  });
+
+  it("falls back to legacy sign-in when encrypted login columns are missing", async () => {
+    prismaMock.user.findFirst
+      .mockRejectedValueOnce(new Error("The column `(not available)` does not exist in the current database."))
+      .mockResolvedValueOnce({
+        id: "legacy-account-user",
+        clientId: "client-legacy-2",
+        loginName: "legacy.only",
+        passwordHash: makePasswordHash("supersecure123"),
+        sessionToken: "old-token",
+        sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+        username: "Legacy Only",
+        profilePicture: "https://example.com/avatar.png",
+        status: "",
+        isOnline: false,
+        lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+      });
+
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "legacy-account-user",
+      clientId: "client-legacy-2",
+      loginName: "legacy.only",
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Legacy Only",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+      createdAt: new Date("2026-02-10T09:00:00.000Z"),
+      updatedAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    const result = await signInAccount({
+      loginName: "legacy.only",
+      password: "supersecure123",
+    });
+
+    expect(result.clientId).toBe("client-legacy-2");
+    expect(result.loginName).toBe("legacy.only");
+  });
+
+  it("falls back to legacy update when encrypted columns are missing during sign-in update", async () => {
+    const encrypted = encryptLoginName("legacy.update");
+    const lookup = hashLoginNameLookup("legacy.update");
+    prismaMock.user.findFirst.mockResolvedValueOnce({
+      id: "legacy-update-user",
+      clientId: "client-legacy-update",
+      loginName: "legacy.update",
+      loginNameEncrypted: encrypted,
+      loginNameLookup: lookup,
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Legacy Update",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: false,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.update
+      .mockRejectedValueOnce(new Error("The column `(not available)` does not exist in the current database."))
+      .mockResolvedValueOnce({
+        id: "legacy-update-user",
+        clientId: "client-legacy-update",
+        loginName: "legacy.update",
+        passwordHash: makePasswordHash("supersecure123"),
+        sessionToken: "new-token",
+        sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+        username: "Legacy Update",
+        profilePicture: "https://example.com/avatar.png",
+        status: "",
+        isOnline: true,
+        lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+        createdAt: new Date("2026-02-10T09:00:00.000Z"),
+        updatedAt: new Date("2026-02-10T10:30:00.000Z"),
+      });
+
+    const result = await signInAccount({
+      loginName: "legacy.update",
+      password: "supersecure123",
+    });
+
+    expect(result.clientId).toBe("client-legacy-update");
+    expect(result.loginName).toBe("legacy.update");
+    expect(prismaMock.user.update).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        data: expect.not.objectContaining({
+          loginNameEncrypted: expect.any(String),
+          loginNameLookup: expect.any(String),
+          loginName: null,
+        }),
+      }),
+    );
+  });
+
+  it("migrates legacy plain loginName to encrypted fields on sign-in", async () => {
+    const migratedEncrypted = encryptLoginName("legacy.user");
+    const migratedLookup = hashLoginNameLookup("legacy.user");
+    prismaMock.user.findFirst.mockResolvedValueOnce({
+      id: "legacy-account-user",
+      clientId: "client-legacy-1",
+      loginName: "legacy.user",
+      loginNameEncrypted: null,
+      loginNameLookup: null,
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Legacy User",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: false,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "legacy-account-user",
+      clientId: "client-legacy-1",
+      loginName: null,
+      loginNameEncrypted: migratedEncrypted,
+      loginNameLookup: migratedLookup,
+      passwordHash: makePasswordHash("supersecure123"),
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Legacy User",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+      createdAt: new Date("2026-02-10T09:00:00.000Z"),
+      updatedAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    await signInAccount({
+      loginName: "legacy.user",
+      password: "supersecure123",
+    });
+
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          loginName: null,
+          loginNameEncrypted: expect.any(String),
+          loginNameLookup: expect.any(String),
+        }),
+      }),
+    );
+  });
+
+  it("rejects own-account security update when current password is wrong", async () => {
+    const encrypted = encryptLoginName("alice.login");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: "alice.login",
+      loginNameEncrypted: encrypted,
+      passwordHash: makePasswordHash("correctpass123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+
+    await expect(updateOwnAccount({
+      clientId: "client-1",
+      currentPassword: "wrongpass123",
+      newPassword: "newsecure123",
+    })).rejects.toThrow("Aktuelles Passwort ist falsch.");
+    expect(prismaMock.user.update).not.toHaveBeenCalled();
+  });
+
+  it("rejects own-account security update when login-name is already used", async () => {
+    const encrypted = encryptLoginName("alice.login");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: "alice.login",
+      loginNameEncrypted: encrypted,
+      passwordHash: makePasswordHash("correctpass123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.findFirst.mockResolvedValueOnce({ id: "other-user" });
+
+    await expect(updateOwnAccount({
+      clientId: "client-1",
+      currentPassword: "correctpass123",
+      newLoginName: "alice.new",
+    })).rejects.toThrow("Dieser Login-Name ist bereits vergeben");
+  });
+
+  it("updates own-account login-name only", async () => {
+    const encryptedCurrent = encryptLoginName("alice.login");
+    const encryptedNext = encryptLoginName("alice.new");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: "alice.login",
+      loginNameEncrypted: encryptedCurrent,
+      passwordHash: makePasswordHash("correctpass123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.findFirst.mockResolvedValueOnce(null);
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: null,
+      loginNameEncrypted: encryptedNext,
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    const result = await updateOwnAccount({
+      clientId: "client-1",
+      currentPassword: "correctpass123",
+      newLoginName: "alice.new",
+    });
+
+    expect(result.loginName).toBe("alice.new");
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          loginName: null,
+          loginNameEncrypted: expect.any(String),
+          loginNameLookup: expect.any(String),
+        }),
+      }),
+    );
+  });
+
+  it("updates own-account password only", async () => {
+    const encryptedCurrent = encryptLoginName("alice.login");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: "alice.login",
+      loginNameEncrypted: encryptedCurrent,
+      passwordHash: makePasswordHash("correctpass123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: null,
+      loginNameEncrypted: encryptedCurrent,
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    const result = await updateOwnAccount({
+      clientId: "client-1",
+      currentPassword: "correctpass123",
+      newPassword: "newsecure123",
+    });
+
+    expect(result.loginName).toBe("alice.login");
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          passwordHash: expect.any(String),
+        }),
+      }),
+    );
+  });
+
+  it("updates own-account login-name and password together", async () => {
+    const encryptedCurrent = encryptLoginName("alice.login");
+    const encryptedNext = encryptLoginName("alice.next");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: "alice.login",
+      loginNameEncrypted: encryptedCurrent,
+      passwordHash: makePasswordHash("correctpass123"),
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.findFirst.mockResolvedValueOnce(null);
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "account-user",
+      clientId: "client-1",
+      loginName: null,
+      loginNameEncrypted: encryptedNext,
+      sessionToken: "new-token",
+      sessionExpiresAt: new Date("2026-02-10T11:00:00.000Z"),
+      username: "Alice",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:30:00.000Z"),
+    });
+
+    const result = await updateOwnAccount({
+      clientId: "client-1",
+      currentPassword: "correctpass123",
+      newLoginName: "alice.next",
+      newPassword: "newsecure123",
+    });
+
+    expect(result.loginName).toBe("alice.next");
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          loginNameEncrypted: expect.any(String),
+          loginNameLookup: expect.any(String),
+          passwordHash: expect.any(String),
+        }),
+      }),
+    );
+  });
+
+  it("rejects own-account security update for passwordless legacy users", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "legacy-user",
+      clientId: "client-legacy",
+      loginName: "legacy-client-legacy",
+      loginNameEncrypted: null,
+      passwordHash: null,
+      sessionToken: "old-token",
+      sessionExpiresAt: new Date("2026-02-10T10:00:00.000Z"),
+      username: "Legacy User",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+
+    await expect(updateOwnAccount({
+      clientId: "client-legacy",
+      currentPassword: "doesnotmatter123",
+      newPassword: "newsecure123",
+    })).rejects.toThrow("Für diesen Nutzer ist kein Konto-Passwort hinterlegt.");
+  });
+
   it("enables developer mode when unlock code is used as username", async () => {
     const previousUnlock = process.env.CHAT_DEV_UNLOCK_CODE;
     const previousSecret = process.env.CHAT_DEV_TOKEN_SECRET;
@@ -328,7 +934,7 @@ Abstimmen und begründen.
       prismaMock.user.upsert.mockResolvedValueOnce({
         id: "dev-user",
         clientId: "dev-client",
-        username: "Developer",
+        username: "1234567890123456",
         profilePicture: "https://example.com/avatar.png",
         status: "",
         isOnline: true,
@@ -342,7 +948,58 @@ Abstimmen und begründen.
 
       expect(result.devMode).toBe(true);
       expect(result.devAuthToken).toBeTruthy();
-      expect(result.username.toLowerCase()).toContain("developer");
+      expect(result.username).toBe("1234567890123456");
+    } finally {
+      process.env.CHAT_DEV_UNLOCK_CODE = previousUnlock;
+      process.env.CHAT_DEV_TOKEN_SECRET = previousSecret;
+    }
+  });
+
+  it("enables developer mode on restore when login-name matches unlock code without renaming user", async () => {
+    const previousUnlock = process.env.CHAT_DEV_UNLOCK_CODE;
+    const previousSecret = process.env.CHAT_DEV_TOKEN_SECRET;
+    process.env.CHAT_DEV_UNLOCK_CODE = "1234567890123456";
+    process.env.CHAT_DEV_TOKEN_SECRET = "test-dev-secret";
+
+    try {
+      const now = new Date("2026-02-10T10:00:00.000Z");
+      const refreshed = new Date("2026-02-10T11:00:00.000Z");
+
+      prismaMock.user.findFirst.mockResolvedValueOnce({
+        id: "dev-user",
+        clientId: "dev-client",
+        loginName: "1234567890123456",
+        passwordHash: "hash",
+        sessionToken: "session-token",
+        sessionExpiresAt: now,
+        username: "Chosen Display Name",
+        profilePicture: "https://example.com/avatar.png",
+        status: "",
+        isOnline: true,
+        lastSeenAt: now,
+      });
+      prismaMock.user.update.mockResolvedValueOnce({
+        id: "dev-user",
+        clientId: "dev-client",
+        loginName: "1234567890123456",
+        passwordHash: "hash",
+        sessionToken: "session-token",
+        sessionExpiresAt: refreshed,
+        username: "Chosen Display Name",
+        profilePicture: "https://example.com/avatar.png",
+        status: "",
+        isOnline: true,
+        lastSeenAt: refreshed,
+      });
+
+      const result = await restoreSession({
+        clientId: "dev-client",
+        sessionToken: "session-token",
+      });
+
+      expect(result.devMode).toBe(true);
+      expect(result.devAuthToken).toBeTruthy();
+      expect(result.username).toBe("Chosen Display Name");
     } finally {
       process.env.CHAT_DEV_UNLOCK_CODE = previousUnlock;
       process.env.CHAT_DEV_TOKEN_SECRET = previousSecret;
@@ -464,7 +1121,57 @@ Abstimmen und begründen.
     );
   });
 
-  it('posts "old_name heißt jetzt new_name" system message on rename', async () => {
+  it("threads newly created polls to a referenced message", async () => {
+    prismaMock.message.findUnique.mockResolvedValueOnce(
+      baseMessage({
+        id: "parent-1",
+        type: MessageType.MESSAGE,
+        content: "Original thread start",
+        authorName: "alice",
+      }),
+    );
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({
+        id: "poll-reply-1",
+        type: MessageType.VOTING_POLL,
+        content: "Was sollen wir machen?",
+        questionMessageId: "parent-1",
+        questionMessage: baseMessage({
+          id: "parent-1",
+          type: MessageType.MESSAGE,
+          content: "Original thread start",
+          authorName: "alice",
+        }),
+        pollMultiSelect: false,
+        pollAllowVoteChange: true,
+        pollOptions: [
+          { id: "o1", label: "Option A", sortOrder: 0, votes: [] },
+          { id: "o2", label: "Option B", sortOrder: 1, votes: [] },
+        ],
+      }),
+    );
+
+    const created = await createMessage({
+      clientId: "client-1",
+      type: "votingPoll",
+      message: "Was sollen wir machen?",
+      pollOptions: ["Option A", "Option B"],
+      questionId: "parent-1",
+    });
+
+    expect(prismaMock.message.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          questionMessageId: "parent-1",
+        }),
+      }),
+    );
+    expect(created.questionId).toBe("parent-1");
+    expect(created.oldusername).toBe("alice");
+    expect(created.oldmessage).toBe("Original thread start");
+  });
+
+  it('posts "new_name ist dem Chat beigetreten" system message on rename', async () => {
     prismaMock.user.update.mockResolvedValueOnce({
       id: "user-id",
       clientId: "client-1",
@@ -477,7 +1184,7 @@ Abstimmen und begründen.
     prismaMock.message.create.mockResolvedValueOnce(
       baseMessage({
         id: "sys-rename",
-        content: "tester heißt jetzt newname",
+        content: "newname ist dem Chat beigetreten",
         authorName: "System",
       }),
     );
@@ -487,8 +1194,17 @@ Abstimmen und begründen.
     expect(prismaMock.message.create).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
-          content: "tester heißt jetzt newname",
+          content: "newname ist dem Chat beigetreten",
           authorName: "System",
+          authorId: "user-id",
+        }),
+      }),
+    );
+    expect(prismaMock.userBehaviorEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          type: "USERNAME_CHANGED",
+          userId: "user-id",
         }),
       }),
     );
@@ -595,6 +1311,819 @@ Abstimmen und begründen.
     }
   });
 
+  it("enqueues message tagging job for new user posts", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-tag-1", content: "hello world" }),
+    );
+
+    try {
+      await createMessage({
+        clientId: "client-1",
+        type: "message",
+        message: "hello world",
+      });
+
+      expect(prismaMock.messageTagJob.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            sourceMessageId: "msg-tag-1",
+            username: "tester",
+            message: "hello world",
+            status: "PENDING",
+          }),
+        }),
+      );
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("processes tagging jobs and publishes message.updated", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-1",
+        sourceMessageId: "msg-tag-1",
+        username: "tester",
+        message: "hello world",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.findUnique.mockResolvedValue(
+      baseMessage({
+        id: "msg-tag-1",
+        content: "hello world",
+        taggingStatus: "COMPLETED",
+        taggingPayload: {
+          provider: "grok",
+          model: "grok-4-1-fast-non-reasoning",
+          language: "en",
+          generatedAt: "2026-02-10T10:00:00.000Z",
+          messageTags: [{ tag: "casual", score: 0.9 }],
+          categories: {
+            themes: [{ tag: "chat", score: 0.8 }],
+            humor: [],
+            art: [],
+            tone: [{ tag: "neutral", score: 0.7 }],
+            topics: [{ tag: "greeting", score: 0.8 }],
+          },
+          images: [],
+        },
+      }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [{ tag: "casual", score: 0.9 }],
+        categories: {
+          themes: [{ tag: "chat", score: 0.8 }],
+          humor: [],
+          art: [],
+          tone: [{ tag: "neutral", score: 0.7 }],
+          topics: [{ tag: "greeting", score: 0.8 }],
+        },
+        images: [],
+      }),
+      output: [],
+    });
+
+    try {
+      const result = await processTaggingQueue({ maxJobs: 1 });
+      expect(result.processed).toBe(1);
+      expect(prismaMock.messageTagJob.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "tag-job-1" },
+          data: expect.objectContaining({
+            status: "COMPLETED",
+          }),
+        }),
+      );
+      expect(publishMock).toHaveBeenCalledWith("message.updated", expect.objectContaining({ id: "msg-tag-1" }));
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("includes input_image and stores per-image tags for tagging jobs", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-img-1",
+        sourceMessageId: "msg-tag-img-1",
+        username: "tester",
+        message: "tag this image",
+        imageUrls: ["https://example.com/picture.png"],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [{ tag: "visual", score: 0.9 }],
+        categories: {
+          themes: [{ tag: "photo", score: 0.8 }],
+          humor: [],
+          art: [{ tag: "portrait", score: 0.7 }],
+          tone: [{ tag: "neutral", score: 0.6 }],
+          topics: [{ tag: "person", score: 0.8 }],
+        },
+        images: [
+          {
+            imageUrl: "https://example.com/picture.png",
+            tags: [{ tag: "face", score: 0.95 }],
+            categories: {
+              themes: [{ tag: "portrait", score: 0.8 }],
+              humor: [],
+              art: [{ tag: "photo", score: 0.75 }],
+              tone: [{ tag: "clean", score: 0.6 }],
+              objects: [{ tag: "face", score: 0.95 }],
+            },
+          },
+        ],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+
+      const request = openAiCreateMock.mock.calls[0]?.[0] as
+        | { input?: Array<{ content?: Array<{ type?: string; image_url?: string }> }> }
+        | undefined;
+      expect(request?.input?.[0]?.content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "input_image",
+            image_url: "https://example.com/picture.png",
+          }),
+        ]),
+      );
+
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      expect(completedUpdateCall?.[0]?.data?.taggingPayload).toEqual(
+        expect.objectContaining({
+          images: expect.arrayContaining([
+            expect.objectContaining({
+              imageUrl: "https://example.com/picture.png",
+            }),
+          ]),
+        }),
+      );
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("converts gif inputs to three png frames for tagging", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    const gifDataUrl = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-gif-1",
+        sourceMessageId: "msg-tag-gif-1",
+        username: "tester",
+        message: "tag this gif",
+        imageUrls: [gifDataUrl],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [{ tag: "animated", score: 0.9 }],
+        categories: {
+          themes: [{ tag: "loop", score: 0.8 }],
+          humor: [],
+          art: [{ tag: "minimal", score: 0.7 }],
+          tone: [{ tag: "neutral", score: 0.6 }],
+          topics: [{ tag: "gif", score: 0.9 }],
+        },
+        images: [
+          {
+            imageUrl: gifDataUrl,
+            tags: [{ tag: "pixel", score: 0.8 }],
+            categories: {
+              themes: [{ tag: "animation", score: 0.7 }],
+              humor: [],
+              art: [{ tag: "retro", score: 0.75 }],
+              tone: [{ tag: "simple", score: 0.6 }],
+              objects: [{ tag: "pixel", score: 0.8 }],
+            },
+          },
+        ],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+
+      const request = openAiCreateMock.mock.calls[0]?.[0] as
+        | { input?: Array<{ content?: Array<{ type?: string; image_url?: string }> }> }
+        | undefined;
+      const imageInputs = (request?.input?.[0]?.content ?? []).filter((entry) => entry.type === "input_image");
+      expect(imageInputs).toHaveLength(3);
+      expect(imageInputs.every((entry) => entry.image_url?.startsWith("data:image/png;base64,"))).toBe(true);
+
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      expect(completedUpdateCall?.[0]?.data?.taggingPayload).toEqual(
+        expect.objectContaining({
+          images: expect.arrayContaining([
+            expect.objectContaining({
+              imageUrl: gifDataUrl,
+            }),
+          ]),
+        }),
+      );
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("derives precise structured message categories from messageTags", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-cats-1",
+        sourceMessageId: "msg-tag-cats-1",
+        username: "tester",
+        message: "categorize me",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [
+          { tag: "survey", score: 0.9 },
+          { tag: "sarcasm", score: 0.88 },
+          { tag: "illustration", score: 0.85 },
+          { tag: "german", score: 0.81 },
+          { tag: "schweine", score: 0.8 },
+        ],
+        categories: {
+          themes: [],
+          humor: [],
+          art: [],
+          tone: [],
+          topics: [],
+        },
+        images: [],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        categories?: Record<string, Array<{ tag: string; score: number }>>;
+      } | undefined;
+      expect(payload?.categories?.themes?.some((entry) => entry.tag === "theme:poll")).toBe(true);
+      expect(payload?.categories?.humor?.some((entry) => entry.tag === "humor:sarcasm")).toBe(true);
+      expect(payload?.categories?.art?.some((entry) => entry.tag === "art:illustration")).toBe(true);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag === "language:german")).toBe(true);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag.startsWith("complexity:"))).toBe(true);
+      expect(payload?.categories?.topics?.some((entry) => entry.tag === "topic:animals")).toBe(true);
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("allows empty non-tone message categories when no reliable evidence exists", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-cats-empty-1",
+        sourceMessageId: "msg-tag-cats-empty-1",
+        username: "tester",
+        message: "Nur ein kurzer Text ohne viele Signale",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [],
+        categories: {
+          themes: [],
+          humor: [],
+          art: [],
+          tone: [],
+          topics: [],
+        },
+        images: [],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        categories?: Record<string, Array<{ tag: string; score: number }>>;
+      } | undefined;
+      expect(payload?.categories?.themes || []).toEqual([]);
+      expect(payload?.categories?.humor || []).toEqual([]);
+      expect(payload?.categories?.art || []).toEqual([]);
+      expect(payload?.categories?.topics || []).toEqual([]);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag === "language:german")).toBe(true);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag.startsWith("complexity:"))).toBe(true);
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("assigns synthesized message tags to at most one category", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-cats-exclusive-1",
+        sourceMessageId: "msg-tag-cats-exclusive-1",
+        username: "tester",
+        message: "exclusive categories",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [
+          { tag: "poll", score: 0.95 },
+          { tag: "sarcasm", score: 0.9 },
+          { tag: "illustration", score: 0.85 },
+          { tag: "pigs", score: 0.8 },
+        ],
+        categories: {
+          themes: [],
+          humor: [],
+          art: [],
+          tone: [],
+          topics: [],
+        },
+        images: [],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        categories?: Record<string, Array<{ tag: string; score: number }>>;
+      } | undefined;
+      const categories = payload?.categories;
+      const allCategoryTags = [
+        ...(categories?.themes || []),
+        ...(categories?.humor || []),
+        ...(categories?.art || []),
+        ...(categories?.tone || []),
+        ...(categories?.topics || []),
+      ].map((entry) => entry.tag);
+
+      expect(new Set(allCategoryTags).size).toBe(allCategoryTags.length);
+      expect(categories?.themes.some((entry) => entry.tag === "theme:poll")).toBe(true);
+      expect(categories?.humor.some((entry) => entry.tag === "humor:sarcasm")).toBe(true);
+      expect(categories?.art.some((entry) => entry.tag === "art:illustration")).toBe(true);
+      expect(categories?.topics.some((entry) => entry.tag === "topic:animals")).toBe(true);
+      expect(categories?.topics.some((entry) => entry.tag === "theme:poll")).toBe(false);
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("fills empty image categories and objects from image tags", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-cats-img-1",
+        sourceMessageId: "msg-tag-cats-img-1",
+        username: "tester",
+        message: "categorize image",
+        imageUrls: ["https://example.com/scene.png"],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [{ tag: "visual", score: 0.8 }],
+        categories: {
+          themes: [],
+          humor: [],
+          art: [],
+          tone: [],
+          topics: [],
+        },
+        images: [
+          {
+            imageUrl: "https://example.com/scene.png",
+            tags: [
+              { tag: "person", score: 0.95 },
+              { tag: "meme", score: 0.8 },
+              { tag: "cinematic", score: 0.84 },
+              { tag: "dark", score: 0.71 },
+            ],
+            categories: {
+              themes: [],
+              humor: [],
+              art: [],
+              tone: [],
+              objects: [],
+            },
+          },
+        ],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        images?: Array<{ categories?: Record<string, Array<{ tag: string; score: number }>> }>;
+      } | undefined;
+      const imageCategories = payload?.images?.[0]?.categories;
+      expect(imageCategories?.objects?.length || 0).toBeGreaterThan(0);
+      expect(imageCategories?.art?.length || 0).toBeGreaterThan(0);
+      expect(imageCategories?.tone?.length || 0).toBeGreaterThan(0);
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("fills all image categories including objects when image tags are empty", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-cats-img-empty-1",
+        sourceMessageId: "msg-tag-cats-img-empty-1",
+        username: "tester",
+        message: "Image mit wenig Infos",
+        imageUrls: ["https://example.com/empty-scene.png"],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [],
+        categories: {
+          themes: [],
+          humor: [],
+          art: [],
+          tone: [],
+          topics: [],
+        },
+        images: [
+          {
+            imageUrl: "https://example.com/empty-scene.png",
+            tags: [],
+            categories: {
+              themes: [],
+              humor: [],
+              art: [],
+              tone: [],
+              objects: [],
+            },
+          },
+        ],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        images?: Array<{ categories?: Record<string, Array<{ tag: string; score: number }>> }>;
+      } | undefined;
+      const imageCategories = payload?.images?.[0]?.categories;
+      expect(imageCategories?.themes?.length || 0).toBeGreaterThan(0);
+      expect(imageCategories?.humor?.length || 0).toBeGreaterThan(0);
+      expect(imageCategories?.art?.length || 0).toBeGreaterThan(0);
+      expect(imageCategories?.tone?.length || 0).toBeGreaterThan(0);
+      expect(imageCategories?.objects?.length || 0).toBeGreaterThan(0);
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("assigns image tags only once across image categories", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-cats-img-exclusive-1",
+        sourceMessageId: "msg-tag-cats-img-exclusive-1",
+        username: "tester",
+        message: "image exclusive categories",
+        imageUrls: ["https://example.com/scene.png"],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [{ tag: "visual", score: 0.8 }],
+        categories: {
+          themes: [],
+          humor: [],
+          art: [],
+          tone: [],
+          topics: [],
+        },
+        images: [
+          {
+            imageUrl: "https://example.com/scene.png",
+            tags: [
+              { tag: "meme cinematic", score: 0.95 },
+              { tag: "person", score: 0.92 },
+              { tag: "dark", score: 0.86 },
+            ],
+            categories: {
+              themes: [],
+              humor: [],
+              art: [],
+              tone: [],
+              objects: [],
+            },
+          },
+        ],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        images?: Array<{ categories?: Record<string, Array<{ tag: string; score: number }>> }>;
+      } | undefined;
+      const categories = payload?.images?.[0]?.categories;
+      const allImageCategoryTags = [
+        ...(categories?.themes || []),
+        ...(categories?.humor || []),
+        ...(categories?.art || []),
+        ...(categories?.tone || []),
+        ...(categories?.objects || []),
+      ].map((entry) => entry.tag);
+
+      expect(new Set(allImageCategoryTags).size).toBe(allImageCategoryTags.length);
+      expect(categories?.themes.some((entry) => entry.tag === "meme cinematic")).toBe(true);
+      expect(categories?.art.some((entry) => entry.tag === "meme cinematic")).toBe(false);
+      expect(categories?.objects.some((entry) => entry.tag === "person")).toBe(true);
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("keeps model-provided categories and only fills missing ones", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-cats-model-1",
+        sourceMessageId: "msg-tag-cats-model-1",
+        username: "tester",
+        message: "preserve model categories",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [
+          { tag: "school", score: 0.9 },
+          { tag: "sarcasm", score: 0.88 },
+        ],
+        categories: {
+          themes: [{ tag: "theme:poll", score: 0.93 }],
+          humor: [],
+          art: [],
+          tone: [],
+          topics: [],
+        },
+        images: [],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        categories?: Record<string, Array<{ tag: string; score: number }>>;
+      } | undefined;
+      expect(payload?.categories?.themes?.[0]?.tag).toBe("theme:poll");
+      expect(payload?.categories?.humor?.some((entry) => entry.tag === "humor:sarcasm")).toBe(true);
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("handles umlauts while mapping to broad topics", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-cats-umlaut-1",
+        sourceMessageId: "msg-tag-cats-umlaut-1",
+        username: "tester",
+        message: "umlaut tags",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [
+          { tag: "Frühstück ÄÖÜß", score: 0.9 },
+          { tag: "schweine", score: 0.8 },
+        ],
+        categories: {
+          themes: [],
+          humor: [],
+          art: [],
+          tone: [],
+          topics: [],
+        },
+        images: [],
+      }),
+      output: [],
+    });
+
+    try {
+      const result = await processTaggingQueue({ maxJobs: 1 });
+      expect(result.processed).toBe(1);
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        categories?: Record<string, Array<{ tag: string; score: number }>>;
+      } | undefined;
+      const topicTags = payload?.categories?.topics?.map((entry) => entry.tag) || [];
+      expect(topicTags).toContain("topic:food");
+      expect(topicTags).toContain("topic:animals");
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("filters meta noise, applies confidence floors, and caps messageTags at 16", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-quality-1",
+        sourceMessageId: "msg-tag-quality-1",
+        username: "tester",
+        message: "Bitte mach eine Umfrage über Schweine auf Deutsch",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: JSON.stringify({
+        messageTags: [
+          { tag: "request", score: 0.95 },
+          { tag: "create", score: 0.95 },
+          { tag: "command", score: 0.95 },
+          { tag: "no image", score: 0.95 },
+          { tag: "username", score: 0.95 },
+          { tag: "funny", score: 0.95 },
+          { tag: "neutral", score: 0.95 },
+          { tag: "poll", score: 0.92 },
+          { tag: "sarcasm", score: 0.9 },
+          { tag: "illustration", score: 0.88 },
+          { tag: "deutsch", score: 0.87 },
+          { tag: "schweine", score: 0.86 },
+          { tag: "technology", score: 0.85 },
+          { tag: "school", score: 0.84 },
+          { tag: "entertainment", score: 0.83 },
+          { tag: "relationships", score: 0.82 },
+          { tag: "food", score: 0.81 },
+          { tag: "animals", score: 0.8 },
+          { tag: "travel", score: 0.79 },
+          { tag: "gaming", score: 0.78 },
+        ],
+        categories: {
+          themes: [{ tag: "theme:request", score: 0.4 }],
+          humor: [{ tag: "humor:sarcasm", score: 0.4 }],
+          art: [],
+          tone: [],
+          topics: [{ tag: "topic:food", score: 0.4 }],
+        },
+        images: [],
+      }),
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      const completedUpdateCall = prismaMock.message.updateMany.mock.calls.find(
+        (call) => call[0]?.data?.taggingStatus === "COMPLETED",
+      );
+      const payload = completedUpdateCall?.[0]?.data?.taggingPayload as {
+        messageTags?: Array<{ tag: string; score: number }>;
+        categories?: Record<string, Array<{ tag: string; score: number }>>;
+      } | undefined;
+      const messageTags = payload?.messageTags?.map((entry) => entry.tag) || [];
+      expect(messageTags.length).toBeLessThanOrEqual(16);
+      expect(messageTags).not.toContain("request");
+      expect(messageTags).not.toContain("create");
+      expect(messageTags).not.toContain("command");
+      expect(messageTags).not.toContain("no image");
+      expect(messageTags).not.toContain("username");
+      expect(messageTags).not.toContain("funny");
+      expect(messageTags).not.toContain("neutral");
+      expect((payload?.categories?.themes || []).every((entry) => entry.score >= 0.55)).toBe(true);
+      expect((payload?.categories?.humor || []).every((entry) => entry.score >= 0.55)).toBe(true);
+      expect((payload?.categories?.topics || []).every((entry) => entry.score >= 0.55)).toBe(true);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag === "language:german")).toBe(true);
+      expect(payload?.categories?.tone?.some((entry) => entry.tag.startsWith("complexity:"))).toBe(true);
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("marks tagging job as failed when invalid JSON is returned on last attempt", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "tag-job-fail-1",
+        sourceMessageId: "msg-tag-fail-1",
+        username: "tester",
+        message: "bad json please",
+        imageUrls: [],
+        attempts: 4,
+      },
+    ]);
+    prismaMock.messageTagJob.count.mockResolvedValueOnce(0);
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: "{invalid-json}",
+      output: [],
+    });
+
+    try {
+      await processTaggingQueue({ maxJobs: 1 });
+      expect(prismaMock.messageTagJob.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "tag-job-fail-1" },
+          data: expect.objectContaining({
+            status: "FAILED",
+          }),
+        }),
+      );
+      expect(prismaMock.message.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: "msg-tag-fail-1" },
+          data: expect.objectContaining({
+            taggingStatus: "FAILED",
+          }),
+        }),
+      );
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
   it("emits busy notice when pending AI queue is full", async () => {
     const previousOpenAiKey = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "test-key";
@@ -673,6 +2202,48 @@ Abstimmen und begründen.
       );
     } finally {
       process.env.OPENAI_API_KEY = previousOpenAiKey;
+    }
+  });
+
+  it("enqueues tagging jobs for AI-generated responses", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-ai-no-tagging-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@chatgpt explain gravity",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-ai-generated", content: "AI answer", authorName: "ChatGPT" }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({ output_text: "AI answer", output: [] });
+
+    try {
+      await processAiQueue({ maxJobs: 1 });
+      expect(prismaMock.messageTagJob.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            sourceMessageId: "msg-ai-generated",
+            username: "ChatGPT",
+            message: "AI answer",
+            status: "PENDING",
+          }),
+        }),
+      );
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+      process.env.GROK_API_KEY = previousGrokKey;
     }
   });
 
@@ -875,6 +2446,118 @@ Abstimmen und begründen.
     }
   });
 
+  it("threads AI-created polls to the root message when mention is inside a reply", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-chatgpt-poll-thread-1",
+        sourceMessageId: "msg-reply",
+        username: "tester",
+        message: "@chatgpt create a poll",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.message.findUnique
+      .mockResolvedValueOnce({ id: "msg-reply", questionMessageId: "msg-root" })
+      .mockResolvedValueOnce({ id: "msg-root", questionMessageId: null });
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({
+        id: "msg-chatgpt-poll-threaded",
+        type: MessageType.VOTING_POLL,
+        content: "Root poll question?",
+        authorName: "ChatGPT",
+        questionMessageId: "msg-root",
+        pollMultiSelect: false,
+        pollAllowVoteChange: true,
+        pollOptions: [
+          { id: "o1", label: "Yes", sortOrder: 0, votes: [] },
+          { id: "o2", label: "No", sortOrder: 1, votes: [] },
+        ],
+      }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: '<POLL_JSON>{"question":"Root poll question?","options":["Yes","No"],"multiSelect":false}</POLL_JSON>',
+      output: [],
+    });
+
+    try {
+      await processAiQueue({ maxJobs: 1 });
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            type: MessageType.VOTING_POLL,
+            questionMessageId: "msg-root",
+          }),
+        }),
+      );
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+    }
+  });
+
+  it("enqueues tagging for AI-generated poll messages", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.OPENAI_API_KEY = "test-key";
+    process.env.GROK_API_KEY = "test-grok-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-chatgpt-poll-tagging-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@chatgpt create a poll",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({
+        id: "msg-chatgpt-poll-tagging",
+        type: MessageType.VOTING_POLL,
+        content: "Best day?",
+        authorName: "ChatGPT",
+        pollMultiSelect: false,
+        pollAllowVoteChange: true,
+        pollOptions: [
+          { id: "o1", label: "Mon", sortOrder: 0, votes: [] },
+          { id: "o2", label: "Fri", sortOrder: 1, votes: [] },
+        ],
+      }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: '<POLL_JSON>{"question":"Best day?","options":["Mon","Fri"],"multiSelect":false}</POLL_JSON>',
+      output: [],
+    });
+
+    try {
+      await processAiQueue({ maxJobs: 1 });
+      expect(prismaMock.messageTagJob.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            sourceMessageId: "msg-chatgpt-poll-tagging",
+            username: "ChatGPT",
+            message: expect.stringContaining("Best day?"),
+          }),
+        }),
+      );
+    } finally {
+      process.env.OPENAI_API_KEY = previousOpenAiKey;
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
   it("falls back to normal text response when POLL_JSON output is invalid", async () => {
     const previousOpenAiKey = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "test-key";
@@ -1066,6 +2749,66 @@ Alles klar, wir machen das sauber.
             authorName: "Grok",
             questionMessageId: "msg-user",
             content: "Bildgenerierung und Bildbearbeitung sind für @grok deaktiviert. Nutze dafür bitte @chatgpt.",
+          }),
+        }),
+      );
+    } finally {
+      if (previousOpenAiKey) process.env.OPENAI_API_KEY = previousOpenAiKey;
+      else delete process.env.OPENAI_API_KEY;
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("allows @grok image analysis prompts with image input", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    const previousGrokKey = process.env.GROK_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-grok-image-analysis-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@grok beschreibe dieses bild",
+        imageUrls: ["https://example.com/input.png"],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-grok-image-analysis", content: "analysis", authorName: "Grok" }),
+    );
+    openAiCreateMock.mockResolvedValueOnce({
+      output_text: "Das Bild zeigt eine Person vor einer Wand.",
+      output: [],
+    });
+
+    try {
+      const result = await processAiQueue({ maxJobs: 1 });
+      expect(result.processed).toBe(1);
+      expect(result.lockSkipped).toBe(false);
+      expect(openAiCreateMock).toHaveBeenCalledTimes(1);
+      const request = openAiCreateMock.mock.calls.at(0)?.[0] as
+        | { input?: Array<{ content?: Array<{ type?: string; image_url?: string }> }> }
+        | undefined;
+      expect(request?.input?.[0]?.content).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "input_image",
+            image_url: "https://example.com/input.png",
+          }),
+        ]),
+      );
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            authorName: "Grok",
+            questionMessageId: "msg-user",
+            content: "Das Bild zeigt eine Person vor einer Wand.",
           }),
         }),
       );
@@ -1451,6 +3194,520 @@ Alles klar, wir machen das sauber.
     expect(prismaMock.message.update).not.toHaveBeenCalled();
   });
 
+  it("creates message reaction and emits update + validation event", async () => {
+    prismaMock.message.findUnique
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-react-1",
+          content: "hello class",
+          authorId: "author-2",
+          authorName: "alice",
+          reactions: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-react-1",
+          content: "hello class",
+          authorId: "author-2",
+          authorName: "alice",
+          reactions: [baseReaction({ messageId: "msg-react-1", reaction: "LOL" })],
+        }),
+      );
+    prismaMock.messageReaction.findUnique.mockResolvedValueOnce(null);
+
+    const result = await reactToMessage({
+      clientId: "client-1",
+      messageId: "msg-react-1",
+      reaction: "LOL",
+    });
+
+    expect(prismaMock.messageReaction.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          messageId: "msg-react-1",
+          userId: "user-id",
+          reaction: "LOL",
+        }),
+      }),
+    );
+    expect(result.reactions?.viewerReaction).toBe("LOL");
+    expect(publishMock).toHaveBeenCalledWith("message.updated", expect.objectContaining({ id: "msg-react-1" }));
+    expect(publishMock).toHaveBeenCalledWith(
+      "reaction.received",
+      expect.objectContaining({
+        targetUsername: "alice",
+        fromUsername: "tester",
+        messageId: "msg-react-1",
+        reaction: "LOL",
+      }),
+    );
+  });
+
+  it("toggles off identical reaction when user sends same reaction twice", async () => {
+    prismaMock.message.findUnique
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-react-2",
+          content: "same reaction",
+          authorId: "author-2",
+          authorName: "alice",
+          reactions: [baseReaction({ id: "reaction-existing", messageId: "msg-react-2", reaction: "LOL" })],
+        }),
+      )
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-react-2",
+          content: "same reaction",
+          authorId: "author-2",
+          authorName: "alice",
+          reactions: [],
+        }),
+      );
+    prismaMock.messageReaction.findUnique.mockResolvedValueOnce({
+      id: "reaction-existing",
+      messageId: "msg-react-2",
+      userId: "user-id",
+      reaction: "LOL",
+      createdAt: new Date("2026-02-10T10:00:00.000Z"),
+      updatedAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+
+    const result = await reactToMessage({
+      clientId: "client-1",
+      messageId: "msg-react-2",
+      reaction: "LOL",
+    });
+
+    expect(prismaMock.messageReaction.delete).toHaveBeenCalledWith({
+      where: { id: "reaction-existing" },
+    });
+    expect(result.reactions?.viewerReaction).toBeNull();
+    const receivedCalls = publishMock.mock.calls.filter((call) => call[0] === "reaction.received");
+    expect(receivedCalls).toHaveLength(0);
+  });
+
+  it("updates reaction when user changes to a different one", async () => {
+    prismaMock.message.findUnique
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-react-3",
+          content: "change reaction",
+          authorId: "author-2",
+          authorName: "alice",
+          reactions: [baseReaction({ id: "reaction-existing-2", messageId: "msg-react-3", reaction: "FIRE" })],
+        }),
+      )
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-react-3",
+          content: "change reaction",
+          authorId: "author-2",
+          authorName: "alice",
+          reactions: [baseReaction({ id: "reaction-existing-2", messageId: "msg-react-3", reaction: "LOL" })],
+        }),
+      );
+    prismaMock.messageReaction.findUnique.mockResolvedValueOnce({
+      id: "reaction-existing-2",
+      messageId: "msg-react-3",
+      userId: "user-id",
+      reaction: "FIRE",
+      createdAt: new Date("2026-02-10T10:00:00.000Z"),
+      updatedAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+
+    const result = await reactToMessage({
+      clientId: "client-1",
+      messageId: "msg-react-3",
+      reaction: "LOL",
+    });
+
+    expect(prismaMock.messageReaction.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "reaction-existing-2" },
+        data: { reaction: "LOL" },
+      }),
+    );
+    expect(result.reactions?.viewerReaction).toBe("LOL");
+  });
+
+  it("does not emit validation event for own message reactions", async () => {
+    prismaMock.message.findUnique
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-react-self",
+          content: "self reaction",
+          authorId: "user-id",
+          authorName: "tester",
+          reactions: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-react-self",
+          content: "self reaction",
+          authorId: "user-id",
+          authorName: "tester",
+          reactions: [baseReaction({ messageId: "msg-react-self", reaction: "BIG_BRAIN" })],
+        }),
+      );
+    prismaMock.messageReaction.findUnique.mockResolvedValueOnce(null);
+
+    await reactToMessage({
+      clientId: "client-1",
+      messageId: "msg-react-self",
+      reaction: "BIG_BRAIN",
+    });
+
+    const receivedCalls = publishMock.mock.calls.filter((call) => call[0] === "reaction.received");
+    expect(receivedCalls).toHaveLength(0);
+  });
+
+  it("allows reactions on system join messages", async () => {
+    prismaMock.message.findUnique
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-system-join-react",
+          authorId: null,
+          authorName: "System",
+          content: "alice ist dem Chat beigetreten",
+          reactions: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-system-join-react",
+          authorId: null,
+          authorName: "System",
+          content: "alice ist dem Chat beigetreten",
+          reactions: [baseReaction({ messageId: "msg-system-join-react", reaction: "LOL" })],
+        }),
+      );
+    prismaMock.messageReaction.findUnique.mockResolvedValueOnce(null);
+
+    const result = await reactToMessage({
+      clientId: "client-1",
+      messageId: "msg-system-join-react",
+      reaction: "LOL",
+    });
+
+    expect(prismaMock.messageReaction.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          messageId: "msg-system-join-react",
+          userId: "user-id",
+          reaction: "LOL",
+        }),
+      }),
+    );
+    expect(result.reactions?.viewerReaction).toBe("LOL");
+  });
+
+  it("attributes reactions on legacy join system messages to the joined user", async () => {
+    prismaMock.message.findUnique
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-system-join-legacy",
+          authorId: null,
+          authorName: "System",
+          content: "alice ist dem Chat beigetreten",
+          reactions: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-system-join-legacy",
+          authorId: "author-join-1",
+          authorName: "System",
+          content: "alice ist dem Chat beigetreten",
+          reactions: [baseReaction({ messageId: "msg-system-join-legacy", reaction: "FIRE" })],
+        }),
+      );
+    prismaMock.user.findFirst.mockResolvedValueOnce({
+      id: "author-join-1",
+      clientId: "client-join-1",
+      username: "alice",
+      profilePicture: "https://example.com/alice.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.messageReaction.findUnique.mockResolvedValueOnce(null);
+
+    await reactToMessage({
+      clientId: "client-1",
+      messageId: "msg-system-join-legacy",
+      reaction: "FIRE",
+    });
+
+    expect(prismaMock.message.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: "msg-system-join-legacy",
+          authorId: null,
+        },
+        data: {
+          authorId: "author-join-1",
+        },
+      }),
+    );
+    expect(publishMock).toHaveBeenCalledWith(
+      "taste.updated",
+      expect.objectContaining({ userId: "author-join-1", reason: "reaction" }),
+    );
+  });
+
+  it("rejects reactions on non-join system messages", async () => {
+    prismaMock.message.findUnique.mockResolvedValueOnce(
+      baseMessage({
+        id: "msg-system-react",
+        authorId: null,
+        authorName: "System",
+        content: "alice hat den Chat verlassen",
+      }),
+    );
+
+    await expect(
+      reactToMessage({
+        clientId: "client-1",
+        messageId: "msg-system-react",
+        reaction: "LOL",
+      }),
+    ).rejects.toThrow("Diese Systemnachricht kann nicht bewertet werden");
+  });
+
+  it("schreibt Behavior-Event bei neuer Nachricht", async () => {
+    const previousGrokKey = process.env.GROK_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+    prismaMock.message.create.mockResolvedValueOnce(baseMessage({ id: "msg-event-1", content: "hällo äöüß" }));
+
+    try {
+      await createMessage({
+        clientId: "client-1",
+        type: "message",
+        message: "hällo äöüß",
+      });
+
+      expect(prismaMock.userBehaviorEvent.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            userId: "user-id",
+            type: "MESSAGE_CREATED",
+            messageId: "msg-event-1",
+          }),
+        }),
+      );
+      expect(publishMock).toHaveBeenCalledWith(
+        "taste.updated",
+        expect.objectContaining({
+          userId: "user-id",
+          reason: "message",
+        }),
+      );
+    } finally {
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("schreibt Behavior-Events für gegebene und erhaltene Reaktion", async () => {
+    prismaMock.message.findUnique
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-react-event",
+          content: "top post",
+          authorId: "author-2",
+          authorName: "alice",
+          reactions: [],
+        }),
+      )
+      .mockResolvedValueOnce(
+        baseMessage({
+          id: "msg-react-event",
+          content: "top post",
+          authorId: "author-2",
+          authorName: "alice",
+          reactions: [baseReaction({ messageId: "msg-react-event", reaction: "FIRE" })],
+        }),
+      );
+    prismaMock.messageReaction.findUnique.mockResolvedValueOnce(null);
+
+    await reactToMessage({
+      clientId: "client-1",
+      messageId: "msg-react-event",
+      reaction: "FIRE",
+    });
+
+    const reactionEventCalls = prismaMock.userBehaviorEvent.create.mock.calls.filter((call) => {
+      const arg = call[0] as { data?: { type?: string } };
+      return arg?.data?.type === "REACTION_GIVEN" || arg?.data?.type === "REACTION_RECEIVED";
+    });
+    expect(reactionEventCalls.length).toBeGreaterThanOrEqual(2);
+    expect(publishMock).toHaveBeenCalledWith(
+      "taste.updated",
+      expect.objectContaining({ userId: "user-id", reason: "reaction" }),
+    );
+    expect(publishMock).toHaveBeenCalledWith(
+      "taste.updated",
+      expect.objectContaining({ userId: "author-2", reason: "reaction" }),
+    );
+  });
+
+  it("liefert detailliertes Taste-Profil für 7d/30d/Gesamt", async () => {
+    prismaMock.message.findMany.mockResolvedValue([
+      {
+        id: "msg-1",
+        type: MessageType.MESSAGE,
+        content: "hi @grok",
+        createdAt: new Date("2026-02-10T10:00:00.000Z"),
+        taggingStatus: "COMPLETED",
+        taggingPayload: {
+          messageTags: [{ tag: "funny", score: 0.9 }],
+          categories: {
+            themes: [{ tag: "school", score: 0.8 }],
+            humor: [{ tag: "sarcasm", score: 0.7 }],
+            art: [],
+            tone: [{ tag: "casual", score: 0.8 }],
+            topics: [{ tag: "class", score: 0.6 }],
+          },
+          images: [],
+        },
+      },
+    ]);
+    prismaMock.messageReaction.findMany.mockResolvedValue([]);
+    prismaMock.pollChoiceVote.findMany.mockResolvedValue([]);
+    prismaMock.userBehaviorEvent.findMany.mockResolvedValue([]);
+    prismaMock.userBehaviorEvent.findFirst.mockResolvedValue({
+      createdAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+
+    const result = await getTasteProfileDetailed({ clientId: "client-1" });
+    expect(result.windows["7d"]).toBeDefined();
+    expect(result.windows["30d"]).toBeDefined();
+    expect(result.windows.all).toBeDefined();
+    expect(result.windows.all.interests.topTags[0]?.tag).toBe("funny");
+  });
+
+  it("adds user tag for reactions on system join messages in taste profile", async () => {
+    prismaMock.message.findMany.mockResolvedValue([]);
+    prismaMock.messageReaction.findMany.mockResolvedValue([
+      {
+        reaction: "FIRE",
+        updatedAt: new Date("2026-02-12T10:00:00.000Z"),
+        userId: null,
+        user: null,
+        message: {
+          id: "sys-join-msg-1",
+          authorId: null,
+          authorName: "System",
+          authorProfilePicture: "https://example.com/system.png",
+          content: "Alice ist dem Chat beigetreten",
+          taggingPayload: null,
+        },
+      },
+    ]);
+    prismaMock.pollChoiceVote.findMany.mockResolvedValue([]);
+    prismaMock.userBehaviorEvent.findMany.mockResolvedValue([]);
+    prismaMock.userBehaviorEvent.findFirst.mockResolvedValue({
+      createdAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+
+    const result = await getTasteProfileDetailed({ clientId: "client-1" });
+    expect(result.windows.all.interests.topTags.some((entry) => entry.tag === "user:alice")).toBe(true);
+  });
+
+  it("liefert paginierte Taste-Events", async () => {
+    prismaMock.userBehaviorEvent.findMany.mockResolvedValue([
+      {
+        id: "ev-3",
+        type: "REACTION_GIVEN",
+        createdAt: new Date("2026-02-12T10:00:00.000Z"),
+        messageId: "m3",
+        relatedUserId: "u2",
+        reaction: "LOL",
+        preview: "preview 3",
+        meta: { relatedUsername: "alice" },
+      },
+      {
+        id: "ev-2",
+        type: "MESSAGE_CREATED",
+        createdAt: new Date("2026-02-11T10:00:00.000Z"),
+        messageId: "m2",
+        relatedUserId: null,
+        reaction: null,
+        preview: "preview 2",
+        meta: {},
+      },
+      {
+        id: "ev-1",
+        type: "POLL_CREATED",
+        createdAt: new Date("2026-02-10T10:00:00.000Z"),
+        messageId: "m1",
+        relatedUserId: null,
+        reaction: null,
+        preview: "preview 1",
+        meta: {},
+      },
+    ]);
+
+    const result = await getTasteProfileEvents({
+      clientId: "client-1",
+      limit: 2,
+    });
+
+    expect(result.items).toHaveLength(2);
+    expect(result.hasMore).toBe(true);
+    expect(result.nextCursor).toBe("2026-02-11T10:00:00.000Z");
+  });
+
+  it("liefert sanitisiertes öffentliches Nutzerprofil", async () => {
+    prismaMock.user.findUnique
+      .mockResolvedValueOnce({
+        id: "viewer-id",
+        clientId: "viewer-1",
+        username: "viewer",
+        profilePicture: "https://example.com/viewer.png",
+        status: "",
+        isOnline: true,
+        lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+        ppcMemberScoreRaw: 10,
+        ppcMemberLastActiveAt: new Date("2026-02-10T10:00:00.000Z"),
+      })
+      .mockResolvedValueOnce({
+        id: "target-id",
+        clientId: "target-1",
+        username: "alice",
+        profilePicture: "https://example.com/alice.png",
+        status: "online",
+        isOnline: true,
+        lastSeenAt: new Date("2026-02-12T11:00:00.000Z"),
+        ppcMemberScoreRaw: 120,
+        ppcMemberLastActiveAt: new Date("2026-02-12T11:00:00.000Z"),
+      });
+    prismaMock.message.findMany.mockResolvedValue([
+      {
+        id: "msg-1",
+        type: MessageType.MESSAGE,
+        content: "Hallo",
+        createdAt: new Date("2026-02-10T10:00:00.000Z"),
+        taggingStatus: "COMPLETED",
+        taggingPayload: null,
+      },
+    ]);
+    prismaMock.messageReaction.findMany.mockResolvedValue([]);
+    prismaMock.userBehaviorEvent.findMany.mockResolvedValue([]);
+    prismaMock.pollChoiceVote.findMany.mockResolvedValue([]);
+
+    const result = await getPublicUserProfile({
+      viewerClientId: "viewer-1",
+      targetClientId: "target-1",
+    });
+
+    expect(result.username).toBe("alice");
+    expect(result.stats.postsTotal).toBe(1);
+    expect(result.stats).not.toHaveProperty("tagging");
+    expect(result.stats).not.toHaveProperty("interests");
+  });
+
   it('emits "hat den Chat verlassen" when stale users are cleaned', async () => {
     prismaMock.user.update.mockResolvedValue({
       id: "user-id",
@@ -1527,6 +3784,176 @@ Alles klar, wir machen das sauber.
         data: expect.objectContaining({
           content: "tester hat den Chat verlassen",
           authorName: "System",
+        }),
+      }),
+    );
+  });
+
+  it("recomputes PPC Score rank and emits rank-up system message", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+      ppcMemberScoreRaw: 295,
+      ppcMemberLastActiveAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.userBehaviorEvent.groupBy.mockResolvedValueOnce([
+      { type: "MESSAGE_CREATED", _count: { type: 80 } },
+    ]);
+    prismaMock.messageReaction.count
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(0);
+    prismaMock.userBehaviorEvent.findFirst.mockResolvedValueOnce({
+      createdAt: new Date("2026-02-11T10:00:00.000Z"),
+    });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-11T10:00:00.000Z"),
+      ppcMemberScoreRaw: 400,
+      ppcMemberLastActiveAt: new Date("2026-02-11T10:00:00.000Z"),
+    });
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({
+        id: "sys-rank-up-1",
+        content: "tester ist auf Silber aufgestiegen · PPC Score 370",
+        authorName: "System",
+      }),
+    );
+
+    await recomputePpcMemberForUser("user-id");
+
+    expect(prismaMock.message.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          content: expect.stringMatching(/ist auf Silber aufgestiegen.*PPC Score/i),
+          authorName: "System",
+          authorId: "user-id",
+        }),
+      }),
+    );
+  });
+
+  it("falls back when USERNAME_CHANGED enum is missing in DB for latest-activity query", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-11T10:00:00.000Z"),
+      ppcMemberScoreRaw: 0,
+      ppcMemberLastActiveAt: null,
+    });
+    prismaMock.userBehaviorEvent.groupBy.mockResolvedValueOnce([]);
+    prismaMock.messageReaction.count
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(0);
+    prismaMock.userBehaviorEvent.findFirst
+      .mockRejectedValueOnce(new Error('Invalid input value for enum "UserBehaviorEventType": "USERNAME_CHANGED"'))
+      .mockResolvedValueOnce(null);
+    prismaMock.message.count.mockResolvedValueOnce(0);
+    prismaMock.message.findFirst.mockResolvedValueOnce(null);
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-11T10:00:00.000Z"),
+      ppcMemberScoreRaw: 0,
+      ppcMemberLastActiveAt: null,
+    });
+
+    await expect(recomputePpcMemberForUser("user-id", { emitRankUp: false })).resolves.toBeUndefined();
+    expect(prismaMock.userBehaviorEvent.findFirst).toHaveBeenCalledTimes(2);
+  });
+
+  it("counts display-name changes from system join messages as fallback", async () => {
+    const renameAt = new Date("2026-02-16T13:10:47.816Z");
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-16T13:11:00.000Z"),
+      ppcMemberScoreRaw: 0,
+      ppcMemberLastActiveAt: null,
+    });
+    prismaMock.userBehaviorEvent.groupBy.mockResolvedValueOnce([]);
+    prismaMock.messageReaction.count
+      .mockResolvedValueOnce(0)
+      .mockResolvedValueOnce(0);
+    prismaMock.userBehaviorEvent.findFirst.mockResolvedValueOnce(null);
+    prismaMock.message.count.mockResolvedValueOnce(4);
+    prismaMock.message.findFirst.mockResolvedValueOnce({ createdAt: renameAt });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-16T13:11:00.000Z"),
+      ppcMemberScoreRaw: 15,
+      ppcMemberLastActiveAt: renameAt,
+    });
+
+    await recomputePpcMemberForUser("user-id", { emitRankUp: false });
+
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          ppcMemberScoreRaw: 15,
+          ppcMemberLastActiveAt: renameAt,
+        }),
+      }),
+    );
+  });
+
+  it("resets PPC Member values for excluded users", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-system-1",
+      clientId: "chatgpt-client",
+      username: "ChatGPT",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+      ppcMemberScoreRaw: 999,
+      ppcMemberLastActiveAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+    prismaMock.user.update.mockResolvedValueOnce({
+      id: "user-system-1",
+      clientId: "chatgpt-client",
+      username: "ChatGPT",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+      ppcMemberScoreRaw: 0,
+      ppcMemberLastActiveAt: null,
+    });
+
+    await recomputePpcMemberForUser("user-system-1");
+
+    expect(prismaMock.user.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          ppcMemberScoreRaw: 0,
+          ppcMemberLastActiveAt: null,
         }),
       }),
     );

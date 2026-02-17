@@ -1,6 +1,8 @@
 "use client";
 
 import { Transition } from "@headlessui/react";
+import { InformationCircleIcon, XCircleIcon } from "@heroicons/react/20/solid";
+import { XMarkIcon } from "@heroicons/react/24/outline";
 
 interface UiToastProps {
   show: boolean;
@@ -21,9 +23,20 @@ export function UiToast({
   onClose,
   tone = "error",
 }: UiToastProps) {
-  const actionClasses = tone === "error"
-    ? "text-rose-600 hover:text-rose-500 focus-visible:outline-rose-500"
-    : "text-indigo-600 hover:text-indigo-500 focus-visible:outline-indigo-500";
+  const lines = message
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const isError = tone === "error";
+  const headingClasses = isError ? "text-red-800" : "text-sky-900";
+  const textClasses = isError ? "text-red-700" : "text-sky-800";
+  const panelClasses = isError
+    ? "rounded-md bg-red-50 p-4"
+    : "rounded-md bg-sky-50 p-4";
+  const iconClasses = isError ? "size-5 text-red-400" : "size-5 text-sky-500";
+  const actionClasses = isError
+    ? "text-red-700 hover:text-red-600 focus-visible:outline-red-500"
+    : "text-sky-700 hover:text-sky-600 focus-visible:outline-sky-500";
 
   return (
     <div
@@ -40,31 +53,49 @@ export function UiToast({
           leaveFrom="opacity-100"
           leaveTo="opacity-0"
         >
-          <div className="pointer-events-auto w-full max-w-md overflow-hidden rounded-xl bg-white shadow-lg ring-1 ring-black/5">
+          <div className={`pointer-events-auto w-full max-w-md shadow-lg ring-1 ring-black/5 ${panelClasses}`}>
             <div className="flex">
-              <div className="w-0 flex-1 p-4">
-                {title ? <p className="text-sm font-semibold text-slate-900">{title}</p> : null}
-                <p className={`text-sm ${title ? "mt-1" : ""} text-slate-600`}>{message}</p>
+              <div className="shrink-0">
+                {isError ? (
+                  <XCircleIcon aria-hidden="true" className={iconClasses} />
+                ) : (
+                  <InformationCircleIcon aria-hidden="true" className={iconClasses} />
+                )}
               </div>
-              {actionLabel && onAction ? (
-                <div className="flex border-l border-slate-200">
-                  <button
-                    type="button"
-                    onClick={onAction}
-                    className={`flex w-full items-center justify-center px-4 text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 ${actionClasses}`}
-                  >
-                    {actionLabel}
-                  </button>
+              <div className="ml-3 min-w-0 flex-1">
+                {title ? <h3 className={`text-sm font-medium ${headingClasses}`}>{title}</h3> : null}
+                <div className={`text-sm ${title ? "mt-2" : ""} ${textClasses}`}>
+                  {lines.length > 1 ? (
+                    <ul role="list" className="list-disc space-y-1 pl-5">
+                      {lines.map((line) => (
+                        <li key={line}>{line}</li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>{lines[0] || message}</p>
+                  )}
                 </div>
-              ) : null}
+                {actionLabel && onAction ? (
+                  <div className="mt-2">
+                    <button
+                      type="button"
+                      onClick={onAction}
+                      className={`text-sm font-semibold focus-visible:outline-2 focus-visible:outline-offset-2 ${actionClasses}`}
+                    >
+                      {actionLabel}
+                    </button>
+                  </div>
+                ) : null}
+              </div>
               {onClose ? (
-                <div className="flex border-l border-slate-200">
+                <div className="ml-3 flex shrink-0">
                   <button
                     type="button"
                     onClick={onClose}
-                    className="flex w-full items-center justify-center px-4 text-sm font-semibold text-slate-500 hover:text-slate-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-400"
+                    className={`rounded-md p-1.5 ${actionClasses} focus-visible:outline-2 focus-visible:outline-offset-2`}
                   >
-                    Schließen
+                    <span className="sr-only">Schließen</span>
+                    <XMarkIcon className="size-4" aria-hidden="true" />
                   </button>
                 </div>
               ) : null}

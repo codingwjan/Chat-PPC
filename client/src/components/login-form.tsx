@@ -1,78 +1,89 @@
 "use client";
-/* eslint-disable @next/next/no-img-element */
 
-import { FormEvent, KeyboardEvent, useRef, useState, type ClipboardEvent, type DragEvent } from "react";
+import Link from "next/link";
+import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ProfileImageCropModal } from "@/components/profile-image-crop-modal";
+import { AuthWhatsNewPanel } from "@/components/auth-whats-new";
 import { apiJson } from "@/lib/http";
-import { getDefaultProfilePicture, saveSession } from "@/lib/session";
-import type { LoginRequest, LoginResponseDTO } from "@/lib/types";
+import { clearSession, getDefaultProfilePicture, loadSession, saveSession, type SessionState } from "@/lib/session";
+import type { AuthSessionDTO, AuthSignInRequest } from "@/lib/types";
 
-interface UploadResponse {
-  url: string;
-}
-
-const USERNAME_PLACEHOLDER = "Dein Benutzername";
-const SUPPORTED_PROFILE_UPLOAD_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
-
-function createClientId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-
-  return `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
-}
-
-async function uploadProfileImage(file: File): Promise<string> {
-  const formData = new FormData();
-  formData.set("file", file);
-
-  const response = await fetch("/api/uploads/profile", {
-    method: "POST",
-    body: formData,
+async function clearAuthSessionCookie(): Promise<void> {
+  await fetch("/api/auth/session", { method: "DELETE" }).catch(() => {
+    // Best effort.
   });
+}
 
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error || "Upload fehlgeschlagen");
-  }
-
-  const payload = (await response.json()) as UploadResponse;
-  return payload.url;
+function toSessionState(session: AuthSessionDTO): SessionState {
+  return {
+    id: session.id,
+    clientId: session.clientId,
+    loginName: session.loginName,
+    username: session.username,
+    profilePicture: session.profilePicture,
+    sessionToken: session.sessionToken,
+    sessionExpiresAt: session.sessionExpiresAt,
+    devMode: session.devMode,
+    devAuthToken: session.devAuthToken,
+  };
 }
 
 export function LoginForm() {
   const router = useRouter();
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [profilePicture, setProfilePicture] = useState("");
-  const [cropFile, setCropFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
+  const [loginName, setLoginName] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [profileDropActive, setProfileDropActive] = useState(false);
 
-  function extractSupportedImageFiles(dataTransfer: DataTransfer | null | undefined): File[] {
-    if (!dataTransfer) return [];
+  useEffect(() => {
+    let cancelled = false;
 
-    const fromItems = Array.from(dataTransfer.items)
-      .filter((item) => item.kind === "file")
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => file !== null)
-      .filter((file) => SUPPORTED_PROFILE_UPLOAD_MIME_TYPES.has(file.type));
-    if (fromItems.length > 0) return fromItems;
+    const bootstrap = async () => {
+      const storedSession = loadSession();
+      if (!storedSession || !storedSession.sessionToken) {
+        if (storedSession && !storedSession.sessionToken) {
+          clearSession();
+        }
+        await clearAuthSessionCookie();
+        return;
+      }
 
-    return Array.from(dataTransfer.files).filter((file) => SUPPORTED_PROFILE_UPLOAD_MIME_TYPES.has(file.type));
-  }
+      try {
+        const restored = await apiJson<AuthSessionDTO>("/api/auth/login", {
+          method: "POST",
+          body: JSON.stringify({
+            clientId: storedSession.clientId,
+            sessionToken: storedSession.sessionToken,
+          }),
+        });
+        if (cancelled) return;
 
-  async function onSubmit(event: FormEvent<HTMLFormElement>) {
+        saveSession(toSessionState(restored));
+        router.replace("/chat");
+      } catch {
+        if (cancelled) return;
+        clearSession();
+        await clearAuthSessionCookie();
+      }
+    };
+
+    void bootstrap();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
+  async function submitSignin(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-
-    const formData = new FormData(event.currentTarget);
-    const submittedUsername = formData.get("username");
-    const trimmed = typeof submittedUsername === "string" ? submittedUsername.trim() : "";
-    if (trimmed.length < 3) {
-      setError("Der Benutzername muss mindestens 3 Zeichen lang sein.");
+    const normalizedLogin = loginName.trim().toLowerCase();
+    if (!normalizedLogin) {
+      setError("Bitte einen Login-Namen eingeben.");
+      return;
+    }
+    if (password.trim().length < 8) {
+      setError("Das Passwort muss mindestens 8 Zeichen haben.");
       return;
     }
 
@@ -80,23 +91,19 @@ export function LoginForm() {
     setError(null);
 
     try {
-      const payload: LoginRequest = {
-        username: trimmed,
-        clientId: createClientId(),
-        profilePicture: profilePicture || getDefaultProfilePicture(),
+      const payload: AuthSignInRequest = {
+        loginName: normalizedLogin,
+        password,
       };
 
-      const user = await apiJson<LoginResponseDTO>("/api/auth/login", {
+      const session = await apiJson<AuthSessionDTO>("/api/auth/signin", {
         method: "POST",
         body: JSON.stringify(payload),
       });
 
       saveSession({
-        clientId: user.clientId,
-        username: user.username,
-        profilePicture: user.profilePicture,
-        devMode: user.devMode,
-        devAuthToken: user.devAuthToken,
+        ...toSessionState(session),
+        profilePicture: session.profilePicture || getDefaultProfilePicture(),
       });
 
       router.push("/chat");
@@ -107,188 +114,104 @@ export function LoginForm() {
     }
   }
 
-  async function onUploadChange(file: File | undefined) {
-    if (!file) return;
-    if (!SUPPORTED_PROFILE_UPLOAD_MIME_TYPES.has(file.type)) {
-      setError("Nur jpg, png, webp oder gif werden unterstützt.");
-      return;
-    }
-
-    setError(null);
-    setCropFile(file);
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
-  }
-
-  function onProfileImagePaste(event: ClipboardEvent<HTMLElement>): void {
-    const imageFiles = extractSupportedImageFiles(event.clipboardData);
-    if (imageFiles.length === 0) return;
-    event.preventDefault();
-    void onUploadChange(imageFiles[0]);
-  }
-
-  function onProfileImageDragOver(event: DragEvent<HTMLElement>): void {
-    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "copy";
-    setProfileDropActive(true);
-  }
-
-  function onProfileImageDragLeave(event: DragEvent<HTMLElement>): void {
-    const nextTarget = event.relatedTarget as Node | null;
-    if (nextTarget && event.currentTarget.contains(nextTarget)) return;
-    setProfileDropActive(false);
-  }
-
-  function onProfileImageDrop(event: DragEvent<HTMLElement>): void {
-    event.preventDefault();
-    setProfileDropActive(false);
-
-    const imageFiles = extractSupportedImageFiles(event.dataTransfer);
-    if (imageFiles.length === 0) {
-      setError("Nur jpg, png, webp oder gif werden unterstützt.");
-      return;
-    }
-
-    void onUploadChange(imageFiles[0]);
-  }
-
-  async function onCropConfirm(file: File) {
-    setUploading(true);
-    setError(null);
-
-    try {
-      const url = await uploadProfileImage(file);
-      setProfilePicture(url);
-      setCropFile(null);
-    } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Upload fehlgeschlagen");
-    } finally {
-      setUploading(false);
-    }
-  }
-
-  function onUsernameKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+  function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
     if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
     event.preventDefault();
-    if (loading || uploading) return;
+    if (loading) return;
     event.currentTarget.form?.requestSubmit();
   }
 
   return (
-    <main className="min-h-[100svh] bg-white">
-      <div className="flex min-h-[100svh]">
-        <div className="flex flex-1 flex-col justify-center px-4 py-10 sm:px-6 lg:flex-none lg:px-20 xl:px-24">
-          <div className="mx-auto w-full max-w-sm lg:w-96">
-            <p className="inline-flex rounded-full bg-sky-100 px-3 py-1 text-xs font-semibold text-sky-700">ChatPPC</p>
-            <h1 className="mt-6 text-2xl font-bold tracking-tight text-slate-900">Anmelden</h1>
-            <p className="mt-2 text-sm text-slate-500">Wähle einen Namen und starte den Chat.</p>
-
-            <form className="mt-8 space-y-6" onSubmit={onSubmit} onPaste={onProfileImagePaste}>
-              <div>
-                <label htmlFor="username" className="block text-sm font-medium text-slate-900">
-                  Benutzername
-                </label>
-                <div className="mt-2">
-                  <input
-                    id="username"
-                    className="block h-11 w-full rounded-md bg-white px-3 text-base text-slate-900 outline-1 -outline-offset-1 outline-slate-300 placeholder:text-slate-400 focus:outline-2 focus:-outline-offset-2 focus:outline-sky-600"
-                    type="text"
-                    placeholder={USERNAME_PLACEHOLDER}
-                    name="username"
-                    autoComplete="username"
-                    spellCheck={false}
-                    minLength={3}
-                    required
-                    onKeyDown={onUsernameKeyDown}
-                  />
-                </div>
-              </div>
-
-              <div
-                className={`space-y-3 rounded-xl border border-dashed p-3 transition ${
-                  profileDropActive ? "border-sky-400 bg-sky-50" : "border-slate-300 bg-slate-50/70"
-                }`}
-                tabIndex={0}
-                onDragOver={onProfileImageDragOver}
-                onDragEnter={onProfileImageDragOver}
-                onDragLeave={onProfileImageDragLeave}
-                onDrop={onProfileImageDrop}
-              >
-                <div className="flex items-center gap-3">
-                  <button
-                    type="button"
-                    className="inline-flex h-10 items-center rounded-md bg-white px-4 text-sm font-semibold text-slate-700 shadow-xs ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={uploading}
-                  >
-                    {uploading ? "Wird hochgeladen…" : "Bild hochladen"}
-                  </button>
-                  <input
-                    ref={fileInputRef}
-                    className="hidden"
-                    type="file"
-                    accept="image/png,image/jpeg,image/webp,image/gif"
-                    onChange={(event) => void onUploadChange(event.target.files?.[0])}
-                  />
-                  <span className="text-xs text-slate-500">Max. 6 MB</span>
-                </div>
-
-                <div className="flex items-center gap-3 rounded-lg border border-slate-200 bg-white p-2">
-                  <img
-                    src={profilePicture || getDefaultProfilePicture()}
-                    alt="Vorschau Profilbild"
-                    className="h-12 w-12 shrink-0 rounded-full border border-slate-200 object-cover [aspect-ratio:1/1]"
-                    width={48}
-                    height={48}
-                    loading="lazy"
-                  />
-                  <p className="text-xs text-slate-500">Profilbild-Vorschau</p>
-                </div>
-                <p className="text-xs text-slate-500">Bild per Drag-and-drop oder Cmd/Ctrl + V einfügen.</p>
-              </div>
-
-              {error ? (
-                <div className="rounded-md bg-rose-50 px-3 py-2 text-sm text-rose-600" aria-live="polite">
-                  {error}
-                </div>
-              ) : null}
-
-              <button
-                className="flex h-11 w-full items-center justify-center rounded-md bg-slate-900 px-4 text-sm font-semibold text-white shadow-xs hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-70"
-                type="submit"
-                disabled={loading || uploading}
-              >
-                {loading ? "Beitritt läuft…" : "Chat betreten"}
-              </button>
-            </form>
-          </div>
-        </div>
-
-        <div className="relative hidden flex-1 lg:block">
-          <img
-            alt="Chat Hintergrund"
-            src="https://images.unsplash.com/photo-1496917756835-20cb06e75b4e?auto=format&fit=crop&w=1908&q=80"
-            className="absolute inset-0 h-full w-full object-cover"
-          />
-          <div className="absolute inset-0 bg-slate-900/35" />
-          <div className="absolute inset-x-8 bottom-8 rounded-2xl border border-white/20 bg-black/35 p-4 text-slate-100 backdrop-blur">
-            <p className="text-sm font-semibold">In wenigen Sekunden im Gruppenchat.</p>
-            <p className="mt-1 text-xs text-slate-200">Umfragen, Fragen und Bildfreigaben in einem Chat-Flow.</p>
-          </div>
-        </div>
+    <main className="brand-surface relative min-h-[100svh] overflow-hidden [font-family:var(--brand-font)]">
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -left-20 -top-24 h-72 w-72 rounded-full bg-cyan-200/45 blur-3xl" />
+        <div className="absolute right-[-120px] top-[28%] h-80 w-80 rounded-full bg-amber-200/45 blur-3xl" />
+        <div className="absolute bottom-[-160px] left-[35%] h-96 w-96 rounded-full bg-sky-200/35 blur-3xl" />
       </div>
 
-      {cropFile ? (
-        <ProfileImageCropModal
-          key={`${cropFile.name}-${cropFile.size}-${cropFile.lastModified}`}
-          file={cropFile}
-          busy={uploading}
-          onCancel={() => setCropFile(null)}
-          onConfirm={onCropConfirm}
-        />
-      ) : null}
+      <div className="relative mx-auto grid min-h-[100svh] w-full max-w-6xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[1fr_1.25fr] lg:items-center lg:py-10">
+        <AuthWhatsNewPanel />
+
+        <section className="glass-panel-strong rounded-3xl p-6 sm:p-8 lg:p-10">
+          <nav className="mb-4 flex flex-wrap gap-2" aria-label="Auth-Modus">
+            <Link
+              href="/login"
+              className="inline-flex h-10 items-center rounded-full border border-slate-900 bg-slate-900 px-4 text-sm font-semibold text-white"
+            >
+              Einloggen
+            </Link>
+            <Link
+              href="/signup"
+              className="inline-flex h-10 items-center rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              Account erstellen
+            </Link>
+          </nav>
+          <div className="inline-flex rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+            Login
+          </div>
+          <h1 className="mt-4 text-[clamp(1.7rem,3vw,2.4rem)] font-semibold leading-tight text-slate-900">Willkommen zurück</h1>
+          <p className="mt-2 text-sm text-slate-600 sm:text-base">Mit deinem Login-Namen und Passwort bist du direkt wieder im Chat.</p>
+
+          <form className="mt-6 space-y-5" onSubmit={submitSignin}>
+            <div>
+              <label htmlFor="loginName" className="block text-sm font-medium text-slate-900">Login-Name</label>
+              <input
+                id="loginName"
+                type="text"
+                name="username"
+                autoComplete="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                value={loginName}
+                onChange={(event) => setLoginName(event.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="z. B. vorname.nachname"
+                className="mt-1.5 block h-12 w-full rounded-xl border border-slate-300/80 bg-white/90 px-3 text-base text-slate-900 outline-none ring-sky-300 transition focus-visible:ring-2"
+                required
+              />
+            </div>
+
+            <div>
+              <label htmlFor="password" className="block text-sm font-medium text-slate-900">Passwort</label>
+              <input
+                id="password"
+                type="password"
+                name="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                onKeyDown={onKeyDown}
+                className="mt-1.5 block h-12 w-full rounded-xl border border-slate-300/80 bg-white/90 px-3 text-base text-slate-900 outline-none ring-sky-300 transition focus-visible:ring-2"
+                required
+              />
+              <p className="mt-1.5 text-xs font-medium text-sky-700">Tipp: Im Passwortmanager speichern, dann bleibst du dauerhaft schnell drin.</p>
+            </div>
+
+            {error ? (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700" aria-live="polite">
+                {error}
+              </div>
+            ) : null}
+
+            <button
+              className="flex h-11 w-full items-center justify-center rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(15,23,42,0.25)] hover:bg-slate-800 disabled:opacity-70"
+              type="submit"
+              disabled={loading}
+            >
+              {loading ? "Bitte warten..." : "Anmelden"}
+            </button>
+          </form>
+
+          <p className="mt-5 text-sm text-slate-600">
+            Noch kein Konto?{" "}
+            <Link className="font-semibold text-sky-700 hover:text-sky-800" href="/signup">
+              Zur Registrierung
+            </Link>
+          </p>
+        </section>
+      </div>
     </main>
   );
 }

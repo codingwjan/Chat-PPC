@@ -15,7 +15,8 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "deploy:vercel": "prisma generate && prisma migrate deploy && next build --webpack",
     "import:legacy": "tsx scripts/import-legacy.ts",
-    "media:migrate-inline": "tsx scripts/migrate-inline-media-to-blob.ts"
+    "media:migrate-inline": "tsx scripts/migrate-inline-media-to-blob.ts",
+    "ppc-member:backfill": "tsx scripts/backfill-ppc-member-score.ts"
   },
   "dependencies": {
     "@headlessui/react": "^2.2.9",
@@ -24,9 +25,11 @@
     "@prisma/client": "^7.3.0",
     "@vercel/analytics": "^1.6.1",
     "@vercel/blob": "^2.0.0",
+    "gifuct-js": "^2.1.2",
     "next": "^16.1.6",
     "openai": "^6.18.0",
     "pg": "^8.18.0",
+    "pngjs": "^7.0.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "zod": "^4.3.6"
@@ -35,6 +38,7 @@
     "@tailwindcss/postcss": "^4.1.18",
     "@types/node": "^25.2.2",
     "@types/pg": "^8.16.0",
+    "@types/pngjs": "^6.0.5",
     "@types/react": "^19.2.13",
     "@types/react-dom": "^19.2.3",
     "dotenv": "^17.2.4",

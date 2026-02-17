@@ -1,10 +1,23 @@
 import type { Metadata } from "next";
 import { Analytics } from "@vercel/analytics/next";
+import { JetBrains_Mono, Space_Grotesk } from "next/font/google";
 import "./globals.css";
 
 const APP_NAME = "Chat-PPC";
 const APP_DESCRIPTION =
   "Echtzeit-Gruppenchat mit Umfragen, Threads und KI-gestützten Antworten.";
+
+const brandSans = Space_Grotesk({
+  subsets: ["latin"],
+  variable: "--font-brand-sans",
+  display: "swap",
+});
+
+const brandMono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-brand-mono",
+  display: "swap",
+});
 
 function resolveMetadataBase() {
   const raw =
@@ -46,7 +59,7 @@ export const metadata: Metadata = {
     index: true,
     follow: true,
   },
-  themeColor: "#0f172a",
+  themeColor: "#18181b",
   manifest: "/manifest.webmanifest",
   icons: {
     icon: [
@@ -89,7 +102,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="de">
-      <body className="antialiased">
+      <body className={`${brandSans.variable} ${brandMono.variable} antialiased`}>
         {children}
         <Analytics />
       </body>

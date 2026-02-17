@@ -25,23 +25,59 @@ enum AiJobStatus {
   FAILED
 }
 
+enum MessageReactionType {
+  LIKE
+  LOL
+  FIRE
+  BASED
+  WTF
+  BIG_BRAIN
+}
+
+enum UserBehaviorEventType {
+  MESSAGE_CREATED
+  USERNAME_CHANGED
+  MESSAGE_TAGGING_COMPLETED
+  MESSAGE_TAGGING_FAILED
+  REACTION_GIVEN
+  REACTION_RECEIVED
+  POLL_CREATED
+  POLL_EXTENDED
+  POLL_VOTE_GIVEN
+  AI_MENTION_SENT
+}
+
 model User {
-  id             String     @id @default(cuid())
-  clientId       String     @unique
-  username       String
-  profilePicture String
-  status         String     @default("")
-  isOnline       Boolean    @default(false)
-  lastSeenAt     DateTime?
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
-  messages       Message[]
-  pollVotes      PollVote[]
+  id               String            @id @default(cuid())
+  clientId         String            @unique
+  loginName        String?           @unique
+  loginNameEncrypted String?
+  loginNameLookup  String?           @unique
+  passwordHash     String?
+  sessionToken     String?
+  sessionExpiresAt DateTime?
+  username         String
+  profilePicture   String
+  status           String            @default("")
+  isOnline         Boolean           @default(false)
+  lastSeenAt       DateTime?
+  ppcMemberScoreRaw Float            @default(0)
+  ppcMemberLastActiveAt DateTime?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  messages         Message[]
+  pollVotes        PollVote[]
   pollChoiceVotes PollChoiceVote[]
+  messageReactions MessageReaction[]
+  tasteProfile     UserTasteProfile?
+  behaviorEvents   UserBehaviorEvent[]
+  notifications    Notification[]    @relation("NotificationTargetUser")
+  actorNotifications Notification[]  @relation("NotificationActorUser")
 
   @@index([isOnline])
   @@index([lastSeenAt])
   @@index([username])
+  @@index([sessionToken])
 }
 
 model BlacklistEntry {
@@ -65,6 +101,10 @@ model Message {
   pollMultiSelect      Boolean     @default(false)
   pollAllowVoteChange  Boolean     @default(false)
   questionMessageId    String?
+  taggingStatus        AiJobStatus?
+  taggingPayload       Json?
+  taggingUpdatedAt     DateTime?
+  taggingError         String?
   createdAt            DateTime    @default(now())
   updatedAt            DateTime    @updatedAt
   author               User?       @relation(fields: [authorId], references: [id], onDelete: SetNull)
@@ -73,10 +113,81 @@ model Message {
   pollVotes            PollVote[]
   pollOptions          PollOption[]
   pollChoiceVotes      PollChoiceVote[]
+  reactions            MessageReaction[]
+  behaviorEvents       UserBehaviorEvent[]
+  notifications        Notification[]
+  tagJob               MessageTagJob?
 
   @@index([type])
   @@index([createdAt])
   @@index([questionMessageId])
+  @@index([taggingStatus, createdAt])
+}
+
+model Notification {
+  id                   String              @id @default(cuid())
+  userId               String
+  actorUserId          String?
+  actorUsernameSnapshot String
+  messageId            String
+  reaction             MessageReactionType
+  messagePreview       String
+  isRead               Boolean             @default(false)
+  createdAt            DateTime            @default(now())
+  readAt               DateTime?
+  updatedAt            DateTime            @updatedAt
+  user                 User                @relation("NotificationTargetUser", fields: [userId], references: [id], onDelete: Cascade)
+  actorUser            User?               @relation("NotificationActorUser", fields: [actorUserId], references: [id], onDelete: SetNull)
+  message              Message             @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([userId, isRead, createdAt])
+  @@index([messageId, createdAt])
+}
+
+model UserTasteProfile {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  windowDays  Int      @default(30)
+  payload     Json
+  updatedAt   DateTime @updatedAt
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([updatedAt])
+}
+
+model MessageReaction {
+  id        String              @id @default(cuid())
+  messageId String
+  userId    String
+  reaction  MessageReactionType
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+  message   Message             @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([messageId, reaction])
+  @@index([userId, updatedAt])
+}
+
+model UserBehaviorEvent {
+  id            String                @id @default(cuid())
+  userId        String
+  type          UserBehaviorEventType
+  messageId     String?
+  relatedUserId String?
+  reaction      MessageReactionType?
+  preview       String?
+  meta          Json?
+  createdAt     DateTime              @default(now())
+  expiresAt     DateTime
+  user          User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  message       Message?              @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
+  @@index([userId, type, createdAt])
+  @@index([expiresAt])
 }
 
 model PollVote {
@@ -136,6 +247,26 @@ model AiJob {
   lastError       String?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
+
+  @@index([status, runAt, createdAt])
+}
+
+model MessageTagJob {
+  id              String      @id @default(cuid())
+  sourceMessageId String      @unique
+  username        String
+  message         String
+  imageUrls       Json
+  status          AiJobStatus @default(PENDING)
+  attempts        Int         @default(0)
+  runAt           DateTime    @default(now())
+  lockedAt        DateTime?
+  completedAt     DateTime?
+  failedAt        DateTime?
+  lastError       String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  sourceMessage   Message     @relation(fields: [sourceMessageId], references: [id], onDelete: Cascade)
 
   @@index([status, runAt, createdAt])
 }
