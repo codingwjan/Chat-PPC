@@ -141,6 +141,11 @@ const ProfileImageCropModal = dynamic(
   },
 );
 
+type IdleWindow = Window & {
+  requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+  cancelIdleCallback?: (handle: number) => void;
+};
+
 const MESSAGE_PAGE_SIZE = 36;
 const SNAPSHOT_LIMIT = 40;
 const RECONCILE_INTERVAL_MS = 30_000;
@@ -149,7 +154,6 @@ const AUTO_SCROLL_NEAR_BOTTOM_PX = 420;
 const TOP_LOAD_TRIGGER_PX = 160;
 const TOP_LOAD_COOLDOWN_MS = 750;
 const ONBOARDING_KEY = "chatppc.onboarding.v1";
-const MAX_MESSAGE_INPUT_LINES = 10;
 const MAX_VISIBLE_MESSAGES = Number.POSITIVE_INFINITY;
 const MESSAGE_RENDER_WINDOW = Number.POSITIVE_INFINITY;
 const MESSAGE_RENDER_CHUNK = 60;
@@ -825,8 +829,6 @@ export function ChatApp() {
   const optimisticReactionRollbackRef = useRef<MessageDTO[] | null>(null);
   const draftBeforeHistoryRef = useRef("");
   const dragDepthRef = useRef(0);
-  const messageInputLineHeightRef = useRef<number | null>(null);
-  const messageInputResizeFrameRef = useRef<number | null>(null);
   const lightboxCopyResetTimeoutRef = useRef<number | null>(null);
   const validationToastResetTimeoutRef = useRef<number | null>(null);
   const bottomStickFrameRef = useRef<number | null>(null);
@@ -858,6 +860,7 @@ export function ChatApp() {
   const [mediaTotalCount, setMediaTotalCount] = useState(0);
   const [loadingMedia, setLoadingMedia] = useState(false);
   const [loadingMediaMore, setLoadingMediaMore] = useState(false);
+  const [mediaVisibleCount, setMediaVisibleCount] = useState(60);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [showMedia, setShowMedia] = useState(false);
   const [showPointsInfo, setShowPointsInfo] = useState(false);
@@ -937,6 +940,20 @@ export function ChatApp() {
   );
   const ownMember = ownPresence?.member;
   const ownWindowStats = tasteProfileDetailed?.windows.all;
+  const mediaVisibleCountRef = useRef(mediaVisibleCount);
+  const mediaItemsWithDateLabel = useMemo(
+    () =>
+      mediaItems.map((item) => ({
+        ...item,
+        createdAtLabel: new Date(item.createdAt).toLocaleString("de-DE"),
+      })),
+    [mediaItems],
+  );
+  const visibleMediaItems = useMemo(
+    () => mediaItemsWithDateLabel.slice(0, mediaVisibleCount),
+    [mediaItemsWithDateLabel, mediaVisibleCount],
+  );
+  const mediaHasHiddenLocalItems = mediaVisibleCount < mediaItemsWithDateLabel.length;
   const ownProfileStats = useMemo(
     () => ({
       postsTotal: ownWindowStats?.activity.postsTotal ?? 0,
@@ -1040,6 +1057,7 @@ export function ChatApp() {
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     if (!scrollRef.current) return;
+    prependAnchorRef.current = null;
     scrollRef.current.scrollTo({
       top: scrollRef.current.scrollHeight,
       behavior,
@@ -1124,30 +1142,6 @@ export function ChatApp() {
     setMessages((current) => current.filter((message) => message.id !== messageId));
   }, []);
 
-  const resizeMessageInput = useCallback(() => {
-    const textarea = messageInputRef.current;
-    if (!textarea) return;
-
-    textarea.style.height = "auto";
-    let lineHeight = messageInputLineHeightRef.current;
-    if (!lineHeight || !Number.isFinite(lineHeight) || lineHeight <= 0) {
-      lineHeight = Number.parseFloat(window.getComputedStyle(textarea).lineHeight || "20") || 20;
-      messageInputLineHeightRef.current = lineHeight;
-    }
-    const maxHeight = lineHeight * MAX_MESSAGE_INPUT_LINES;
-    const nextHeight = Math.min(textarea.scrollHeight, maxHeight);
-    textarea.style.height = `${Math.max(lineHeight, nextHeight)}px`;
-    textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
-  }, []);
-
-  const scheduleMessageInputResize = useCallback(() => {
-    if (messageInputResizeFrameRef.current !== null) return;
-    messageInputResizeFrameRef.current = window.requestAnimationFrame(() => {
-      messageInputResizeFrameRef.current = null;
-      resizeMessageInput();
-    });
-  }, [resizeMessageInput]);
-
   const handleMessageDraftChange = useCallback(
     (event: ChangeEvent<HTMLTextAreaElement>) => {
       const value = event.target.value;
@@ -1156,20 +1150,22 @@ export function ChatApp() {
       draftBeforeHistoryRef.current = "";
 
       const cursor = event.target.selectionStart ?? value.length;
-      const textBefore = value.slice(0, cursor);
-      const match = textBefore.match(/@(\w*)$/);
+      const textBefore = value.slice(Math.max(0, cursor - 80), cursor);
+      const match = textBefore.match(/(?:^|\s)@(\w*)$/);
       if (match) {
         const nextFilter = match[1];
-        setShowMentionSuggestions((current) => (current ? current : true));
-        setMentionFilter((current) => (current === nextFilter ? current : nextFilter));
-        setMentionIndex((current) => (current === 0 ? current : 0));
+        startUiTransition(() => {
+          setShowMentionSuggestions((current) => (current ? current : true));
+          setMentionFilter((current) => (current === nextFilter ? current : nextFilter));
+          setMentionIndex((current) => (current === 0 ? current : 0));
+        });
       } else {
-        setShowMentionSuggestions((current) => (current ? false : current));
+        startUiTransition(() => {
+          setShowMentionSuggestions((current) => (current ? false : current));
+        });
       }
-
-      scheduleMessageInputResize();
     },
-    [scheduleMessageInputResize],
+    [startUiTransition],
   );
 
   const activateAskChatGpt = useCallback(() => {
@@ -1780,9 +1776,8 @@ export function ChatApp() {
   }, [mediaItems]);
 
   useEffect(() => {
-    if (composerMode !== "message") return;
-    scheduleMessageInputResize();
-  }, [composerMode, messageDraft, scheduleMessageInputResize, uploadedDraftImages.length]);
+    mediaVisibleCountRef.current = mediaVisibleCount;
+  }, [mediaVisibleCount]);
 
   useEffect(() => {
     setMessageWindowSize((current) => {
@@ -1889,13 +1884,43 @@ export function ChatApp() {
 
   useEffect(() => {
     return () => {
-      if (messageInputResizeFrameRef.current !== null) {
-        window.cancelAnimationFrame(messageInputResizeFrameRef.current);
-        messageInputResizeFrameRef.current = null;
-      }
       if (bottomStickFrameRef.current !== null) {
         window.cancelAnimationFrame(bottomStickFrameRef.current);
         bottomStickFrameRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const idleWindow = window as IdleWindow;
+    let idleHandle: number | null = null;
+    let timeoutHandle: number | null = null;
+
+    const warmUpOverlays = () => {
+      void Promise.allSettled([
+        import("@/components/app-overlay-dialog"),
+        import("@/components/member-profile-drawer"),
+        import("@/components/profile-image-crop-modal"),
+      ]);
+    };
+
+    if (typeof idleWindow.requestIdleCallback === "function") {
+      idleHandle = idleWindow.requestIdleCallback(() => {
+        warmUpOverlays();
+      }, { timeout: 1_500 });
+    } else {
+      timeoutHandle = window.setTimeout(() => {
+        warmUpOverlays();
+      }, 700);
+    }
+
+    return () => {
+      if (idleHandle !== null && typeof idleWindow.cancelIdleCallback === "function") {
+        idleWindow.cancelIdleCallback(idleHandle);
+      }
+      if (timeoutHandle !== null) {
+        window.clearTimeout(timeoutHandle);
       }
     };
   }, []);
@@ -1969,12 +1994,14 @@ export function ChatApp() {
   useEffect(() => {
     if (!showMedia) return;
 
+    setMediaVisibleCount(60);
     const hasCache = hydrateMediaCache();
     void fetchMediaItems({ silent: hasCache });
   }, [fetchMediaItems, hydrateMediaCache, showMedia]);
 
   useEffect(() => {
-    if (!showMedia || !mediaHasMore || loadingMedia || loadingMediaMore) return;
+    if (!showMedia || loadingMedia || loadingMediaMore) return;
+    if (!mediaHasMore && !mediaHasHiddenLocalItems) return;
     const container = mediaScrollRef.current;
     if (!container) return;
     let requesting = false;
@@ -1983,6 +2010,12 @@ export function ChatApp() {
       if (requesting) return;
       const nearBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 80;
       if (!nearBottom) return;
+      const hiddenLocalItems = mediaVisibleCountRef.current < mediaItemsRef.current.length;
+      if (hiddenLocalItems) {
+        setMediaVisibleCount((current) => Math.min(current + 40, mediaItemsRef.current.length));
+        return;
+      }
+      if (!mediaHasMore) return;
       requesting = true;
       void fetchMediaItems({ append: true, silent: true }).finally(() => {
         requesting = false;
@@ -1993,18 +2026,23 @@ export function ChatApp() {
     return () => {
       container.removeEventListener("scroll", onScroll);
     };
-  }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasMore, showMedia]);
+  }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasHiddenLocalItems, mediaHasMore, showMedia]);
 
   useEffect(() => {
-    if (!showMedia || !mediaHasMore || loadingMedia || loadingMediaMore) return;
+    if (!showMedia || loadingMedia || loadingMediaMore) return;
+    if (!mediaHasMore && !mediaHasHiddenLocalItems) return;
     const container = mediaScrollRef.current;
     if (!container) return;
 
     const canScroll = container.scrollHeight > container.clientHeight + 8;
     if (canScroll) return;
+    if (mediaHasHiddenLocalItems) {
+      setMediaVisibleCount((current) => Math.min(current + 40, mediaItemsRef.current.length));
+      return;
+    }
 
     void fetchMediaItems({ append: true, silent: true });
-  }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasMore, mediaItems.length, showMedia]);
+  }, [fetchMediaItems, loadingMedia, loadingMediaMore, mediaHasHiddenLocalItems, mediaHasMore, mediaItems.length, showMedia]);
 
   useEffect(() => {
     if (!session?.clientId) {
@@ -2349,6 +2387,9 @@ export function ChatApp() {
 
       const atBottom = !userDetachedFromBottomRef.current && distanceFromBottom <= AUTO_SCROLL_NEAR_BOTTOM_PX;
       isAtBottomRef.current = atBottom;
+      if (atBottom) {
+        prependAnchorRef.current = null;
+      }
       setIsAtBottom((current) => (current === atBottom ? current : atBottom));
 
       const reachedTopTrigger = currentScrollTop <= TOP_LOAD_TRIGGER_PX;
@@ -2389,6 +2430,14 @@ export function ChatApp() {
     if (!anchor || !element) return;
 
     const delta = element.scrollHeight - anchor.height;
+    if (isAtBottomRef.current && !userDetachedFromBottomRef.current) {
+      prependAnchorRef.current = null;
+      return;
+    }
+    if (delta <= 0) {
+      prependAnchorRef.current = null;
+      return;
+    }
     element.scrollTop = anchor.top + delta;
     prependAnchorRef.current = null;
   }, [messages.length, messageWindowSize]);
@@ -3350,14 +3399,18 @@ export function ChatApp() {
 
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
-      void submitComposer();
+      window.setTimeout(() => {
+        void submitComposer();
+      }, 0);
     }
   }
 
   function onQuestionInputKeyDown(event: ReactKeyboardEvent<HTMLInputElement>): void {
     if (event.key !== "Enter") return;
     event.preventDefault();
-    void submitComposer();
+    window.setTimeout(() => {
+      void submitComposer();
+    }, 0);
   }
 
   async function saveChatBackground(url: string | null): Promise<void> {
@@ -3443,7 +3496,7 @@ export function ChatApp() {
     setShowOnboarding(false);
   }
 
-  function openProfileEditor(): void {
+  const openProfileEditor = useCallback((): void => {
     if (!session) return;
     setUsernameDraft(session.username);
     setLoginNameDraft(session.loginName || "");
@@ -3460,43 +3513,49 @@ export function ChatApp() {
     window.setTimeout(() => {
       void loadTasteProfileModalData();
     }, 0);
-  }
+  }, [loadTasteProfileModalData, session, startUiTransition]);
 
-  function closeProfileEditor(): void {
-    setProfileDropActive(false);
-    setCurrentPasswordDraft("");
-    setNewPasswordDraft("");
-    setConfirmNewPasswordDraft("");
-    setEditingProfile(false);
-  }
+  const closeProfileEditor = useCallback((): void => {
+    startUiTransition(() => {
+      setProfileDropActive(false);
+      setEditingProfile(false);
+    });
 
-  function openSharedBackgroundModal(): void {
+    window.setTimeout(() => {
+      setCurrentPasswordDraft("");
+      setNewPasswordDraft("");
+      setConfirmNewPasswordDraft("");
+    }, 0);
+  }, [startUiTransition]);
+
+  const openSharedBackgroundModal = useCallback((): void => {
     startUiTransition(() => {
       setMobileSidebarOpen(false);
       setBackgroundDraftUrl("");
       setShowBackgroundModal(true);
     });
-  }
+  }, [startUiTransition]);
 
-  function openPointsInfoModal(): void {
+  const openPointsInfoModal = useCallback((): void => {
     startUiTransition(() => {
       setMobileSidebarOpen(false);
       setShowPointsInfo(true);
     });
-  }
+  }, [startUiTransition]);
 
-  function openMediaModal(): void {
+  const openMediaModal = useCallback((): void => {
     startUiTransition(() => {
       setMobileSidebarOpen(false);
+      setMediaVisibleCount(60);
       setShowMedia(true);
     });
-  }
+  }, [startUiTransition]);
 
-  function openDevMenu(): void {
+  const openDevMenu = useCallback((): void => {
     if (!isDeveloperMode) return;
     setMobileSidebarOpen(false);
     router.push("/dev");
-  }
+  }, [isDeveloperMode, router]);
 
   async function saveBackgroundDraft(): Promise<void> {
     setUploadingBackground(true);
@@ -3511,7 +3570,7 @@ export function ChatApp() {
     }
   }
 
-  async function openMemberProfile(user: UserPresenceDTO): Promise<void> {
+  const openMemberProfile = useCallback(async (user: UserPresenceDTO): Promise<void> => {
     const ownCachedProfile = session?.clientId ? publicProfileCacheRef.current[session.clientId] : undefined;
     const fallbackOwnStats = ownWindowStats ? ownProfileStats : null;
     startUiTransition(() => {
@@ -3570,9 +3629,9 @@ export function ChatApp() {
     } finally {
       setMemberDrawerLoading(false);
     }
-  }
+  }, [fetchPublicUserProfile, ownProfileStats, ownWindowStats, session?.clientId, startUiTransition]);
 
-  function openMessageAuthorProfile(message: MessageDTO): void {
+  const openMessageAuthorProfile = useCallback((message: MessageDTO): void => {
     const normalizedAuthor = message.username.trim().toLowerCase();
     const matchedOnlineUserById = message.authorId
       ? users.find((user) => user.id === message.authorId)
@@ -3607,7 +3666,30 @@ export function ChatApp() {
       setMemberDrawerOwnStats(ownCachedProfile?.stats ?? (ownWindowStats ? ownProfileStats : null));
       setMemberDrawerProfile(fallbackProfile);
     });
-  }
+  }, [onlineUsers, openMemberProfile, ownProfileStats, ownWindowStats, session?.clientId, startUiTransition, users]);
+
+  const closeMobileSidebar = useCallback((): void => {
+    setMobileSidebarOpen(false);
+  }, []);
+
+  const openMobileSidebar = useCallback((): void => {
+    setMobileSidebarOpen(true);
+  }, []);
+
+  const handleOpenSidebarMemberProfile = useCallback((user: UserPresenceDTO): void => {
+    void openMemberProfile(user);
+  }, [openMemberProfile]);
+
+  const sidebarOnlineUsersContent = useMemo(
+    () => (
+      <OnlineUsersList
+        users={sidebarOnlineUsers}
+        avatarSizeClassName="h-11 w-11"
+        onOpenMemberProfile={handleOpenSidebarMemberProfile}
+      />
+    ),
+    [handleOpenSidebarMemberProfile, sidebarOnlineUsers],
+  );
 
   if (!session) {
     return (
@@ -3629,7 +3711,7 @@ export function ChatApp() {
     >
       <ChatShellSidebar
         mobileOpen={mobileSidebarOpen}
-        onCloseMobile={() => setMobileSidebarOpen(false)}
+        onCloseMobile={closeMobileSidebar}
         username={session.username}
         profilePicture={sessionProfilePicture}
         member={ownMember}
@@ -3639,15 +3721,7 @@ export function ChatApp() {
         onOpenSharedBackground={openSharedBackgroundModal}
         onOpenMedia={openMediaModal}
         onOpenPointsInfo={openPointsInfoModal}
-        onlineUsersContent={
-          <OnlineUsersList
-            users={sidebarOnlineUsers}
-            avatarSizeClassName="h-11 w-11"
-            onOpenMemberProfile={(user) => {
-              void openMemberProfile(user);
-            }}
-          />
-        }
+        onlineUsersContent={sidebarOnlineUsersContent}
       />
 
       <div className="flex h-full min-h-0 flex-col lg:pl-72">
@@ -3681,7 +3755,7 @@ export function ChatApp() {
         >
           <button
             type="button"
-            onClick={() => setMobileSidebarOpen(true)}
+            onClick={openMobileSidebar}
             className="absolute left-3 top-3 z-30 rounded-full border border-slate-200 bg-white p-2.5 text-slate-700 shadow-sm hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 lg:hidden"
             aria-label="Sidebar öffnen"
             style={{ top: "calc(env(safe-area-inset-top) + 0.5rem)" }}
@@ -4386,7 +4460,7 @@ export function ChatApp() {
           ) : (
             <div ref={mediaScrollRef} className="max-h-[70vh] overflow-y-auto pr-1">
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
-                {mediaItems.map((item) => (
+                {visibleMediaItems.map((item) => (
                   <button
                     key={item.id}
                     type="button"
@@ -4405,15 +4479,19 @@ export function ChatApp() {
                     </div>
                     <div className="px-2 py-1.5">
                       <p className="truncate text-[11px] font-medium text-slate-700">{item.username}</p>
-                      <p className="text-[10px] text-slate-500">{new Date(item.createdAt).toLocaleString("de-DE")}</p>
+                      <p className="text-[10px] text-slate-500">{item.createdAtLabel}</p>
                     </div>
                   </button>
                 ))}
               </div>
-              {mediaHasMore || loadingMediaMore ? (
+              {mediaHasMore || loadingMediaMore || mediaHasHiddenLocalItems ? (
                 <div className="mt-3 flex justify-center">
                   <p className={`rounded-xl border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-600 ${loadingMediaMore ? "animate-pulse" : ""}`}>
-                    {loadingMediaMore ? "Weitere werden geladen…" : "Zum automatischen Nachladen scrollen"}
+                    {loadingMediaMore
+                      ? "Weitere werden geladen…"
+                      : mediaHasHiddenLocalItems
+                        ? "Zum Einblenden weiter scrollen"
+                        : "Zum automatischen Nachladen scrollen"}
                   </p>
                 </div>
               ) : null}

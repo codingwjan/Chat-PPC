@@ -227,7 +227,7 @@ export function ChatComposer({
               name="message-draft"
               autoComplete="off"
               rows={1}
-              className="max-h-[14rem] min-h-[2.5rem] w-full resize-none rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+              className="max-h-[14rem] min-h-[2.5rem] w-full resize-none overflow-y-auto rounded-2xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-900 [field-sizing:content] placeholder:text-slate-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
             />
             <button
               type="button"

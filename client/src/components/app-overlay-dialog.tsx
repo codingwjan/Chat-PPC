@@ -2,7 +2,7 @@
 
 import { Dialog, DialogBackdrop, DialogPanel, DialogTitle } from "@headlessui/react";
 import { XMarkIcon } from "@heroicons/react/24/outline";
-import { type ReactNode } from "react";
+import { type ReactNode, useCallback, useTransition } from "react";
 
 interface AppOverlayDialogProps {
   open: boolean;
@@ -29,6 +29,14 @@ export function AppOverlayDialog({
   bodyClassName = "",
   zIndexClassName = "z-[68]",
 }: AppOverlayDialogProps) {
+  const [, startCloseTransition] = useTransition();
+
+  const handleClose = useCallback(() => {
+    startCloseTransition(() => {
+      onClose();
+    });
+  }, [onClose, startCloseTransition]);
+
   const panelClasses = [
     "glass-panel-strong relative flex max-h-[92dvh] w-full transform flex-col overflow-hidden rounded-2xl text-left transition-all",
     "data-closed:translate-y-4 data-closed:opacity-0 data-enter:duration-300 data-enter:ease-out data-leave:duration-200 data-leave:ease-in",
@@ -42,7 +50,7 @@ export function AppOverlayDialog({
   const bodyClasses = ["min-h-0 flex-1 overflow-y-auto px-4 py-4 sm:px-6", bodyClassName].filter(Boolean).join(" ");
 
   return (
-    <Dialog open={open} onClose={onClose} className={`relative ${zIndexClassName}`}>
+    <Dialog open={open} onClose={handleClose} className={`relative ${zIndexClassName}`}>
       <DialogBackdrop
         transition
         className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm transition-opacity data-closed:opacity-0 data-enter:duration-300 data-enter:ease-out data-leave:duration-200 data-leave:ease-in"
@@ -54,7 +62,7 @@ export function AppOverlayDialog({
             <div className="absolute top-0 right-0 pt-3 pr-3 sm:pt-4 sm:pr-4">
               <button
                 type="button"
-                onClick={onClose}
+                onClick={handleClose}
                 className="glass-panel rounded-md text-slate-400 hover:text-slate-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
               >
                 <span className="sr-only">Schließen</span>

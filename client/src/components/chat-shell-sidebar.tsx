@@ -4,7 +4,7 @@
 import { Dialog, DialogBackdrop, DialogPanel, TransitionChild } from "@headlessui/react";
 import { XMarkIcon } from "@heroicons/react/24/outline";
 import { InformationCircleIcon, PhotoIcon, SwatchIcon, WrenchScrewdriverIcon } from "@heroicons/react/20/solid";
-import { type ReactNode } from "react";
+import { memo, type ReactNode } from "react";
 import { MemberProgressInline } from "@/components/member-progress-inline";
 import type { MemberProgressDTO } from "@/lib/types";
 
@@ -48,7 +48,15 @@ function SidebarActionButton({
   return (
     <button
       type="button"
-      onClick={onClick}
+      onClick={() => {
+        if (typeof window !== "undefined") {
+          window.setTimeout(() => {
+            onClick();
+          }, 0);
+          return;
+        }
+        onClick();
+      }}
       className="glass-panel flex h-11 w-full items-center gap-2 rounded-xl px-3 text-sm font-medium text-slate-700 hover:bg-slate-50/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
     >
       {icon}
@@ -134,7 +142,7 @@ function SidebarBody({
   );
 }
 
-export function ChatShellSidebar({
+export const ChatShellSidebar = memo(function ChatShellSidebar({
   mobileOpen,
   onCloseMobile,
   username,
@@ -209,4 +217,4 @@ export function ChatShellSidebar({
       </aside>
     </>
   );
-}
+});

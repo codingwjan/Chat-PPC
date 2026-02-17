@@ -32,6 +32,11 @@ const ProfileImageCropModal = dynamic(
   },
 );
 
+type IdleWindow = Window & {
+  requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+  cancelIdleCallback?: (handle: number) => void;
+};
+
 async function uploadProfileImage(file: File): Promise<string> {
   const formData = new FormData();
   formData.set("file", file);
@@ -123,6 +128,35 @@ export function SignupWizard() {
       cancelled = true;
     };
   }, [router]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const idleWindow = window as IdleWindow;
+    let idleHandle: number | null = null;
+    let timeoutHandle: number | null = null;
+    const warmUpCropModal = () => {
+      void import("@/components/profile-image-crop-modal");
+    };
+
+    if (typeof idleWindow.requestIdleCallback === "function") {
+      idleHandle = idleWindow.requestIdleCallback(() => {
+        warmUpCropModal();
+      }, { timeout: 1_500 });
+    } else {
+      timeoutHandle = window.setTimeout(() => {
+        warmUpCropModal();
+      }, 700);
+    }
+
+    return () => {
+      if (idleHandle !== null && typeof idleWindow.cancelIdleCallback === "function") {
+        idleWindow.cancelIdleCallback(idleHandle);
+      }
+      if (timeoutHandle !== null) {
+        window.clearTimeout(timeoutHandle);
+      }
+    };
+  }, []);
 
   function normalizeAndValidateStepOne(): string | null {
     const normalizedLogin = loginName.trim().toLowerCase();
