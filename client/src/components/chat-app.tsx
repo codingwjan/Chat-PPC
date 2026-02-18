@@ -929,6 +929,7 @@ export function ChatApp() {
   const [composerHeightPx, setComposerHeightPx] = useState(DEFAULT_COMPOSER_HEIGHT_PX);
   const [, startUiTransition] = useTransition();
   const isDeveloperMode = Boolean(session?.devMode && session.devAuthToken);
+  const profileEditorCloseBlocked = profileCropFile !== null || uploadingProfile;
 
   const sessionProfilePicture = useMemo(
     () => normalizeProfilePictureUrl(session?.profilePicture),
@@ -2453,7 +2454,9 @@ export function ChatApp() {
         setShowMedia(false);
         setLightbox(null);
         setMobileSidebarOpen(false);
-        setEditingProfile(false);
+        if (!profileEditorCloseBlocked) {
+          setEditingProfile(false);
+        }
         setMemberDrawerOpen(false);
         setShowBackgroundModal(false);
         setShowPointsInfo(false);
@@ -2469,7 +2472,7 @@ export function ChatApp() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [profileEditorCloseBlocked]);
 
   const updateUser = useCallback(
     async (payload: Omit<RenameUserRequest, "clientId">) => {
@@ -3516,6 +3519,7 @@ export function ChatApp() {
   }, [loadTasteProfileModalData, session, startUiTransition]);
 
   const closeProfileEditor = useCallback((): void => {
+    if (profileEditorCloseBlocked) return;
     startUiTransition(() => {
       setProfileDropActive(false);
       setEditingProfile(false);
@@ -3526,7 +3530,7 @@ export function ChatApp() {
       setNewPasswordDraft("");
       setConfirmNewPasswordDraft("");
     }, 0);
-  }, [startUiTransition]);
+  }, [profileEditorCloseBlocked, startUiTransition]);
 
   const openSharedBackgroundModal = useCallback((): void => {
     startUiTransition(() => {

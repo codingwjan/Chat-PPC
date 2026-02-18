@@ -1,3 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+.next/
+out/
+build/
+dist/
+
+# Test artifacts
+coverage/
+.nyc_output/
+*.lcov
+
+# Local env/secrets
+.env
+.env.*
+!.env.example
+!.env*.example
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-debug.log*
+*.log
+
+# Platform/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Generated files
 # dependencies
 /node_modules
 
@@ -27,5 +64,10 @@ pnpm-debug.log*
 *.tsbuildinfo
 next-env.d.ts
 
+# Vercel
+.vercel/
+
+# Prisma local DB (if used locally)
+prisma/dev.db*
 # vercel
 .vercel
