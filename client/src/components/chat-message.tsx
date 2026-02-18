@@ -956,10 +956,11 @@ function ChatMessageComponent({
             ) : null}
             {messageLines.map((line, i) => {
               // Check for markdown image syntax first (e.g. from AI)
-              const imgMatch = line.match(/^!\[(.*?)\]\((.*?)\)$/);
+              const trimmedLine = line.trim();
+              const imgMatch = trimmedLine.match(/^!\[(.*?)\]\((.*?)\)$/);
               if (imgMatch) {
                 const imageAlt = imgMatch[1] || "Geteiltes Bild";
-                const imageUrl = imgMatch[2];
+                const imageUrl = normalizeSharedUrl(imgMatch[2]);
                 return (
                   <InlineSharedImage
                     key={`${i}-${imageUrl}`}

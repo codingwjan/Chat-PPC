@@ -71,11 +71,16 @@ function profileCardGradient(profile: PublicUserProfileDTO | null): string | und
   return `linear-gradient(to top right, ${tint} 0%, rgba(248, 250, 252, 0.96) 58%, rgba(241, 245, 249, 0.96) 100%)`;
 }
 
-function formatLastSeen(lastSeenAt: string | null): string {
-  if (!lastSeenAt) return "Zuletzt kürzlich aktiv";
-  const date = new Date(lastSeenAt);
-  if (Number.isNaN(date.getTime())) return "Zuletzt kürzlich aktiv";
-  return `Zuletzt aktiv ${date.toLocaleString("de-DE")}`;
+const MEMBER_SINCE_FORMAT_OPTIONS: Intl.DateTimeFormatOptions = {
+  month: "long",
+  year: "numeric",
+};
+
+function formatMemberSince(memberSince: string | null | undefined): string {
+  if (!memberSince) return "Member seit unbekannt";
+  const date = new Date(memberSince);
+  if (Number.isNaN(date.getTime())) return "Member seit unbekannt";
+  return `Member seit ${date.toLocaleDateString("de-DE", MEMBER_SINCE_FORMAT_OPTIONS)}`;
 }
 
 function StatCard({ title, value, ownValue }: { title: string; value: number; ownValue?: number | null }) {
@@ -178,7 +183,7 @@ export function MemberProfileDrawer({
                             <p className="truncate text-2xl font-bold text-slate-900">{profile.username}</p>
                             <div className="mt-1 space-y-0.5">
                               <p className="text-sm text-slate-600">
-                                {aiProvider ? aiModel : profile.isOnline ? "Online" : formatLastSeen(profile.lastSeenAt)}
+                                {aiProvider ? aiModel : formatMemberSince(profile.memberSince)}
                               </p>
                               <div>
                                 {aiProvider ? (

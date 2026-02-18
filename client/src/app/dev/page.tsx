@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { TasteProfileModal } from "@/components/taste-profile-modal";
 import { apiJson } from "@/lib/http";
 import { clearSession, loadSession, type SessionState } from "@/lib/session";
 import type {
@@ -17,6 +18,10 @@ import type {
   MemberRank,
   MessageDTO,
   MessagePageDTO,
+  TasteProfileDetailedDTO,
+  TasteProfileEventDTO,
+  TasteProfileEventPageDTO,
+  TasteWindowKey,
 } from "@/lib/types";
 
 interface AdminLogEntry {
@@ -24,6 +29,11 @@ interface AdminLogEntry {
   createdAt: string;
   username: string;
   message: string;
+}
+
+interface SelectedTasteUserState {
+  clientId: string;
+  username: string;
 }
 
 const RANK_OPTIONS: MemberRank[] = ["BRONZE", "SILBER", "GOLD", "PLATIN"];
@@ -66,6 +76,16 @@ export default function DevPage() {
   const [submittingPassword, setSubmittingPassword] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [selectedTasteUser, setSelectedTasteUser] = useState<SelectedTasteUserState | null>(null);
+  const [selectedTasteWindow, setSelectedTasteWindow] = useState<TasteWindowKey>("30d");
+  const [selectedTasteProfile, setSelectedTasteProfile] = useState<TasteProfileDetailedDTO | null>(null);
+  const [selectedTasteEvents, setSelectedTasteEvents] = useState<TasteProfileEventDTO[]>([]);
+  const [selectedTasteEventsCursor, setSelectedTasteEventsCursor] = useState<string | null>(null);
+  const [selectedTasteEventsHasMore, setSelectedTasteEventsHasMore] = useState(false);
+  const [selectedTasteProfileLoading, setSelectedTasteProfileLoading] = useState(false);
+  const [selectedTasteEventsLoading, setSelectedTasteEventsLoading] = useState(false);
+  const [selectedTasteEventsLoadingMore, setSelectedTasteEventsLoadingMore] = useState(false);
+  const [selectedTasteProfileError, setSelectedTasteProfileError] = useState<string | null>(null);
 
   const canUseDevPage = Boolean(session?.clientId && session?.devMode && session?.devAuthToken);
 
@@ -133,6 +153,126 @@ export default function DevPage() {
     });
     setTastes(next.items);
   }, [session?.clientId, session?.devAuthToken]);
+
+  const fetchAdminTasteProfileDetailed = useCallback(
+    async (targetClientId: string): Promise<TasteProfileDetailedDTO> => {
+      if (!session?.clientId || !session.devAuthToken) {
+        throw new Error("Entwicklermodus ist nicht aktiv.");
+      }
+      const searchParams = new URLSearchParams({
+        clientId: session.clientId,
+        devAuthToken: session.devAuthToken,
+        targetClientId,
+      });
+      return apiJson<TasteProfileDetailedDTO>(`/api/admin/tastes/profile?${searchParams.toString()}`, {
+        cache: "no-store",
+      });
+    },
+    [session?.clientId, session?.devAuthToken],
+  );
+
+  const fetchAdminTasteEventsPage = useCallback(
+    async (
+      targetClientId: string,
+      input: {
+        limit?: number;
+        before?: string;
+      },
+    ): Promise<TasteProfileEventPageDTO> => {
+      if (!session?.clientId || !session.devAuthToken) {
+        throw new Error("Entwicklermodus ist nicht aktiv.");
+      }
+      const searchParams = new URLSearchParams({
+        clientId: session.clientId,
+        devAuthToken: session.devAuthToken,
+        targetClientId,
+      });
+      if (typeof input.limit === "number") {
+        searchParams.set("limit", String(input.limit));
+      }
+      if (input.before) {
+        searchParams.set("before", input.before);
+      }
+      return apiJson<TasteProfileEventPageDTO>(`/api/admin/tastes/events?${searchParams.toString()}`, {
+        cache: "no-store",
+      });
+    },
+    [session?.clientId, session?.devAuthToken],
+  );
+
+  const openUserTasteProfile = useCallback(
+    async (user: AdminUserListItemDTO): Promise<void> => {
+      setSelectedTasteUser({
+        clientId: user.clientId,
+        username: user.username,
+      });
+      setSelectedTasteWindow("30d");
+      setSelectedTasteProfile(null);
+      setSelectedTasteEvents([]);
+      setSelectedTasteEventsCursor(null);
+      setSelectedTasteEventsHasMore(false);
+      setSelectedTasteProfileError(null);
+      setSelectedTasteProfileLoading(true);
+      setSelectedTasteEventsLoading(true);
+
+      try {
+        const [profile, eventsPage] = await Promise.all([
+          fetchAdminTasteProfileDetailed(user.clientId),
+          fetchAdminTasteEventsPage(user.clientId, { limit: 50 }),
+        ]);
+        setSelectedTasteProfile(profile);
+        setSelectedTasteEvents(eventsPage.items);
+        setSelectedTasteEventsCursor(eventsPage.nextCursor);
+        setSelectedTasteEventsHasMore(eventsPage.hasMore);
+      } catch (tasteError) {
+        setSelectedTasteProfileError(
+          tasteError instanceof Error ? tasteError.message : "Taste-Profil konnte nicht geladen werden.",
+        );
+      } finally {
+        setSelectedTasteProfileLoading(false);
+        setSelectedTasteEventsLoading(false);
+      }
+    },
+    [fetchAdminTasteEventsPage, fetchAdminTasteProfileDetailed],
+  );
+
+  const closeSelectedTasteProfile = useCallback((): void => {
+    setSelectedTasteUser(null);
+    setSelectedTasteProfile(null);
+    setSelectedTasteEvents([]);
+    setSelectedTasteEventsCursor(null);
+    setSelectedTasteEventsHasMore(false);
+    setSelectedTasteProfileError(null);
+  }, []);
+
+  const loadMoreSelectedTasteEvents = useCallback(async (): Promise<void> => {
+    if (!selectedTasteUser?.clientId || !selectedTasteEventsHasMore || !selectedTasteEventsCursor) return;
+    setSelectedTasteEventsLoadingMore(true);
+    try {
+      const nextPage = await fetchAdminTasteEventsPage(selectedTasteUser.clientId, {
+        limit: 50,
+        before: selectedTasteEventsCursor,
+      });
+      setSelectedTasteEvents((current) => {
+        const known = new Set(current.map((item) => item.id));
+        const merged = [...current];
+        for (const item of nextPage.items) {
+          if (known.has(item.id)) continue;
+          known.add(item.id);
+          merged.push(item);
+        }
+        return merged;
+      });
+      setSelectedTasteEventsCursor(nextPage.nextCursor);
+      setSelectedTasteEventsHasMore(nextPage.hasMore);
+    } catch (loadError) {
+      setSelectedTasteProfileError(
+        loadError instanceof Error ? loadError.message : "Weitere Taste-Events konnten nicht geladen werden.",
+      );
+    } finally {
+      setSelectedTasteEventsLoadingMore(false);
+    }
+  }, [fetchAdminTasteEventsPage, selectedTasteEventsCursor, selectedTasteEventsHasMore, selectedTasteUser?.clientId]);
 
   const fetchLogs = useCallback(async (): Promise<void> => {
     if (!session?.clientId) return;
@@ -452,9 +592,20 @@ export default function DevPage() {
                       </p>
                     </div>
                   </div>
-                  <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${user.isOnline ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-700"}`}>
-                    {user.isOnline ? "online" : "offline"}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-semibold ${user.isOnline ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-700"}`}>
+                      {user.isOnline ? "online" : "offline"}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void openUserTasteProfile(user);
+                      }}
+                      className="h-8 rounded-lg border border-sky-200 bg-sky-50 px-3 text-xs font-semibold text-sky-700 hover:bg-sky-100"
+                    >
+                      Volles Taste-Profil
+                    </button>
+                  </div>
                 </div>
 
                 <div className="mt-3 grid gap-2 text-xs text-slate-700 sm:grid-cols-3 lg:grid-cols-6">
@@ -635,6 +786,24 @@ export default function DevPage() {
             </div>
           )}
         </section>
+
+        <TasteProfileModal
+          open={Boolean(selectedTasteUser)}
+          onClose={closeSelectedTasteProfile}
+          subjectLabel={selectedTasteUser?.username}
+          profile={selectedTasteProfile}
+          events={selectedTasteEvents}
+          selectedWindow={selectedTasteWindow}
+          onWindowChange={setSelectedTasteWindow}
+          loadingProfile={selectedTasteProfileLoading}
+          loadingEvents={selectedTasteEventsLoading}
+          loadingMoreEvents={selectedTasteEventsLoadingMore}
+          hasMoreEvents={selectedTasteEventsHasMore}
+          onLoadMoreEvents={() => {
+            void loadMoreSelectedTasteEvents();
+          }}
+          error={selectedTasteProfileError}
+        />
       </div>
     </main>
   );

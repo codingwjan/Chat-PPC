@@ -2819,6 +2819,219 @@ Alles klar, wir machen das sauber.
     }
   });
 
+  it("returns only a gif link for @grok matching gif requests", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    const previousGrokKey = process.env.GROK_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-grok-gif-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@grok please find a matching gif for monday mood",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-grok-gif", content: "gif", authorName: "Grok" }),
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                itemurl: "https://tenor.com/view/giggity-family-guy-12345",
+                media_formats: {
+                  gif: {
+                    url: "https://media.tenor.com/Rxjea6sMa1oAAAAC/giggity-family-guy.gif",
+                  },
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, { status: 200, headers: { "content-type": "image/gif" } }),
+      );
+
+    try {
+      const result = await processAiQueue({ maxJobs: 1 });
+      expect(result.processed).toBe(1);
+      expect(result.lockSkipped).toBe(false);
+      expect(openAiCreateMock).not.toHaveBeenCalled();
+
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            authorName: "Grok",
+            questionMessageId: "msg-user",
+            content: "![giggity-family-guy.gif](https://media.tenor.com/Rxjea6sMa1oAAAAC/giggity-family-guy.gif)",
+          }),
+        }),
+      );
+    } finally {
+      fetchMock.mockRestore();
+      if (previousOpenAiKey) process.env.OPENAI_API_KEY = previousOpenAiKey;
+      else delete process.env.OPENAI_API_KEY;
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("returns fallback text when no embeddable gif url can be validated", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    const previousGrokKey = process.env.GROK_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-grok-gif-page-url-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@grok please find a matching gif for monday mood",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-grok-gif-page-url", content: "gif", authorName: "Grok" }),
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                itemurl: "https://tenor.com/view/monday-cat-12345",
+                media_formats: {
+                  gif: {
+                    url: "https://media.tenor.com/invalid-id/monday-cat.gif",
+                  },
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, { status: 404, headers: { "content-type": "image/gif" } }),
+      );
+
+    try {
+      const result = await processAiQueue({ maxJobs: 1 });
+      expect(result.processed).toBe(1);
+      expect(result.lockSkipped).toBe(false);
+      expect(openAiCreateMock).not.toHaveBeenCalled();
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            authorName: "Grok",
+            questionMessageId: "msg-user",
+            content: "Ich konnte gerade kein passendes GIF finden. Versuch es mit einem konkreteren Suchbegriff.",
+          }),
+        }),
+      );
+    } finally {
+      fetchMock.mockRestore();
+      if (previousOpenAiKey) process.env.OPENAI_API_KEY = previousOpenAiKey;
+      else delete process.env.OPENAI_API_KEY;
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
+  it("detects german 'suche ... gif raus' intent and prefers funny query terms", async () => {
+    const previousOpenAiKey = process.env.OPENAI_API_KEY;
+    const previousGrokKey = process.env.GROK_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    process.env.GROK_API_KEY = "test-grok-key";
+
+    prismaMock.$queryRaw
+      .mockResolvedValueOnce([{ locked: true }])
+      .mockResolvedValueOnce([{ unlocked: true }]);
+    prismaMock.$queryRawUnsafe.mockResolvedValueOnce([
+      {
+        id: "job-grok-gif-german-1",
+        sourceMessageId: "msg-user",
+        username: "tester",
+        message: "@grok suche mir ein lustiges gif raus von 3000€ Baden Baden Urlaub",
+        imageUrls: [],
+        attempts: 1,
+      },
+    ]);
+    prismaMock.aiJob.count.mockResolvedValueOnce(0);
+    prismaMock.message.create.mockResolvedValueOnce(
+      baseMessage({ id: "msg-grok-gif-german", content: "gif", authorName: "Grok" }),
+    );
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                itemurl: "https://tenor.com/view/funny-vacation-meme-12345",
+                content_description: "Funny vacation reaction",
+                media_formats: {
+                  gif: {
+                    url: "https://media.tenor.com/funny-vacation-abc123AAAAC/funny-vacation.gif",
+                  },
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, { status: 200, headers: { "content-type": "image/gif" } }),
+      );
+
+    try {
+      const result = await processAiQueue({ maxJobs: 1 });
+      expect(result.processed).toBe(1);
+      expect(result.lockSkipped).toBe(false);
+      expect(openAiCreateMock).not.toHaveBeenCalled();
+
+      const searchUrl = new URL(String(fetchMock.mock.calls[0]?.[0] || ""));
+      expect(searchUrl.hostname).toBe("g.tenor.com");
+      expect(searchUrl.pathname).toBe("/v1/search");
+      const searchQuery = searchUrl.searchParams.get("q") || "";
+      expect(searchQuery).toContain("funny");
+
+      expect(prismaMock.message.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            authorName: "Grok",
+            questionMessageId: "msg-user",
+            content: "![funny-vacation.gif](https://media.tenor.com/funny-vacation-abc123AAAAC/funny-vacation.gif)",
+          }),
+        }),
+      );
+    } finally {
+      fetchMock.mockRestore();
+      if (previousOpenAiKey) process.env.OPENAI_API_KEY = previousOpenAiKey;
+      else delete process.env.OPENAI_API_KEY;
+      process.env.GROK_API_KEY = previousGrokKey;
+    }
+  });
+
   it("returns without processing when no AI jobs are pending", async () => {
     const previousOpenAiKey = process.env.OPENAI_API_KEY;
     process.env.OPENAI_API_KEY = "test-key";

@@ -22,6 +22,8 @@ const serviceMock = vi.hoisted(() => ({
   setChatBackground: vi.fn(),
   getAdminOverview: vi.fn(),
   getDeveloperTasteProfiles: vi.fn(),
+  getAdminTasteProfileDetailed: vi.fn(),
+  getAdminTasteProfileEvents: vi.fn(),
   getAdminUsers: vi.fn(),
   adminResetUserPassword: vi.fn(),
   runAdminAction: vi.fn(),
@@ -186,6 +188,7 @@ describe("api routes", () => {
       status: "online",
       isOnline: true,
       lastSeenAt: null,
+      memberSince: "2026-01-01T00:00:00.000Z",
       member: {
         brand: "PPC Score",
         score: 200,
@@ -651,6 +654,134 @@ describe("api routes", () => {
     expect(response.status).toBe(200);
     const payload = await response.json();
     expect(payload.items).toEqual([]);
+  });
+
+  it("liefert detailliertes Interessenprofil für einen Nutzer im Entwicklermodus", async () => {
+    serviceMock.getAdminTasteProfileDetailed.mockResolvedValue({
+      userId: "u-target",
+      generatedAt: "2026-02-18T08:00:00.000Z",
+      member: {
+        brand: "PPC Score",
+        score: 123,
+        rank: "BRONZE",
+      },
+      memberBreakdown: {
+        messagesCreated: 10,
+        reactionsGiven: 5,
+        reactionsReceived: 9,
+        aiMentions: 1,
+        pollsCreated: 2,
+        pollsExtended: 1,
+        pollVotes: 4,
+        taggingCompleted: 3,
+        usernameChanges: 0,
+        rawScore: 123,
+      },
+      windows: {
+        "7d": {
+          reactions: { givenTotal: 0, receivedTotal: 0, givenByType: [], receivedByType: [] },
+          interests: {
+            topTags: [],
+            topMessageCategories: { themes: [], humor: [], art: [], tone: [], topics: [] },
+            topImageCategories: { themes: [], humor: [], art: [], tone: [], objects: [] },
+          },
+          activity: {
+            postsTotal: 0,
+            postsByType: [],
+            postsWithImages: 0,
+            pollVotesGiven: 0,
+            pollsCreated: 0,
+            pollsExtended: 0,
+            aiMentions: { chatgpt: 0, grok: 0 },
+            activeDays: 0,
+            activityByWeekday: [],
+            activityByHour: [],
+            tagging: { completed: 0, failed: 0, pending: 0, coverage: 0 },
+          },
+          social: { topInteractedUsers: [] },
+        },
+        "30d": {
+          reactions: { givenTotal: 0, receivedTotal: 0, givenByType: [], receivedByType: [] },
+          interests: {
+            topTags: [],
+            topMessageCategories: { themes: [], humor: [], art: [], tone: [], topics: [] },
+            topImageCategories: { themes: [], humor: [], art: [], tone: [], objects: [] },
+          },
+          activity: {
+            postsTotal: 0,
+            postsByType: [],
+            postsWithImages: 0,
+            pollVotesGiven: 0,
+            pollsCreated: 0,
+            pollsExtended: 0,
+            aiMentions: { chatgpt: 0, grok: 0 },
+            activeDays: 0,
+            activityByWeekday: [],
+            activityByHour: [],
+            tagging: { completed: 0, failed: 0, pending: 0, coverage: 0 },
+          },
+          social: { topInteractedUsers: [] },
+        },
+        all: {
+          reactions: { givenTotal: 0, receivedTotal: 0, givenByType: [], receivedByType: [] },
+          interests: {
+            topTags: [],
+            topMessageCategories: { themes: [], humor: [], art: [], tone: [], topics: [] },
+            topImageCategories: { themes: [], humor: [], art: [], tone: [], objects: [] },
+          },
+          activity: {
+            postsTotal: 0,
+            postsByType: [],
+            postsWithImages: 0,
+            pollVotesGiven: 0,
+            pollsCreated: 0,
+            pollsExtended: 0,
+            aiMentions: { chatgpt: 0, grok: 0 },
+            activeDays: 0,
+            activityByWeekday: [],
+            activityByHour: [],
+            tagging: { completed: 0, failed: 0, pending: 0, coverage: 0 },
+          },
+          social: { topInteractedUsers: [] },
+        },
+      },
+      transparency: {
+        eventRetentionDays: 30,
+        rawEventsAvailableSince: "2026-02-01T00:00:00.000Z",
+        sources: [],
+      },
+    });
+    const { GET } = await import("@/app/api/admin/tastes/profile/route");
+
+    const response = await GET(
+      new Request("http://localhost/api/admin/tastes/profile?clientId=c1&devAuthToken=token-1&targetClientId=target-1", {
+        method: "GET",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.userId).toBe("u-target");
+  });
+
+  it("liefert Interessen-Rohdaten-Events für einen Nutzer im Entwicklermodus", async () => {
+    serviceMock.getAdminTasteProfileEvents.mockResolvedValue({
+      items: [],
+      nextCursor: null,
+      hasMore: false,
+    });
+    const { GET } = await import("@/app/api/admin/tastes/events/route");
+
+    const response = await GET(
+      new Request("http://localhost/api/admin/tastes/events?clientId=c1&devAuthToken=token-1&targetClientId=target-1&limit=50", {
+        method: "GET",
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.items).toEqual([]);
+    expect(payload.hasMore).toBe(false);
   });
 
   it("liefert Admin-Userliste für den Entwicklermodus", async () => {

@@ -539,6 +539,7 @@ function toSyntheticPublicProfile(user: UserPresenceDTO): PublicUserProfileDTO {
     status: user.status,
     isOnline: user.isOnline,
     lastSeenAt: user.lastSeenAt,
+    memberSince: null,
     member: user.member,
     stats: {
       postsTotal: 0,
