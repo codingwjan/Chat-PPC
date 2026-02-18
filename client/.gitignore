@@ -35,6 +35,31 @@ pnpm-debug.log*
 *~
 
 # Generated files
+# dependencies
+/node_modules
+
+# build outputs
+/.next
+/out
+/build
+
+# coverage and test artifacts
+/coverage
+
+# local env files
+.env
+.env.*
+!.env.example
+
+# logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+pnpm-debug.log*
+
+# platform/editor noise
+.DS_Store
 *.pem
 *.tsbuildinfo
 next-env.d.ts
@@ -44,3 +69,5 @@ next-env.d.ts
 
 # Prisma local DB (if used locally)
 prisma/dev.db*
+# vercel
+.vercel
