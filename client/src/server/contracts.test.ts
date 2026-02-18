@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   parseAdminActionRequest,
+  parseAdminTasteEventsQueryRequest,
   parseAdminOverviewRequest,
   parseAdminResetUserPasswordRequest,
+  parseAdminTasteProfileQueryRequest,
   parseAdminTasteQueryRequest,
   parseAdminUsersQueryRequest,
   parseAuthSignInRequest,
@@ -259,6 +261,30 @@ describe("contracts", () => {
     });
 
     expect(parsed.limit).toBe(20);
+  });
+
+  it("parses admin detailed taste profile query request", () => {
+    const parsed = parseAdminTasteProfileQueryRequest({
+      clientId: "client-1",
+      devAuthToken: "dev-token",
+      targetClientId: "target-1",
+    });
+
+    expect(parsed.targetClientId).toBe("target-1");
+  });
+
+  it("parses admin taste events query request", () => {
+    const parsed = parseAdminTasteEventsQueryRequest({
+      clientId: "client-1",
+      devAuthToken: "dev-token",
+      targetClientId: "target-1",
+      limit: "120",
+      before: "2026-02-13T10:00:00.000Z",
+    });
+
+    expect(parsed.targetClientId).toBe("target-1");
+    expect(parsed.limit).toBe(120);
+    expect(parsed.before).toBe("2026-02-13T10:00:00.000Z");
   });
 
   it("requires targetUsername for delete_user admin action", () => {

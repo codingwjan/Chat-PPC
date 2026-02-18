@@ -1709,6 +1709,20 @@ const IMAGE_GENERATION_NOUN_REGEX =
   /\b(image|images|bild|bilder|grafik|illustration|photo|foto|picture|pictures|pic|drawing|drawings|art|artwork|poster|logo|wallpaper|meme|avatar|thumbnail)\b/i;
 const IMAGE_GENERATION_CONTEXT_REGEX =
   /\b(scene|character|monster|animal|portrait|landscape|banner|cover|icon)\b/i;
+const GIF_LOOKUP_KEYWORD_REGEX = /\b(gif|giphy|tenor)\b/i;
+const GIF_LOOKUP_ACTION_REGEX =
+  /\b(find|search|lookup|look up|match|matching|send|post|drop|zeige|such|suche|suchen|raussuchen|finde|passend|passende|passendes)\b/i;
+const GIF_MEDIA_HOST_REGEX = /^https?:\/\/(?:media\.tenor\.com|media\d*\.giphy\.com|i\.giphy\.com)\//i;
+const DIRECT_GIF_URL_REGEX = /^https?:\/\/[^\s)]+\.gif(?:[?#][^\s)]*)?$/i;
+const GIF_LOOKUP_HUMOR_HINT_REGEX = /\b(lustig|lustige|lustiges|witzig|funny|lol|lmao|haha|meme)\b/i;
+const GIF_LOOKUP_HUMOR_RESULT_REGEX = /\b(funny|lol|lmao|laugh|haha|meme|reaction|comedy|joke|witz)\b/i;
+const GIF_LOOKUP_QUERY_FILLER_REGEX =
+  /\b(please|pls|can|could|you|me|mir|mal|bitte|a|an|the|ein|eine|einen|for|about|of|zu|zum|zur|ueber|über|von|raus|mir)\b/gi;
+const GIF_LOOKUP_FETCH_TIMEOUT_MS = 5_000;
+const GIF_LOOKUP_QUERY_MAX_CHARS = 80;
+const TENOR_SEARCH_LIMIT = 6;
+const TENOR_SEARCH_MAX_CANDIDATES = 20;
+const TENOR_DEFAULT_API_KEY = "LIVDSRZULELA";
 const POLL_INTENT_REGEX = /\b(poll|umfrage|abstimmung|vote|voting)\b/i;
 function shouldUseWebSearchTool(message: string): boolean {
   return WEB_SEARCH_HINT_REGEX.test(message);
@@ -1738,8 +1752,361 @@ function shouldUseImageGenerationTool(
   return hasImageNoun && hasImageContext;
 }
 
+function isLikelyGifLookupIntent(message: string): boolean {
+  const normalized = message.trim();
+  if (!normalized) return false;
+  return GIF_LOOKUP_KEYWORD_REGEX.test(normalized) && GIF_LOOKUP_ACTION_REGEX.test(normalized);
+}
+
 function normalizeAiImageUrlCandidate(url: string): string {
   return url.trim().replace(/[),.!?;:]+$/, "");
+}
+
+function extractGifLookupUrl(text: string): string | null {
+  const markdownImageRegex = /!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/gi;
+  let fallbackGifUrl: string | null = null;
+  for (const match of text.matchAll(markdownImageRegex)) {
+    const rawUrl = match[1];
+    if (!rawUrl) continue;
+    const normalized = normalizeAiImageUrlCandidate(rawUrl);
+    if (!normalized) continue;
+    if (GIF_MEDIA_HOST_REGEX.test(normalized) && DIRECT_GIF_URL_REGEX.test(normalized)) {
+      return normalized;
+    }
+    if (!fallbackGifUrl && DIRECT_GIF_URL_REGEX.test(normalized)) {
+      fallbackGifUrl = normalized;
+    }
+  }
+
+  const urlRegex = /(https?:\/\/[^\s<>()]+)/gi;
+  for (const match of text.matchAll(urlRegex)) {
+    const rawUrl = match[1];
+    if (!rawUrl) continue;
+    const normalized = normalizeAiImageUrlCandidate(rawUrl);
+    if (!normalized) continue;
+    if (GIF_MEDIA_HOST_REGEX.test(normalized) && DIRECT_GIF_URL_REGEX.test(normalized)) {
+      return normalized;
+    }
+    if (!fallbackGifUrl && DIRECT_GIF_URL_REGEX.test(normalized)) {
+      fallbackGifUrl = normalized;
+    }
+  }
+  return fallbackGifUrl;
+}
+
+function formatGifLookupMarkdown(url: string): string {
+  const normalized = normalizeAiImageUrlCandidate(url);
+  let altText = "gif";
+
+  try {
+    const parsedUrl = new URL(normalized);
+    const fileName = decodeURIComponent(parsedUrl.pathname.split("/").pop() || "");
+    if (fileName) {
+      altText = fileName;
+    }
+  } catch {
+    // Keep default alt text.
+  }
+
+  const safeAltText = altText.replace(/[\n\r[\]]+/g, " ").trim() || "gif";
+  return `![${safeAltText}](${normalized})`;
+}
+
+function normalizeGifLookupOutput(message: string, text: string): string {
+  if (!isLikelyGifLookupIntent(message)) return text;
+  const gifUrl = extractGifLookupUrl(text);
+  if (!gifUrl) {
+    const markdownImageRegex = /!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/i;
+    const markdownMatch = text.match(markdownImageRegex);
+    if (markdownMatch?.[1]) {
+      return normalizeAiImageUrlCandidate(markdownMatch[1]);
+    }
+    return text;
+  }
+  return formatGifLookupMarkdown(gifUrl);
+}
+
+function buildGifLookupQuery(message: string): string {
+  const normalized = message.trim();
+  if (!normalized) return "gif";
+
+  const stripped = normalized
+    .replace(/\b\d+(?:[.,]\d+)?\s*(?:€|eur|euro|\$|usd)\b/gi, " ")
+    .replace(/\b\d{2,}\b/g, " ")
+    .replace(/\b(gif|giphy|tenor)\b/gi, " ")
+    .replace(/\b(find|search|lookup|look up|match|matching|send|post|drop|zeige|such|suche|suchen|raussuchen|finde|passend|passende|passendes)\b/gi, " ")
+    .replace(GIF_LOOKUP_QUERY_FILLER_REGEX, " ")
+    .replace(/[!?.,;:()[\]{}"'`]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const wantsHumor = GIF_LOOKUP_HUMOR_HINT_REGEX.test(normalized);
+  const tokens = stripped
+    .split(" ")
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token.length >= 2);
+
+  const uniqueTokens: string[] = [];
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    if (seen.has(token)) continue;
+    seen.add(token);
+    uniqueTokens.push(token);
+  }
+
+  const expandedTokens = [...uniqueTokens];
+  if (uniqueTokens.includes("urlaub") && !expandedTokens.includes("vacation")) {
+    expandedTokens.push("vacation");
+  }
+  if (uniqueTokens.includes("reise") && !expandedTokens.includes("travel")) {
+    expandedTokens.push("travel");
+  }
+  if ((uniqueTokens.some((token) => token.startsWith("lustig")) || uniqueTokens.includes("witzig"))
+    && !expandedTokens.includes("funny")) {
+    expandedTokens.unshift("funny");
+  }
+  if (wantsHumor && !expandedTokens.includes("funny")) {
+    expandedTokens.unshift("funny");
+  }
+
+  const query = expandedTokens.slice(0, 7).join(" ").trim();
+  const fallback = normalized.replace(/\s+/g, " ").trim();
+  return clampText(query || fallback || "funny gif", GIF_LOOKUP_QUERY_MAX_CHARS);
+}
+
+function tokenizeGifLookupText(value: string): Set<string> {
+  const normalized = value
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return new Set();
+  return new Set(normalized.split(" ").filter((token) => token.length >= 2));
+}
+
+function scoreTenorCandidate(input: {
+  desiredTokens: Set<string>;
+  wantsHumor: boolean;
+  metadataText: string;
+  urlText: string;
+}): number {
+  const metadataTokens = tokenizeGifLookupText(input.metadataText);
+  const urlTokens = tokenizeGifLookupText(input.urlText);
+  let score = 0;
+
+  for (const token of input.desiredTokens) {
+    if (metadataTokens.has(token)) {
+      score += 4;
+    } else if (urlTokens.has(token)) {
+      score += 1;
+    }
+  }
+
+  if (input.wantsHumor) {
+    if (GIF_LOOKUP_HUMOR_RESULT_REGEX.test(input.metadataText)) {
+      score += 4;
+    } else {
+      score -= 2;
+    }
+  }
+
+  if (metadataTokens.size === 0 && urlTokens.size > 0) {
+    score -= 1;
+  }
+  return score;
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init?: Omit<RequestInit, "signal">,
+): Promise<Response | null> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), GIF_LOOKUP_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, {
+      ...init,
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function isGifHttpResponse(response: Response, fallbackUrl: string): boolean {
+  const contentType = response.headers.get("content-type")?.toLowerCase() || "";
+  if (contentType.includes("image/gif")) {
+    return true;
+  }
+  const finalUrl = normalizeAiImageUrlCandidate(response.url || fallbackUrl);
+  return DIRECT_GIF_URL_REGEX.test(finalUrl);
+}
+
+async function canUseDirectGifUrl(url: string): Promise<boolean> {
+  const normalized = normalizeAiImageUrlCandidate(url);
+  if (!normalized || !GIF_MEDIA_HOST_REGEX.test(normalized) || !DIRECT_GIF_URL_REGEX.test(normalized)) {
+    return false;
+  }
+
+  const response = await fetchWithTimeout(normalized, {
+    method: "HEAD",
+    redirect: "follow",
+  });
+  if (!response?.ok) return false;
+  return isGifHttpResponse(response, normalized);
+}
+
+async function fetchTenorGifResult(query: string, message: string): Promise<{ directGifUrl: string | null } | null> {
+  const configuredApiKey = getEnvTrimmed("TENOR_API_KEY");
+  const apiKeys = configuredApiKey && configuredApiKey !== TENOR_DEFAULT_API_KEY
+    ? [configuredApiKey, TENOR_DEFAULT_API_KEY]
+    : [configuredApiKey ?? TENOR_DEFAULT_API_KEY];
+
+  let payload: unknown = null;
+  for (const apiKey of apiKeys) {
+    const searchUrl = new URL("https://g.tenor.com/v1/search");
+    searchUrl.searchParams.set("q", query);
+    searchUrl.searchParams.set("key", apiKey);
+    searchUrl.searchParams.set("limit", String(TENOR_SEARCH_MAX_CANDIDATES));
+    searchUrl.searchParams.set("media_filter", "minimal");
+    searchUrl.searchParams.set("contentfilter", "medium");
+    searchUrl.searchParams.set("locale", "de_DE");
+
+    const response = await fetchWithTimeout(searchUrl.toString());
+    if (!response?.ok) {
+      continue;
+    }
+
+    const contentType = response.headers.get("content-type")?.toLowerCase() || "";
+    if (!contentType.includes("application/json")) {
+      continue;
+    }
+
+    try {
+      payload = await response.json();
+      break;
+    } catch {
+      payload = null;
+      continue;
+    }
+  }
+  if (!payload) return null;
+
+  const root = asRecord(payload);
+  const results = Array.isArray(root?.results) ? root.results : [];
+  const desiredTokens = tokenizeGifLookupText(query);
+  const wantsHumor = GIF_LOOKUP_HUMOR_HINT_REGEX.test(message);
+  const candidates: Array<{ directGifUrl: string; score: number }> = [];
+
+  for (const entry of results) {
+    const item = asRecord(entry);
+    if (!item) continue;
+
+    const mediaFormats = asRecord(item.media_formats);
+    const gifFormatV2 = asRecord(mediaFormats?.gif);
+
+    const mediaArray = Array.isArray(item.media) ? item.media : [];
+    const firstMedia = asRecord(mediaArray[0]);
+    const gifFormatV1 = asRecord(firstMedia?.gif);
+    const mediumGifFormatV1 = asRecord(firstMedia?.mediumgif);
+    const tinyGifFormatV1 = asRecord(firstMedia?.tinygif);
+
+    const directGifUrlRaw = (typeof gifFormatV2?.url === "string" && gifFormatV2.url)
+      || (typeof gifFormatV1?.url === "string" && gifFormatV1.url)
+      || (typeof mediumGifFormatV1?.url === "string" && mediumGifFormatV1.url)
+      || (typeof tinyGifFormatV1?.url === "string" && tinyGifFormatV1.url)
+      || "";
+    const directGifUrl = normalizeAiImageUrlCandidate(directGifUrlRaw);
+    if (!directGifUrl) continue;
+    const description = typeof item.content_description === "string" ? item.content_description : "";
+    const title = typeof item.title === "string" ? item.title : "";
+    const h1Title = typeof item.h1_title === "string" ? item.h1_title : "";
+    const tags = Array.isArray(item.tags) ? item.tags.filter((tag) => typeof tag === "string").join(" ") : "";
+    const itemUrl = typeof item.itemurl === "string" ? item.itemurl : "";
+    const score = scoreTenorCandidate({
+      desiredTokens,
+      wantsHumor,
+      metadataText: `${description} ${title} ${h1Title} ${tags}`,
+      urlText: itemUrl,
+    });
+    candidates.push({ directGifUrl, score });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  const topCandidates = candidates.slice(0, TENOR_SEARCH_LIMIT);
+  for (const candidate of topCandidates) {
+    if (await canUseDirectGifUrl(candidate.directGifUrl)) {
+      return {
+        directGifUrl: candidate.directGifUrl,
+      };
+    }
+  }
+
+  return {
+    directGifUrl: null,
+  };
+}
+
+async function fetchGiphyGifResult(query: string): Promise<{ directGifUrl: string | null } | null> {
+  const apiKey = getEnvTrimmed("GIPHY_API_KEY");
+  if (!apiKey) return null;
+
+  const searchUrl = new URL("https://api.giphy.com/v1/gifs/search");
+  searchUrl.searchParams.set("api_key", apiKey);
+  searchUrl.searchParams.set("q", query);
+  searchUrl.searchParams.set("limit", "6");
+  searchUrl.searchParams.set("rating", "pg-13");
+  searchUrl.searchParams.set("lang", "de");
+
+  const response = await fetchWithTimeout(searchUrl.toString());
+  if (!response?.ok) return null;
+
+  const contentType = response.headers.get("content-type")?.toLowerCase() || "";
+  if (!contentType.includes("application/json")) return null;
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    return null;
+  }
+
+  const root = asRecord(payload);
+  const results = Array.isArray(root?.data) ? root.data : [];
+  for (const entry of results) {
+    const item = asRecord(entry);
+    if (!item) continue;
+
+    const images = asRecord(item.images);
+    const original = asRecord(images?.original);
+    const directGifUrl = typeof original?.url === "string"
+      ? normalizeAiImageUrlCandidate(original.url)
+      : "";
+    if (!directGifUrl) continue;
+    if (await canUseDirectGifUrl(directGifUrl)) {
+      return {
+        directGifUrl,
+      };
+    }
+  }
+
+  return {
+    directGifUrl: null,
+  };
+}
+
+async function lookupGifForMessage(message: string): Promise<string | null> {
+  const query = buildGifLookupQuery(message);
+  const tenor = await fetchTenorGifResult(query, message);
+  const giphy = await fetchGiphyGifResult(query);
+
+  const directGifUrl = tenor?.directGifUrl || giphy?.directGifUrl || null;
+  if (directGifUrl) {
+    return formatGifLookupMarkdown(directGifUrl);
+  }
+
+  return null;
 }
 
 function isAiImageUrl(url: string): boolean {
@@ -3071,6 +3438,9 @@ async function buildAiInput(
     provider === "grok"
       ? "Bildanalyse ist für @grok erlaubt. Bildgenerierung und Bildbearbeitung sind deaktiviert. Wenn der User Bildgenerierung oder Bildbearbeitung verlangt, sag kurz, dass er dafür @chatgpt nutzen soll."
       : "Wenn ein Bild gewünscht wird, liefere den Inhalt normal weiter und behaupte nicht, dass du keine Bilder generieren kannst.",
+    provider === "grok"
+      ? "Wenn der User nach einem passenden GIF fragt: Suche gezielt auf tenor.com und giphy.com. Gib nur dann ein direktes GIF im Markdown-Format ![alt-text](https://...) aus, wenn die URL wirklich auf eine existierende GIF-Datei zeigt (https, .gif-Endung, Host media.tenor.com oder media*.giphy.com/i.giphy.com, nicht erfunden). Wenn du keine sicher funktionierende direkte GIF-URL hast, gib stattdessen nur eine einzelne Seiten-URL von tenor.com/view/... oder giphy.com/gifs/... aus (ohne Markdown-Bild). Nie raten, nie Platzhalter- oder erfundene IDs verwenden. Kein zusätzlicher Text, kein Codeblock."
+      : "",
     hasImageInputs
       ? provider === "grok"
         ? "Die Nachricht enthält Bild-Inputs. Nutze sie nur für textliche Analyse/Beschreibung, nicht für Bildgenerierung."
@@ -3696,6 +4066,17 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       });
       return;
     }
+    if (isLikelyGifLookupIntent(cleanedMessage)) {
+      publishAiStatus(payload.provider, "sucht GIF…", { model: grokConfig.textModel });
+      const lookupText = await lookupGifForMessage(cleanedMessage);
+      publishAiStatus(payload.provider, "schreibt…", { model: grokConfig.textModel });
+      await createAiMessage({
+        provider: payload.provider,
+        threadMessageId,
+        content: lookupText || "Ich konnte gerade kein passendes GIF finden. Versuch es mit einem konkreteren Suchbegriff.",
+      });
+      return;
+    }
 
     const grok = new OpenAI({
       apiKey: grokConfig.apiKey,
@@ -3728,9 +4109,10 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
 
       if (streamResult.supported) {
         const text = stripAiPollBlocks(streamResult.rawOutputText).trim();
-        const finalText = !text || text === "[NO_RESPONSE]"
+        const normalizedText = normalizeGifLookupOutput(cleanedMessage, text);
+        const finalText = !normalizedText || normalizedText === "[NO_RESPONSE]"
           ? "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal."
-          : text;
+          : normalizedText;
 
         publishAiStatus(payload.provider, "schreibt…", {
           model: streamResult.model || grokConfig.textModel,
@@ -3778,8 +4160,9 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
     }
 
     const text = stripAiPollBlocks(rawOutputText).trim();
+    const normalizedText = normalizeGifLookupOutput(cleanedMessage, text);
 
-    if (!text || text === "[NO_RESPONSE]") {
+    if (!normalizedText || normalizedText === "[NO_RESPONSE]") {
       publishAiStatus(payload.provider, "schreibt…", { model: responseModel });
       await createAiMessage({
         provider: payload.provider,
@@ -3793,7 +4176,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
     await createAiMessage({
       provider: payload.provider,
       threadMessageId,
-      content: text,
+      content: normalizedText,
     });
   } catch (error) {
     if (payload.provider === "grok") {
@@ -6575,6 +6958,7 @@ export async function getPublicUserProfile(input: {
       lastSeenAt: true,
       ppcMemberScoreRaw: true,
       ppcMemberLastActiveAt: true,
+      createdAt: true,
     },
   });
   assert(targetUser, "Profil nicht gefunden.", 404);
@@ -6593,6 +6977,7 @@ export async function getPublicUserProfile(input: {
     status: presence.status,
     isOnline: presence.isOnline,
     lastSeenAt: presence.lastSeenAt,
+    memberSince: targetUser.createdAt.toISOString(),
     member: presence.member,
     stats: {
       postsTotal: fullStats.activity.postsTotal,
@@ -6675,6 +7060,30 @@ export async function getTasteProfile(input: { clientId: string }): Promise<User
     reactionDistribution: parsed.reactionDistribution,
     topTags: parsed.topTags,
   };
+}
+
+export async function getAdminTasteProfileDetailed(input: {
+  clientId: string;
+  devAuthToken: string;
+  targetClientId: string;
+}): Promise<TasteProfileDetailedDTO> {
+  await assertDeveloperMode(input);
+  return getTasteProfileDetailed({ clientId: input.targetClientId });
+}
+
+export async function getAdminTasteProfileEvents(input: {
+  clientId: string;
+  devAuthToken: string;
+  targetClientId: string;
+  limit?: number;
+  before?: string;
+}): Promise<TasteProfileEventPageDTO> {
+  await assertDeveloperMode(input);
+  return getTasteProfileEvents({
+    clientId: input.targetClientId,
+    limit: input.limit,
+    before: input.before,
+  });
 }
 
 export async function getDeveloperTasteProfiles(input: {

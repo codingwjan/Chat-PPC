@@ -252,6 +252,16 @@ const adminTasteQuerySchema = adminOverviewSchema.extend({
   limit: z.coerce.number().int().min(1).max(200).optional(),
 });
 
+const adminTasteProfileQuerySchema = adminOverviewSchema.extend({
+  targetClientId: text("targetClientId"),
+});
+
+const adminTasteEventsQuerySchema = adminOverviewSchema.extend({
+  targetClientId: text("targetClientId"),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+  before: z.string().trim().optional(),
+});
+
 const adminActionSchema = adminOverviewSchema
   .extend({
     action: z.enum([
@@ -417,6 +427,24 @@ export function parseAdminTasteQueryRequest(payload: unknown): {
   limit?: number;
 } {
   return parseOrThrow(adminTasteQuerySchema, payload);
+}
+
+export function parseAdminTasteProfileQueryRequest(payload: unknown): {
+  clientId: string;
+  devAuthToken: string;
+  targetClientId: string;
+} {
+  return parseOrThrow(adminTasteProfileQuerySchema, payload);
+}
+
+export function parseAdminTasteEventsQueryRequest(payload: unknown): {
+  clientId: string;
+  devAuthToken: string;
+  targetClientId: string;
+  limit?: number;
+  before?: string;
+} {
+  return parseOrThrow(adminTasteEventsQuerySchema, payload);
 }
 
 export function parseAdminActionRequest(payload: unknown): AdminActionRequest {

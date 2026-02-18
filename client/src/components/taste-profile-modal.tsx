@@ -7,6 +7,7 @@ import type { ReactionType, TasteProfileDetailedDTO, TasteProfileEventDTO, Taste
 interface TasteProfileModalProps {
   open: boolean;
   onClose: () => void;
+  subjectLabel?: string;
   profile: TasteProfileDetailedDTO | null;
   events: TasteProfileEventDTO[];
   selectedWindow: TasteWindowKey;
@@ -113,8 +114,12 @@ export function TasteProfileModal(props: TasteProfileModalProps) {
         <div className="border-b border-slate-200 bg-slate-50 px-4 py-3 sm:px-5">
           <div className="flex items-center justify-between gap-2">
             <div>
-              <h2 className="text-lg font-semibold text-slate-900">Taste Profile & Stats</h2>
-              <p className="text-xs text-slate-500">Hier siehst du klar, welche Daten wir über dich sammeln.</p>
+              <h2 className="text-lg font-semibold text-slate-900">
+                Taste Profile & Stats{props.subjectLabel ? ` · ${props.subjectLabel}` : ""}
+              </h2>
+              <p className="text-xs text-slate-500">
+                Hier siehst du klar, welche Daten wir über {props.subjectLabel || "dich"} sammeln.
+              </p>
             </div>
             <button
               type="button"

@@ -222,6 +222,7 @@ export interface PublicUserProfileDTO {
   status: string;
   isOnline: boolean;
   lastSeenAt: string | null;
+  memberSince: string | null;
   member?: MemberProgressDTO;
   stats: PublicUserProfileStatsDTO;
 }
