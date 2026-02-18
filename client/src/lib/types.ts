@@ -1,5 +1,5 @@
 export type ChatMessageType = "message" | "votingPoll" | "question" | "answer";
-export type MemberRank = "BRONZE" | "SILBER" | "GOLD" | "PLATIN";
+export type MemberRank = "BRONZE" | "SILBER" | "GOLD" | "PLATIN" | "DIAMANT" | "ONYX" | "TITAN";
 
 export interface MemberProgressDTO {
   brand: "PPC Score" | "PPC Member";
@@ -15,6 +15,7 @@ export type SseEventName =
   | "presence.updated"
   | "message.created"
   | "message.updated"
+  | "rank.up"
   | "taste.updated"
   | "reaction.received"
   | "notification.created"
@@ -515,6 +516,15 @@ export interface SseEventPayloadMap {
   "presence.updated": UserPresenceDTO;
   "message.created": MessageDTO;
   "message.updated": MessageDTO;
+  "rank.up": {
+    userId: string;
+    clientId: string;
+    username: string;
+    previousRank: MemberRank;
+    rank: MemberRank;
+    score: number;
+    createdAt: string;
+  };
   "taste.updated": {
     userId: string;
     updatedAt: string;

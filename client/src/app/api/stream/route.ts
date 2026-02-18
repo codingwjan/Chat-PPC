@@ -32,6 +32,8 @@ export async function GET(request: Request): Promise<Response> {
         controller.enqueue(encoder.encode(payload));
       };
 
+      push("retry: 1000\n\n");
+
       const snapshot = await getSnapshot({ limit: snapshotLimit, viewerClientId });
       push(formatSseEvent({ id: `${Date.now()}-snapshot`, event: "snapshot", data: snapshot }));
 
@@ -40,7 +42,7 @@ export async function GET(request: Request): Promise<Response> {
       });
 
       const interval = setInterval(() => {
-        push(":keepalive\n\n");
+        push(`event: ping\ndata: ${JSON.stringify({ ts: new Date().toISOString() })}\n\n`);
       }, 20_000);
 
       const onAbort = () => {
@@ -58,6 +60,7 @@ export async function GET(request: Request): Promise<Response> {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
     },
   });
 }

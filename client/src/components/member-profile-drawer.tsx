@@ -24,6 +24,9 @@ const PROFILE_CARD_TINT_BY_RANK: Record<MemberRank, string> = {
   SILBER: "rgba(100, 116, 139, 0.24)",
   GOLD: "rgba(161, 98, 7, 0.28)",
   PLATIN: "rgba(14, 116, 144, 0.24)",
+  DIAMANT: "rgba(37, 99, 235, 0.24)",
+  ONYX: "rgba(63, 63, 70, 0.24)",
+  TITAN: "rgba(124, 58, 237, 0.24)",
 };
 
 const PROFILE_CARD_TINT_BY_AI: Record<AiProviderClientId, string> = {

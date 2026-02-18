@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { TasteProfileModal } from "@/components/taste-profile-modal";
 import { apiJson } from "@/lib/http";
+import { memberRankLabel } from "@/lib/member-progress";
 import { clearSession, loadSession, type SessionState } from "@/lib/session";
 import type {
   AdminActionRequest,
@@ -36,13 +37,10 @@ interface SelectedTasteUserState {
   username: string;
 }
 
-const RANK_OPTIONS: MemberRank[] = ["BRONZE", "SILBER", "GOLD", "PLATIN"];
+const RANK_OPTIONS: MemberRank[] = ["BRONZE", "SILBER", "GOLD", "PLATIN", "DIAMANT", "ONYX", "TITAN"];
 
 function memberLabel(rank: MemberRank): string {
-  if (rank === "SILBER") return "Silber";
-  if (rank === "GOLD") return "Gold";
-  if (rank === "PLATIN") return "Platin";
-  return "Bronze";
+  return memberRankLabel(rank);
 }
 
 function toAdminLogEntries(messages: MessageDTO[]): AdminLogEntry[] {

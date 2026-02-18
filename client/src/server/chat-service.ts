@@ -132,7 +132,7 @@ const PPC_MEMBER_ACTIVE_EVENT_TYPES: readonly UserBehaviorEventType[] = [
   UserBehaviorEventType.AI_MENTION_SENT,
   UserBehaviorEventType.MESSAGE_TAGGING_COMPLETED,
 ].filter((type): type is UserBehaviorEventType => Boolean(type));
-const SYSTEM_RANK_UP_REGEX = /^(.+?)\s+ist auf\s+(bronze|silber|gold|platin)\s+aufgestiegen\s+[·-]\s+ppc (?:member|score)\s+(\d+)$/i;
+const SYSTEM_RANK_UP_REGEX = /^(.+?)\s+ist auf\s+(bronze|silber|gold|platin|diamant|onyx|titan)\s+aufgestiegen\s+[·-]\s+ppc (?:member|score)\s+(\d+)$/i;
 const TAGGING_MODEL_PROMPT = [
   "You are a strict tagging engine for chat messages and images.",
   "Return JSON only. No markdown. No prose.",
@@ -1036,6 +1036,16 @@ export async function recomputePpcMemberForUser(
   }
 
   if (options.emitRankUp !== false && rankUp && nextMember) {
+    const previousRank = previousMember?.rank || nextMember.rank;
+    publish("rank.up", {
+      userId: updated.id,
+      clientId: updated.clientId,
+      username: updated.username,
+      previousRank,
+      rank: nextMember.rank,
+      score: nextMember.score,
+      createdAt: new Date().toISOString(),
+    });
     await emitSystemMessage(
       `${updated.username} ist auf ${memberRankLabel(nextMember.rank)} aufgestiegen · ${PPC_MEMBER_BRAND} ${nextMember.score}`,
       { authorId: updated.id },
@@ -1232,7 +1242,7 @@ function mapMessage(
     type: toChatMessageType(message.type),
     message: message.content,
     username: message.authorName,
-    profilePicture: message.author?.profilePicture || message.authorProfilePicture,
+    profilePicture: message.authorProfilePicture || message.author?.profilePicture || getDefaultProfilePicture(),
     createdAt: message.createdAt.toISOString(),
     optionOne: message.optionOne ?? undefined,
     optionTwo: message.optionTwo ?? undefined,
@@ -1718,6 +1728,8 @@ const GIF_LOOKUP_HUMOR_HINT_REGEX = /\b(lustig|lustige|lustiges|witzig|funny|lol
 const GIF_LOOKUP_HUMOR_RESULT_REGEX = /\b(funny|lol|lmao|laugh|haha|meme|reaction|comedy|joke|witz)\b/i;
 const GIF_LOOKUP_QUERY_FILLER_REGEX =
   /\b(please|pls|can|could|you|me|mir|mal|bitte|a|an|the|ein|eine|einen|for|about|of|zu|zum|zur|ueber|über|von|raus|mir)\b/gi;
+const GIF_LOOKUP_GENERIC_TOKEN_REGEX =
+  /^(gif|giphy|tenor|funny|meme|reaction|find|search|lookup|look|match|matching|send|post|drop|zeige|such|suche|suchen|raussuchen|finde|passend|passende|passendes)$/i;
 const GIF_LOOKUP_FETCH_TIMEOUT_MS = 5_000;
 const GIF_LOOKUP_QUERY_MAX_CHARS = 80;
 const TENOR_SEARCH_LIMIT = 6;
@@ -1883,6 +1895,28 @@ function tokenizeGifLookupText(value: string): Set<string> {
   return new Set(normalized.split(" ").filter((token) => token.length >= 2));
 }
 
+function toSignificantGifTokens(tokens: Set<string>): string[] {
+  return [...tokens].filter((token) => !GIF_LOOKUP_GENERIC_TOKEN_REGEX.test(token));
+}
+
+function countGifTokenMatches(tokens: string[], metadataTokens: Set<string>, urlTokens: Set<string>): number {
+  let matches = 0;
+  for (const token of tokens) {
+    if (metadataTokens.has(token) || urlTokens.has(token)) {
+      matches += 1;
+      continue;
+    }
+    if (token.length < 4) continue;
+    const hasApprox = [...metadataTokens, ...urlTokens].some((candidate) =>
+      candidate.startsWith(token) || token.startsWith(candidate),
+    );
+    if (hasApprox) {
+      matches += 1;
+    }
+  }
+  return matches;
+}
+
 function scoreTenorCandidate(input: {
   desiredTokens: Set<string>;
   wantsHumor: boolean;
@@ -1891,9 +1925,11 @@ function scoreTenorCandidate(input: {
 }): number {
   const metadataTokens = tokenizeGifLookupText(input.metadataText);
   const urlTokens = tokenizeGifLookupText(input.urlText);
+  const significantTokens = toSignificantGifTokens(input.desiredTokens);
+  const matchedSignificantTokens = countGifTokenMatches(significantTokens, metadataTokens, urlTokens);
   let score = 0;
 
-  for (const token of input.desiredTokens) {
+  for (const token of significantTokens) {
     if (metadataTokens.has(token)) {
       score += 4;
     } else if (urlTokens.has(token)) {
@@ -1911,6 +1947,16 @@ function scoreTenorCandidate(input: {
 
   if (metadataTokens.size === 0 && urlTokens.size > 0) {
     score -= 1;
+  }
+  if (significantTokens.length >= 2 && matchedSignificantTokens === 0) {
+    score -= 9;
+  } else if (significantTokens.length >= 3 && matchedSignificantTokens === 1) {
+    score -= 3;
+  }
+
+  // Reject almost-unrelated candidates when the user intent had concrete terms.
+  if (significantTokens.length >= 2 && matchedSignificantTokens === 0) {
+    score -= 4;
   }
   return score;
 }
@@ -1954,7 +2000,25 @@ async function canUseDirectGifUrl(url: string): Promise<boolean> {
     redirect: "follow",
   });
   if (!response?.ok) return false;
-  return isGifHttpResponse(response, normalized);
+  const contentType = response.headers.get("content-type")?.toLowerCase() || "";
+  if (contentType.includes("image/gif")) {
+    return true;
+  }
+  if (!isGifHttpResponse(response, normalized)) {
+    return false;
+  }
+
+  const signatureResponse = await fetchWithTimeout(normalized, {
+    method: "GET",
+    redirect: "follow",
+    headers: {
+      Range: "bytes=0-15",
+    },
+  });
+  if (!signatureResponse?.ok) return false;
+  const bytes = new Uint8Array(await signatureResponse.arrayBuffer());
+  if (bytes.length < 4) return false;
+  return bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38; // GIF8
 }
 
 async function fetchTenorGifResult(query: string, message: string): Promise<{ directGifUrl: string | null } | null> {
@@ -2034,7 +2098,7 @@ async function fetchTenorGifResult(query: string, message: string): Promise<{ di
   }
 
   candidates.sort((a, b) => b.score - a.score);
-  const topCandidates = candidates.slice(0, TENOR_SEARCH_LIMIT);
+  const topCandidates = candidates.filter((candidate) => candidate.score >= 1).slice(0, TENOR_SEARCH_LIMIT);
   for (const candidate of topCandidates) {
     if (await canUseDirectGifUrl(candidate.directGifUrl)) {
       return {
@@ -2048,7 +2112,7 @@ async function fetchTenorGifResult(query: string, message: string): Promise<{ di
   };
 }
 
-async function fetchGiphyGifResult(query: string): Promise<{ directGifUrl: string | null } | null> {
+async function fetchGiphyGifResult(query: string, message: string): Promise<{ directGifUrl: string | null } | null> {
   const apiKey = getEnvTrimmed("GIPHY_API_KEY");
   if (!apiKey) return null;
 
@@ -2074,6 +2138,9 @@ async function fetchGiphyGifResult(query: string): Promise<{ directGifUrl: strin
 
   const root = asRecord(payload);
   const results = Array.isArray(root?.data) ? root.data : [];
+  const desiredTokens = tokenizeGifLookupText(query);
+  const wantsHumor = GIF_LOOKUP_HUMOR_HINT_REGEX.test(message);
+  const scoredCandidates: Array<{ directGifUrl: string; score: number }> = [];
   for (const entry of results) {
     const item = asRecord(entry);
     if (!item) continue;
@@ -2084,9 +2151,23 @@ async function fetchGiphyGifResult(query: string): Promise<{ directGifUrl: strin
       ? normalizeAiImageUrlCandidate(original.url)
       : "";
     if (!directGifUrl) continue;
-    if (await canUseDirectGifUrl(directGifUrl)) {
+    const title = typeof item.title === "string" ? item.title : "";
+    const slug = typeof item.slug === "string" ? item.slug : "";
+    const username = typeof item.username === "string" ? item.username : "";
+    const score = scoreTenorCandidate({
+      desiredTokens,
+      wantsHumor,
+      metadataText: `${title} ${slug} ${username}`,
+      urlText: directGifUrl,
+    });
+    scoredCandidates.push({ directGifUrl, score });
+  }
+
+  scoredCandidates.sort((a, b) => b.score - a.score);
+  for (const candidate of scoredCandidates.filter((entry) => entry.score >= 1).slice(0, 6)) {
+    if (await canUseDirectGifUrl(candidate.directGifUrl)) {
       return {
-        directGifUrl,
+        directGifUrl: candidate.directGifUrl,
       };
     }
   }
@@ -2099,7 +2180,7 @@ async function fetchGiphyGifResult(query: string): Promise<{ directGifUrl: strin
 async function lookupGifForMessage(message: string): Promise<string | null> {
   const query = buildGifLookupQuery(message);
   const tenor = await fetchTenorGifResult(query, message);
-  const giphy = await fetchGiphyGifResult(query);
+  const giphy = await fetchGiphyGifResult(query, message);
 
   const directGifUrl = tenor?.directGifUrl || giphy?.directGifUrl || null;
   if (directGifUrl) {

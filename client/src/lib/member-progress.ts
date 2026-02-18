@@ -43,6 +43,9 @@ export const MEMBER_RANK_STEPS: readonly RankStep[] = [
   { rank: "SILBER", minScore: 300, label: "Silber" },
   { rank: "GOLD", minScore: 900, label: "Gold" },
   { rank: "PLATIN", minScore: 1800, label: "Platin" },
+  { rank: "DIAMANT", minScore: 4200, label: "Diamant" },
+  { rank: "ONYX", minScore: 9000, label: "Onyx" },
+  { rank: "TITAN", minScore: 18000, label: "Titan" },
 ] as const;
 
 function normalizeDate(value: Date | string | null | undefined): Date | null {

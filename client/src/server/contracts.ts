@@ -278,7 +278,7 @@ const adminActionSchema = adminOverviewSchema
     targetUsername: z.string().trim().optional(),
     targetMessageId: z.string().trim().optional(),
     targetScore: z.coerce.number().optional(),
-    targetRank: z.enum(["BRONZE", "SILBER", "GOLD", "PLATIN"]).optional(),
+    targetRank: z.enum(["BRONZE", "SILBER", "GOLD", "PLATIN", "DIAMANT", "ONYX", "TITAN"]).optional(),
   })
   .superRefine((value, ctx) => {
     if (value.action === "delete_user" && !value.targetUsername) {
