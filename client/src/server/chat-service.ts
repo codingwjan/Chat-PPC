@@ -27,6 +27,7 @@ import type {
   AuthSignInRequest,
   AuthSignUpRequest,
   ChatBackgroundDTO,
+  AppKillDTO,
   CreateMessageRequest,
   DeveloperUserTasteListDTO,
   LoginRequest,
@@ -67,6 +68,9 @@ const AI_STATUS_CLIENT_ID = "__chatppc_ai_status__";
 const AI_STATUS_USERNAME = "__chatppc_ai_status__";
 const CHAT_BACKGROUND_CLIENT_ID = "__chatppc_chat_background__";
 const CHAT_BACKGROUND_USERNAME = "__chatppc_chat_background__";
+const APP_KILL_CLIENT_ID = "__chatppc_app_kill__";
+const APP_KILL_USERNAME = "__chatppc_app_kill__";
+const APP_KILL_ENABLED_MARKER = "__enabled__";
 const DEVELOPER_USERNAME = "Developer";
 const AI_CONTEXT_RECENT_MESSAGES = 8;
 const AI_CONTEXT_RECENT_MESSAGES_MINIMAL = 2;
@@ -78,7 +82,7 @@ const AI_REQUEST_CHARS = 7_500;
 const AI_REQUEST_CHARS_MINIMAL = 1_600;
 const AI_USER_PROMPT_CHARS = 1_300;
 const AI_USER_PROMPT_CHARS_MINIMAL = 450;
-const SYSTEM_CLIENT_IDS = [AI_STATUS_CLIENT_ID, CHAT_BACKGROUND_CLIENT_ID] as const;
+const SYSTEM_CLIENT_IDS = [AI_STATUS_CLIENT_ID, CHAT_BACKGROUND_CLIENT_ID, APP_KILL_CLIENT_ID] as const;
 const IMAGE_URL_REGEX = /\.(jpeg|jpg|gif|png|webp|svg)(\?.*)?$/i;
 const DEFAULT_MEDIA_PAGE_LIMIT = 3;
 const MAX_MEDIA_PAGE_LIMIT = 30;
@@ -1540,6 +1544,62 @@ export async function getChatBackground(): Promise<ChatBackgroundDTO> {
   };
 }
 
+export async function getAppKillState(): Promise<AppKillDTO> {
+  const row = await prisma.user.findUnique({
+    where: { clientId: APP_KILL_CLIENT_ID },
+    select: {
+      profilePicture: true,
+      status: true,
+      lastSeenAt: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
+    },
+  });
+
+  const enabled = row?.profilePicture === APP_KILL_ENABLED_MARKER;
+  return {
+    enabled,
+    updatedAt: row?.lastSeenAt ? row.lastSeenAt.toISOString() : null,
+    updatedBy: row?.status || null,
+  };
+}
+
+export async function setAppKillState(input: {
+  clientId: string;
+  enabled: boolean;
+}): Promise<AppKillDTO> {
+  const actor = await getUserByClientId(input.clientId);
+  const enabled = Boolean(input.enabled);
+  const now = new Date();
+
+  await prisma.user.upsert({
+    where: { clientId: APP_KILL_CLIENT_ID },
+    update: {
+      username: APP_KILL_USERNAME,
+      profilePicture: enabled ? APP_KILL_ENABLED_MARKER : "",
+      status: actor.username,
+      isOnline: false,
+      lastSeenAt: now,
+    },
+    create: {
+      clientId: APP_KILL_CLIENT_ID,
+      username: APP_KILL_USERNAME,
+      profilePicture: enabled ? APP_KILL_ENABLED_MARKER : "",
+      status: actor.username,
+      isOnline: false,
+      lastSeenAt: now,
+    },
+  });
+
+  const result: AppKillDTO = {
+    enabled,
+    updatedAt: now.toISOString(),
+    updatedBy: actor.username,
+  };
+  publish("app.kill.updated", result);
+  return result;
+}
+
 export async function setChatBackground(input: {
   clientId: string;
   url?: string | null;
@@ -1721,7 +1781,9 @@ const IMAGE_GENERATION_CONTEXT_REGEX =
   /\b(scene|character|monster|animal|portrait|landscape|banner|cover|icon)\b/i;
 const GIF_LOOKUP_KEYWORD_REGEX = /\b(gif|giphy|tenor)\b/i;
 const GIF_LOOKUP_ACTION_REGEX =
-  /\b(find|search|lookup|look up|match|matching|send|post|drop|zeige|such|suche|suchen|raussuchen|finde|passend|passende|passendes)\b/i;
+  /\b(find|search|lookup|look up|match|matching|send|post|drop|show|give|provide|need|want|zeige|zeig|such|suche|suchen|raussuchen|finde|gib|schick|brauche|will|möchte|passend|passende|passendes)\b/i;
+const GIF_LOOKUP_META_DISCUSSION_REGEX =
+  /\b(format|file|datei|größe|size|kompression|compression|codec|fps|warum|why|wie|how|explain|erklär|erklaer|difference|unterschied)\b/i;
 const GIF_MEDIA_HOST_REGEX = /^https?:\/\/(?:media\.tenor\.com|media\d*\.giphy\.com|i\.giphy\.com)\//i;
 const DIRECT_GIF_URL_REGEX = /^https?:\/\/[^\s)]+\.gif(?:[?#][^\s)]*)?$/i;
 const GIF_LOOKUP_HUMOR_HINT_REGEX = /\b(lustig|lustige|lustiges|witzig|funny|lol|lmao|haha|meme)\b/i;
@@ -1767,7 +1829,22 @@ function shouldUseImageGenerationTool(
 function isLikelyGifLookupIntent(message: string): boolean {
   const normalized = message.trim();
   if (!normalized) return false;
-  return GIF_LOOKUP_KEYWORD_REGEX.test(normalized) && GIF_LOOKUP_ACTION_REGEX.test(normalized);
+  if (!GIF_LOOKUP_KEYWORD_REGEX.test(normalized)) return false;
+  const hasAction = GIF_LOOKUP_ACTION_REGEX.test(normalized);
+  const hasDirectAsk = /\b(?:a|an|one|ein|eine)\s+gif\b/i.test(normalized);
+  if (!hasAction && !hasDirectAsk) return false;
+  if (GIF_LOOKUP_META_DISCUSSION_REGEX.test(normalized) && !hasAction) return false;
+  return true;
+}
+
+function shouldForceStrictGifLookup(message: string): boolean {
+  const normalized = message.trim();
+  if (!normalized) return false;
+  if (!GIF_LOOKUP_KEYWORD_REGEX.test(normalized)) return false;
+  if (GIF_LOOKUP_META_DISCUSSION_REGEX.test(normalized) && !GIF_LOOKUP_ACTION_REGEX.test(normalized)) {
+    return false;
+  }
+  return true;
 }
 
 function normalizeAiImageUrlCandidate(url: string): string {
@@ -1824,18 +1901,16 @@ function formatGifLookupMarkdown(url: string): string {
   return `![${safeAltText}](${normalized})`;
 }
 
-function normalizeGifLookupOutput(message: string, text: string): string {
-  if (!isLikelyGifLookupIntent(message)) return text;
-  const gifUrl = extractGifLookupUrl(text);
-  if (!gifUrl) {
-    const markdownImageRegex = /!\[[^\]]*]\((https?:\/\/[^)\s]+)\)/i;
-    const markdownMatch = text.match(markdownImageRegex);
-    if (markdownMatch?.[1]) {
-      return normalizeAiImageUrlCandidate(markdownMatch[1]);
-    }
-    return text;
+async function enforceStrictGifOutput(message: string, text: string): Promise<string> {
+  if (!shouldForceStrictGifLookup(message)) return text;
+
+  const candidateUrl = extractGifLookupUrl(text);
+  if (candidateUrl && await canUseDirectGifUrl(candidateUrl)) {
+    return formatGifLookupMarkdown(candidateUrl);
   }
-  return formatGifLookupMarkdown(gifUrl);
+
+  const lookupText = await lookupGifForMessage(message);
+  return lookupText || "Ich konnte gerade kein passendes GIF finden. Versuch es mit einem konkreteren Suchbegriff.";
 }
 
 function buildGifLookupQuery(message: string): string {
@@ -4147,7 +4222,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
       });
       return;
     }
-    if (isLikelyGifLookupIntent(cleanedMessage)) {
+    if (shouldForceStrictGifLookup(cleanedMessage)) {
       publishAiStatus(payload.provider, "sucht GIF…", { model: grokConfig.textModel });
       const lookupText = await lookupGifForMessage(cleanedMessage);
       publishAiStatus(payload.provider, "schreibt…", { model: grokConfig.textModel });
@@ -4190,7 +4265,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
 
       if (streamResult.supported) {
         const text = stripAiPollBlocks(streamResult.rawOutputText).trim();
-        const normalizedText = normalizeGifLookupOutput(cleanedMessage, text);
+        const normalizedText = await enforceStrictGifOutput(cleanedMessage, text);
         const finalText = !normalizedText || normalizedText === "[NO_RESPONSE]"
           ? "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal."
           : normalizedText;
@@ -4241,7 +4316,7 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
     }
 
     const text = stripAiPollBlocks(rawOutputText).trim();
-    const normalizedText = normalizeGifLookupOutput(cleanedMessage, text);
+    const normalizedText = await enforceStrictGifOutput(cleanedMessage, text);
 
     if (!normalizedText || normalizedText === "[NO_RESPONSE]") {
       publishAiStatus(payload.provider, "schreibt…", { model: responseModel });
@@ -4847,17 +4922,19 @@ async function resolveViewerUserId(clientId: string | null | undefined): Promise
 }
 
 export async function getSnapshot(input: { limit?: number; viewerClientId?: string } = {}): Promise<SnapshotDTO> {
-  const [users, messagePage, aiStatus, background] = await Promise.all([
+  const [users, messagePage, aiStatus, background, appKill] = await Promise.all([
     getOnlineUsers(),
     getMessages({ limit: input.limit, viewerClientId: input.viewerClientId }),
     getAiStatus(),
     getChatBackground(),
+    getAppKillState(),
   ]);
   return {
     users,
     messages: messagePage.messages,
     aiStatus,
     background,
+    appKill,
   };
 }
 
@@ -7261,7 +7338,7 @@ async function assertDeveloperMode(input: { clientId: string; devAuthToken: stri
 }
 
 async function getAdminOverviewInternal(): Promise<AdminOverviewDTO> {
-  const [usersTotal, usersOnline, messagesTotal, pollsTotal, blacklistTotal] = await Promise.all([
+  const [usersTotal, usersOnline, messagesTotal, pollsTotal, blacklistTotal, appKill] = await Promise.all([
     prisma.user.count({
       where: {
         clientId: {
@@ -7282,6 +7359,7 @@ async function getAdminOverviewInternal(): Promise<AdminOverviewDTO> {
       where: { type: MessageType.VOTING_POLL },
     }),
     prisma.blacklistEntry.count(),
+    getAppKillState(),
   ]);
 
   return {
@@ -7290,6 +7368,7 @@ async function getAdminOverviewInternal(): Promise<AdminOverviewDTO> {
     messagesTotal,
     pollsTotal,
     blacklistTotal,
+    appKill,
   };
 }
 
@@ -7712,6 +7791,18 @@ export async function runAdminAction(input: AdminActionRequest): Promise<AdminAc
     publish("user.updated", mapUser(updated));
     publish("presence.updated", mapUser(updated));
     message = `Rang für ${updated.username} wurde auf ${memberRankLabel(targetRank)} gesetzt.`;
+  }
+
+  if (action === "toggle_kill_all") {
+    const currentKill = await getAppKillState();
+    const nextEnabled = typeof input.killEnabled === "boolean" ? input.killEnabled : !currentKill.enabled;
+    const updatedKill = await setAppKillState({
+      clientId: actor.clientId,
+      enabled: nextEnabled,
+    });
+    message = updatedKill.enabled
+      ? "Kill-Switch aktiviert. Chat ist auf allen Geräten sofort geblankt."
+      : "Kill-Switch deaktiviert. Chat ist wieder sichtbar.";
   }
 
   const overview = await getAdminOverviewInternal();

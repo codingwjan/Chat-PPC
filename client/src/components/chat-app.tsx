@@ -36,6 +36,7 @@ import {
 } from "@/lib/session";
 import type {
   AdminActionRequest,
+  AppKillDTO,
   AiStatusDTO,
   AuthSessionDTO,
   ChatBackgroundDTO,
@@ -608,6 +609,14 @@ function createDefaultAiStatus(): AiStatusDTO {
   };
 }
 
+function createDefaultAppKillState(): AppKillDTO {
+  return {
+    enabled: false,
+    updatedAt: null,
+    updatedBy: null,
+  };
+}
+
 interface MessageListProps {
   messages: MessageDTO[];
   currentUserId?: string;
@@ -953,6 +962,7 @@ export function ChatApp() {
   const [highlightOwnMember, setHighlightOwnMember] = useState(false);
   const [scoreGainOverlays, setScoreGainOverlays] = useState<ScoreGainOverlayItem[]>([]);
   const [rankCelebration, setRankCelebration] = useState<{ key: number; username: string; rankLabel: string } | null>(null);
+  const [appKillState, setAppKillState] = useState<AppKillDTO>(() => createDefaultAppKillState());
   const [aiStatus, setAiStatus] = useState<AiStatusDTO>(() => createDefaultAiStatus());
   const [uploadingChat, setUploadingChat] = useState(false);
   const [uploadingBackground, setUploadingBackground] = useState(false);
@@ -1330,6 +1340,10 @@ export function ChatApp() {
     return apiJson<ChatBackgroundDTO>("/api/chat/background");
   }, []);
 
+  const fetchAppKillState = useCallback(async (): Promise<AppKillDTO> => {
+    return apiJson<AppKillDTO>("/api/app/kill");
+  }, []);
+
   const fetchPublicUserProfile = useCallback(async (targetClientId: string): Promise<PublicUserProfileDTO> => {
     if (!session?.clientId) {
       throw new Error("Sitzung nicht verfügbar.");
@@ -1519,6 +1533,7 @@ export function ChatApp() {
       setUsers(snapshot.users);
       setAiStatus(snapshot.aiStatus || createDefaultAiStatus());
       setChatBackgroundUrl(snapshot.background.url);
+      setAppKillState(snapshot.appKill || createDefaultAppKillState());
 
       const latestSnapshotMessages = limitVisibleMessages(snapshot.messages);
       const preserveReadingPosition = userDetachedFromBottomRef.current || !isAtBottomRef.current;
@@ -1556,16 +1571,18 @@ export function ChatApp() {
   );
 
   const syncChatState = useCallback(async (): Promise<UserPresenceDTO[]> => {
-    const [presence, page, ai, background] = await Promise.all([
+    const [presence, page, ai, background, killState] = await Promise.all([
       fetchPresence(),
       fetchMessagePage({ limit: SNAPSHOT_LIMIT }),
       fetchAiStatus().catch(() => createDefaultAiStatus()),
       fetchChatBackground().catch(() => ({ url: null, updatedAt: null, updatedBy: null })),
+      fetchAppKillState().catch(() => createDefaultAppKillState()),
     ]);
 
     setUsers(presence);
     setAiStatus(ai);
     setChatBackgroundUrl(background.url);
+    setAppKillState(killState);
     const latestPageMessages = limitVisibleMessages(page.messages);
     const preserveReadingPosition = userDetachedFromBottomRef.current || !isAtBottomRef.current;
 
@@ -1591,7 +1608,7 @@ export function ChatApp() {
     updateLatestMessageCursor(latestPageMessages);
 
     return presence;
-  }, [fetchAiStatus, fetchChatBackground, fetchMessagePage, fetchPresence, updateLatestMessageCursor]);
+  }, [fetchAiStatus, fetchAppKillState, fetchChatBackground, fetchMessagePage, fetchPresence, updateLatestMessageCursor]);
 
   const restoreSessionPresence = useCallback(async (): Promise<void> => {
     if (!session || isLeavingRef.current) return;
@@ -1777,6 +1794,7 @@ export function ChatApp() {
         targetMessageId?: string;
         targetScore?: number;
         targetRank?: MemberRank;
+        killEnabled?: boolean;
       },
     ) => {
       if (!session?.clientId || !session.devAuthToken) {
@@ -1794,6 +1812,7 @@ export function ChatApp() {
           targetMessageId: options?.targetMessageId,
           targetScore: options?.targetScore,
           targetRank: options?.targetRank,
+          killEnabled: options?.killEnabled,
         };
 
         const result = await apiJson<{ message: string }>("/api/admin", {
@@ -2466,6 +2485,13 @@ export function ChatApp() {
         setChatBackgroundUrl(parsed.url);
       };
 
+      const onAppKillUpdated = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<AppKillDTO>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        setAppKillState(parsed);
+      };
+
       const onPing = () => {
         touchStreamActivity();
       };
@@ -2489,6 +2515,7 @@ export function ChatApp() {
       stream.addEventListener("poll.updated", onPollUpdated);
       stream.addEventListener("ai.status", onAiStatus);
       stream.addEventListener("chat.background.updated", onBackgroundUpdated);
+      stream.addEventListener("app.kill.updated", onAppKillUpdated);
       stream.addEventListener("ping", onPing);
       stream.onerror = () => {
         if (isLeavingRef.current) return;
@@ -3977,6 +4004,12 @@ export function ChatApp() {
           <div className="mt-3 h-40 rounded-2xl bg-slate-200/70" />
         </div>
       </div>
+    );
+  }
+
+  if (appKillState.enabled) {
+    return (
+      <main className="fixed inset-0 z-[1300] h-[100dvh] w-full bg-black" aria-label="Kill-Switch aktiv" />
     );
   }
 

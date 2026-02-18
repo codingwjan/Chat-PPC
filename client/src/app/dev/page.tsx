@@ -325,6 +325,7 @@ export default function DevPage() {
         targetMessageId?: string;
         targetScore?: number;
         targetRank?: MemberRank;
+        killEnabled?: boolean;
       },
     ): Promise<void> => {
       if (!session?.clientId || !session.devAuthToken) {
@@ -344,6 +345,7 @@ export default function DevPage() {
           targetMessageId: options?.targetMessageId,
           targetScore: options?.targetScore,
           targetRank: options?.targetRank,
+          killEnabled: options?.killEnabled,
         };
         const response = await apiJson<AdminActionResponse>("/api/admin", {
           method: "POST",
@@ -459,15 +461,40 @@ export default function DevPage() {
 
         <section className="glass-panel-strong rounded-2xl p-4 sm:p-6">
           <h2 className="text-base font-semibold text-slate-900">Übersicht</h2>
-          <div className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-5">
+          <div className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-6">
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">Nutzer: <span className="font-semibold">{overview?.usersTotal ?? "-"}</span></div>
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">Online: <span className="font-semibold">{overview?.usersOnline ?? "-"}</span></div>
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">Nachrichten: <span className="font-semibold">{overview?.messagesTotal ?? "-"}</span></div>
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">Umfragen: <span className="font-semibold">{overview?.pollsTotal ?? "-"}</span></div>
             <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">Sperrliste: <span className="font-semibold">{overview?.blacklistTotal ?? "-"}</span></div>
+            <div className={`rounded-xl border p-3 ${overview?.appKill.enabled ? "border-rose-300 bg-rose-100 text-rose-800" : "border-slate-200 bg-slate-50 text-slate-700"}`}>
+              Kill-Switch: <span className="font-semibold">{overview?.appKill.enabled ? "AKTIV" : "aus"}</span>
+            </div>
           </div>
 
           <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                if (!window.confirm("Kill-Switch aktivieren? Die Chat-App wird sofort auf allen Geräten geblankt.")) return;
+                void runAction("toggle_kill_all", { killEnabled: true });
+              }}
+              disabled={submittingAction !== null || overview?.appKill.enabled}
+              className="h-10 rounded-xl bg-rose-700 px-4 text-sm font-semibold text-white disabled:opacity-60"
+            >
+              Kill All EIN
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                if (!window.confirm("Kill-Switch deaktivieren?")) return;
+                void runAction("toggle_kill_all", { killEnabled: false });
+              }}
+              disabled={submittingAction !== null || !overview?.appKill.enabled}
+              className="h-10 rounded-xl border border-emerald-200 bg-emerald-50 px-4 text-sm font-semibold text-emerald-700 disabled:opacity-60"
+            >
+              Kill All AUS
+            </button>
             <button
               type="button"
               onClick={() => {
