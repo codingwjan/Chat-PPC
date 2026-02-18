@@ -157,6 +157,7 @@ const STREAM_RECONNECT_BASE_MS = 900;
 const STREAM_RECONNECT_MAX_MS = 8_000;
 const STREAM_STALE_MS = 45_000;
 const STREAM_WATCHDOG_INTERVAL_MS = 10_000;
+const PROFILE_UPLOAD_TIMEOUT_MS = 20_000;
 const AUTO_SCROLL_NEAR_BOTTOM_PX = 420;
 const TOP_LOAD_TRIGGER_PX = 160;
 const TOP_LOAD_COOLDOWN_MS = 750;
@@ -462,10 +463,10 @@ interface PollExtendDraftState {
   existingOptions: string[];
 }
 
-async function uploadProfileImage(file: File): Promise<string> {
+async function uploadProfileImage(file: File, signal?: AbortSignal): Promise<string> {
   const formData = new FormData();
   formData.set("file", file);
-  const response = await fetch("/api/uploads/profile", { method: "POST", body: formData });
+  const response = await fetch("/api/uploads/profile", { method: "POST", body: formData, signal });
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { error?: string } | null;
     throw new Error(payload?.error || "Upload fehlgeschlagen");
@@ -1041,7 +1042,7 @@ export function ChatApp() {
   const [composerHeightPx, setComposerHeightPx] = useState(DEFAULT_COMPOSER_HEIGHT_PX);
   const [, startUiTransition] = useTransition();
   const isDeveloperMode = Boolean(session?.devMode && session.devAuthToken);
-  const profileEditorCloseBlocked = profileCropFile !== null || uploadingProfile;
+  const profileEditorCloseBlocked = profileCropFile !== null;
 
   const sessionProfilePicture = useMemo(
     () => normalizeProfilePictureUrl(session?.profilePicture),
@@ -3546,14 +3547,23 @@ export function ChatApp() {
   }
 
   async function onProfileCropConfirm(file: File) {
+    setProfileCropFile(null);
     setUploadingProfile(true);
+    const uploadController = new AbortController();
+    const uploadTimeout = window.setTimeout(() => {
+      uploadController.abort();
+    }, PROFILE_UPLOAD_TIMEOUT_MS);
     try {
-      const url = await uploadProfileImage(file);
+      const url = await uploadProfileImage(file, uploadController.signal);
       setProfilePictureDraft(url);
-      setProfileCropFile(null);
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Bild konnte nicht hochgeladen werden.");
+      if (uploadController.signal.aborted) {
+        setError("Upload dauert zu lange. Bitte Verbindung prüfen und erneut versuchen.");
+      } else {
+        setError(uploadError instanceof Error ? uploadError.message : "Bild konnte nicht hochgeladen werden.");
+      }
     } finally {
+      window.clearTimeout(uploadTimeout);
       setUploadingProfile(false);
     }
   }

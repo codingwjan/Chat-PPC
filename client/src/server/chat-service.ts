@@ -1826,17 +1826,6 @@ function shouldUseImageGenerationTool(
   return hasImageNoun && hasImageContext;
 }
 
-function isLikelyGifLookupIntent(message: string): boolean {
-  const normalized = message.trim();
-  if (!normalized) return false;
-  if (!GIF_LOOKUP_KEYWORD_REGEX.test(normalized)) return false;
-  const hasAction = GIF_LOOKUP_ACTION_REGEX.test(normalized);
-  const hasDirectAsk = /\b(?:a|an|one|ein|eine)\s+gif\b/i.test(normalized);
-  if (!hasAction && !hasDirectAsk) return false;
-  if (GIF_LOOKUP_META_DISCUSSION_REGEX.test(normalized) && !hasAction) return false;
-  return true;
-}
-
 function shouldForceStrictGifLookup(message: string): boolean {
   const normalized = message.trim();
   if (!normalized) return false;

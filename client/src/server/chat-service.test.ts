@@ -1060,6 +1060,64 @@ Abstimmen und begründen.
     );
   });
 
+  it("returns disabled app kill state when no kill row exists", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce(null);
+
+    const killState = await getAppKillState();
+
+    expect(killState).toEqual({
+      enabled: false,
+      updatedAt: null,
+      updatedBy: null,
+    });
+  });
+
+  it("updates app kill state and publishes realtime event", async () => {
+    prismaMock.user.findUnique.mockResolvedValueOnce({
+      id: "user-id",
+      clientId: "client-1",
+      username: "tester",
+      profilePicture: "https://example.com/avatar.png",
+      status: "",
+      isOnline: true,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+      ppcMemberScoreRaw: 0,
+      ppcMemberLastActiveAt: null,
+    });
+    prismaMock.user.upsert.mockResolvedValueOnce({
+      id: "kill-row",
+      clientId: "__chatppc_app_kill__",
+      username: "__chatppc_app_kill__",
+      profilePicture: "__enabled__",
+      status: "tester",
+      isOnline: false,
+      lastSeenAt: new Date("2026-02-10T10:00:00.000Z"),
+    });
+
+    const state = await setAppKillState({
+      clientId: "client-1",
+      enabled: true,
+    });
+
+    expect(state.enabled).toBe(true);
+    expect(prismaMock.user.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({
+          profilePicture: "__enabled__",
+          status: "tester",
+          isOnline: false,
+        }),
+      }),
+    );
+    expect(publishMock).toHaveBeenCalledWith(
+      "app.kill.updated",
+      expect.objectContaining({
+        enabled: true,
+        updatedBy: "tester",
+      }),
+    );
+  });
+
   it("creates poll with up to 15 options and settings", async () => {
     prismaMock.message.create.mockResolvedValueOnce(
       baseMessage({
