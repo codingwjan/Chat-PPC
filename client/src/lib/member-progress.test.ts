@@ -16,6 +16,9 @@ describe("member-progress", () => {
     expect(resolveMemberRank(300)).toBe("SILBER");
     expect(resolveMemberRank(900)).toBe("GOLD");
     expect(resolveMemberRank(1800)).toBe("PLATIN");
+    expect(resolveMemberRank(4200)).toBe("DIAMANT");
+    expect(resolveMemberRank(9000)).toBe("ONYX");
+    expect(resolveMemberRank(18000)).toBe("TITAN");
   });
 
   it("computes medium decay with 45-day half life", () => {
@@ -35,18 +38,28 @@ describe("member-progress", () => {
   });
 
   it("computes next rank and points to next", () => {
-    const progress = buildMemberProgress({ rawScore: 450, lastActiveAt: "2026-02-16T12:00:00.000Z" });
+    const now = new Date("2026-02-16T12:00:00.000Z");
+    const progress = buildMemberProgress({
+      rawScore: 450,
+      lastActiveAt: "2026-02-16T12:00:00.000Z",
+      now,
+    });
     expect(progress.rank).toBe("SILBER");
     expect(progress.nextRank).toBe("GOLD");
     expect(progress.pointsToNext).toBe(450);
   });
 
   it("does not expose next rank on maximum rank", () => {
-    const progress = buildMemberProgress({ rawScore: 5000, lastActiveAt: "2026-02-16T12:00:00.000Z" });
-    expect(progress.rank).toBe("PLATIN");
+    const now = new Date("2026-02-16T12:00:00.000Z");
+    const progress = buildMemberProgress({
+      rawScore: 50000,
+      lastActiveAt: "2026-02-16T12:00:00.000Z",
+      now,
+    });
+    expect(progress.rank).toBe("TITAN");
     expect(progress.nextRank).toBeUndefined();
     expect(progress.pointsToNext).toBeUndefined();
-    expect(getNextMemberRank("PLATIN")).toBeUndefined();
+    expect(getNextMemberRank("TITAN")).toBeUndefined();
   });
 
   it("detects rank upgrades", () => {

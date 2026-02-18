@@ -66,7 +66,7 @@ function isSystemJoinMessage(message: MessageDTO): boolean {
 
 function isSystemRankUpMessage(message: MessageDTO): boolean {
   if (message.username !== "System") return false;
-  return /^.+\s+ist auf\s+(bronze|silber|gold|platin)\s+aufgestiegen\s+[·-]\s+ppc (?:member|score)\s+\d+$/i.test(
+  return /^.+\s+ist auf\s+(bronze|silber|gold|platin|diamant|onyx|titan)\s+aufgestiegen\s+[·-]\s+ppc (?:member|score)\s+\d+$/i.test(
     message.message.trim(),
   );
 }

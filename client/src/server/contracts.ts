@@ -273,12 +273,14 @@ const adminActionSchema = adminOverviewSchema
       "delete_message",
       "set_user_score",
       "set_user_rank",
+      "toggle_kill_all",
     ]),
     targetUserId: z.string().trim().optional(),
     targetUsername: z.string().trim().optional(),
     targetMessageId: z.string().trim().optional(),
     targetScore: z.coerce.number().optional(),
-    targetRank: z.enum(["BRONZE", "SILBER", "GOLD", "PLATIN"]).optional(),
+    targetRank: z.enum(["BRONZE", "SILBER", "GOLD", "PLATIN", "DIAMANT", "ONYX", "TITAN"]).optional(),
+    killEnabled: z.coerce.boolean().optional(),
   })
   .superRefine((value, ctx) => {
     if (value.action === "delete_user" && !value.targetUsername) {

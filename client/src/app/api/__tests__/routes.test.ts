@@ -19,6 +19,7 @@ const serviceMock = vi.hoisted(() => ({
   votePoll: vi.fn(),
   extendPoll: vi.fn(),
   getChatBackground: vi.fn(),
+  getAppKillState: vi.fn(),
   setChatBackground: vi.fn(),
   getAdminOverview: vi.fn(),
   getDeveloperTasteProfiles: vi.fn(),
@@ -554,6 +555,21 @@ describe("api routes", () => {
     expect(response.status).toBe(200);
     const payload = await response.json();
     expect(payload.url).toBe("https://example.com/bg-next.png");
+  });
+
+  it("gets app kill state", async () => {
+    serviceMock.getAppKillState.mockResolvedValue({
+      enabled: true,
+      updatedAt: "2026-02-18T10:00:00.000Z",
+      updatedBy: "admin",
+    });
+    const { GET } = await import("@/app/api/app/kill/route");
+
+    const response = await GET();
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.enabled).toBe(true);
+    expect(payload.updatedBy).toBe("admin");
   });
 
   it("surfaces poll vote uniqueness errors", async () => {

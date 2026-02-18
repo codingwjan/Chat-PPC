@@ -12,6 +12,7 @@ import {
   useRef,
   useState,
   useTransition,
+  type CSSProperties,
   type ChangeEvent,
   type ClipboardEvent,
   type DragEvent,
@@ -25,7 +26,7 @@ import { ChatShellSidebar } from "@/components/chat-shell-sidebar";
 import { UiToast } from "@/components/ui-toast";
 import { hasLeadingAiTag, toggleLeadingAiTag } from "@/lib/composer-ai-tags";
 import { apiJson } from "@/lib/http";
-import { MEMBER_RANK_STEPS, PPC_MEMBER_POINT_RULES } from "@/lib/member-progress";
+import { MEMBER_RANK_STEPS, memberRankLabel, PPC_MEMBER_POINT_RULES } from "@/lib/member-progress";
 import {
   clearSession,
   getDefaultProfilePicture,
@@ -35,6 +36,7 @@ import {
 } from "@/lib/session";
 import type {
   AdminActionRequest,
+  AppKillDTO,
   AiStatusDTO,
   AuthSessionDTO,
   ChatBackgroundDTO,
@@ -43,6 +45,7 @@ import type {
   LoginResponseDTO,
   MediaItemDTO,
   MediaPageDTO,
+  MemberRank,
   MessageDTO,
   MessagePageDTO,
   PublicUserProfileDTO,
@@ -148,8 +151,13 @@ type IdleWindow = Window & {
 
 const MESSAGE_PAGE_SIZE = 36;
 const SNAPSHOT_LIMIT = 40;
-const RECONCILE_INTERVAL_MS = 30_000;
+const RECONCILE_INTERVAL_MS = 15_000;
 const PRESENCE_PING_INTERVAL_MS = 20_000;
+const STREAM_RECONNECT_BASE_MS = 900;
+const STREAM_RECONNECT_MAX_MS = 8_000;
+const STREAM_STALE_MS = 45_000;
+const STREAM_WATCHDOG_INTERVAL_MS = 10_000;
+const PROFILE_UPLOAD_TIMEOUT_MS = 20_000;
 const AUTO_SCROLL_NEAR_BOTTOM_PX = 420;
 const TOP_LOAD_TRIGGER_PX = 160;
 const TOP_LOAD_COOLDOWN_MS = 750;
@@ -455,10 +463,10 @@ interface PollExtendDraftState {
   existingOptions: string[];
 }
 
-async function uploadProfileImage(file: File): Promise<string> {
+async function uploadProfileImage(file: File, signal?: AbortSignal): Promise<string> {
   const formData = new FormData();
   formData.set("file", file);
-  const response = await fetch("/api/uploads/profile", { method: "POST", body: formData });
+  const response = await fetch("/api/uploads/profile", { method: "POST", body: formData, signal });
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { error?: string } | null;
     throw new Error(payload?.error || "Upload fehlgeschlagen");
@@ -599,6 +607,14 @@ function createDefaultAiStatus(): AiStatusDTO {
     chatgptModel: "Modell dynamisch (Prompt)",
     grokModel: "Modell wird geladen…",
     updatedAt: new Date().toISOString(),
+  };
+}
+
+function createDefaultAppKillState(): AppKillDTO {
+  return {
+    enabled: false,
+    updatedAt: null,
+    updatedBy: null,
   };
 }
 
@@ -808,6 +824,91 @@ const OnlineUsersList = memo(function OnlineUsersList({
   );
 });
 
+function seededUnit(seed: number): number {
+  const value = Math.sin(seed) * 10_000;
+  return value - Math.floor(value);
+}
+
+function RankUpConfettiOverlay({
+  confettiKey,
+  username,
+  rankLabel,
+}: {
+  confettiKey: number;
+  username: string;
+  rankLabel: string;
+}) {
+  const pieces = useMemo(
+    () =>
+      Array.from({ length: 34 }, (_, index) => {
+        const seed = confettiKey + index * 17;
+        const left = 4 + Math.floor(seededUnit(seed) * 92);
+        const drift = -20 + Math.floor(seededUnit(seed + 1) * 40);
+        const delay = Math.floor(seededUnit(seed + 2) * 360);
+        const duration = 1_350 + Math.floor(seededUnit(seed + 3) * 750);
+        const rotate = Math.floor(seededUnit(seed + 4) * 360);
+        const hue = 20 + Math.floor(seededUnit(seed + 5) * 320);
+        return {
+          id: `${confettiKey}-${index}`,
+          left,
+          drift,
+          delay,
+          duration,
+          rotate,
+          color: `hsl(${hue} 88% 58%)`,
+        };
+      }),
+    [confettiKey],
+  );
+
+  return (
+    <div className="pointer-events-none fixed inset-0 z-[95] overflow-hidden" aria-hidden="true">
+      <div className="absolute left-1/2 top-5 -translate-x-1/2 rounded-full bg-slate-900/88 px-4 py-2 text-xs font-semibold text-white shadow-lg">
+        {username} erreicht {rankLabel}
+      </div>
+      {pieces.map((piece) => (
+        <span
+          key={piece.id}
+          className="ppc-rank-confetti-piece"
+          style={{
+            left: `${piece.left}%`,
+            backgroundColor: piece.color,
+            transform: `translate3d(0, -16px, 0) rotate(${piece.rotate}deg)`,
+            animationDelay: `${piece.delay}ms`,
+            animationDuration: `${piece.duration}ms`,
+            "--ppc-confetti-drift": `${piece.drift}px`,
+          } as CSSProperties & { "--ppc-confetti-drift": string }}
+        />
+      ))}
+    </div>
+  );
+}
+
+interface ScoreGainOverlayItem {
+  id: number;
+  username: string;
+  delta: number;
+}
+
+function ScoreGainOverlay({ items }: { items: ScoreGainOverlayItem[] }) {
+  return (
+    <div className="pointer-events-none fixed inset-0 z-[1200] overflow-hidden" aria-hidden="true">
+      <div className="absolute right-3 top-[calc(env(safe-area-inset-top)+0.75rem)] flex w-[min(92vw,22rem)] flex-col items-end gap-2 sm:right-4">
+        {items.map((item, index) => (
+          <div
+            key={item.id}
+            className="ppc-score-gain-overlay-chip"
+            style={{ animationDelay: `${index * 70}ms` }}
+          >
+            <span className="font-semibold text-slate-800">{item.username}</span>
+            <span className="ml-1 text-emerald-700">+{item.delta}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function ChatApp() {
   const router = useRouter();
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -817,6 +918,10 @@ export function ChatApp() {
   const backgroundUploadRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
   const mediaScrollRef = useRef<HTMLDivElement>(null);
+  const streamRef = useRef<EventSource | null>(null);
+  const streamReconnectTimeoutRef = useRef<number | null>(null);
+  const streamReconnectAttemptRef = useRef(0);
+  const lastStreamActivityAtRef = useRef(Date.now());
   const isAtBottomRef = useRef(true);
   const latestMessageAtRef = useRef<string | null>(null);
   const knownMessageIdsRef = useRef<Set<string>>(new Set());
@@ -842,6 +947,10 @@ export function ChatApp() {
   const tasteModalRefetchTimeoutRef = useRef<number | null>(null);
   const tasteModalOpenRef = useRef(false);
   const memberHighlightResetTimeoutRef = useRef<number | null>(null);
+  const rankCelebrationResetTimeoutRef = useRef<number | null>(null);
+  const scoreGainOverlayTimeoutsRef = useRef<Map<number, number>>(new Map());
+  const knownMemberScoresRef = useRef<Map<string, number>>(new Map());
+  const memberScoresBootstrappedRef = useRef(false);
   const previousOwnMemberScoreRef = useRef<number | null>(null);
   const publicProfileCacheRef = useRef<Record<string, PublicUserProfileDTO>>({});
 
@@ -852,6 +961,9 @@ export function ChatApp() {
   const [error, setError] = useState<string | null>(null);
   const [validationNotice, setValidationNotice] = useState<{ title: string; message: string } | null>(null);
   const [highlightOwnMember, setHighlightOwnMember] = useState(false);
+  const [scoreGainOverlays, setScoreGainOverlays] = useState<ScoreGainOverlayItem[]>([]);
+  const [rankCelebration, setRankCelebration] = useState<{ key: number; username: string; rankLabel: string } | null>(null);
+  const [appKillState, setAppKillState] = useState<AppKillDTO>(() => createDefaultAppKillState());
   const [aiStatus, setAiStatus] = useState<AiStatusDTO>(() => createDefaultAiStatus());
   const [uploadingChat, setUploadingChat] = useState(false);
   const [uploadingBackground, setUploadingBackground] = useState(false);
@@ -930,7 +1042,7 @@ export function ChatApp() {
   const [composerHeightPx, setComposerHeightPx] = useState(DEFAULT_COMPOSER_HEIGHT_PX);
   const [, startUiTransition] = useTransition();
   const isDeveloperMode = Boolean(session?.devMode && session.devAuthToken);
-  const profileEditorCloseBlocked = profileCropFile !== null || uploadingProfile;
+  const profileEditorCloseBlocked = profileCropFile !== null;
 
   const sessionProfilePicture = useMemo(
     () => normalizeProfilePictureUrl(session?.profilePicture),
@@ -1229,6 +1341,10 @@ export function ChatApp() {
     return apiJson<ChatBackgroundDTO>("/api/chat/background");
   }, []);
 
+  const fetchAppKillState = useCallback(async (): Promise<AppKillDTO> => {
+    return apiJson<AppKillDTO>("/api/app/kill");
+  }, []);
+
   const fetchPublicUserProfile = useCallback(async (targetClientId: string): Promise<PublicUserProfileDTO> => {
     if (!session?.clientId) {
       throw new Error("Sitzung nicht verfügbar.");
@@ -1418,6 +1534,7 @@ export function ChatApp() {
       setUsers(snapshot.users);
       setAiStatus(snapshot.aiStatus || createDefaultAiStatus());
       setChatBackgroundUrl(snapshot.background.url);
+      setAppKillState(snapshot.appKill || createDefaultAppKillState());
 
       const latestSnapshotMessages = limitVisibleMessages(snapshot.messages);
       const preserveReadingPosition = userDetachedFromBottomRef.current || !isAtBottomRef.current;
@@ -1455,16 +1572,18 @@ export function ChatApp() {
   );
 
   const syncChatState = useCallback(async (): Promise<UserPresenceDTO[]> => {
-    const [presence, page, ai, background] = await Promise.all([
+    const [presence, page, ai, background, killState] = await Promise.all([
       fetchPresence(),
       fetchMessagePage({ limit: SNAPSHOT_LIMIT }),
       fetchAiStatus().catch(() => createDefaultAiStatus()),
       fetchChatBackground().catch(() => ({ url: null, updatedAt: null, updatedBy: null })),
+      fetchAppKillState().catch(() => createDefaultAppKillState()),
     ]);
 
     setUsers(presence);
     setAiStatus(ai);
     setChatBackgroundUrl(background.url);
+    setAppKillState(killState);
     const latestPageMessages = limitVisibleMessages(page.messages);
     const preserveReadingPosition = userDetachedFromBottomRef.current || !isAtBottomRef.current;
 
@@ -1490,7 +1609,7 @@ export function ChatApp() {
     updateLatestMessageCursor(latestPageMessages);
 
     return presence;
-  }, [fetchAiStatus, fetchChatBackground, fetchMessagePage, fetchPresence, updateLatestMessageCursor]);
+  }, [fetchAiStatus, fetchAppKillState, fetchChatBackground, fetchMessagePage, fetchPresence, updateLatestMessageCursor]);
 
   const restoreSessionPresence = useCallback(async (): Promise<void> => {
     if (!session || isLeavingRef.current) return;
@@ -1639,6 +1758,34 @@ export function ChatApp() {
     }
   }, [fetchTasteEventsPage, session?.clientId, tasteEventsCursor, tasteEventsHasMore]);
 
+  const triggerRankCelebration = useCallback((input: { username: string; rankLabel: string }): void => {
+    const nextKey = Date.now() + Math.floor(Math.random() * 1_000);
+    setRankCelebration({
+      key: nextKey,
+      username: input.username,
+      rankLabel: input.rankLabel,
+    });
+
+    if (rankCelebrationResetTimeoutRef.current !== null) {
+      window.clearTimeout(rankCelebrationResetTimeoutRef.current);
+    }
+    rankCelebrationResetTimeoutRef.current = window.setTimeout(() => {
+      setRankCelebration(null);
+      rankCelebrationResetTimeoutRef.current = null;
+    }, 2_800);
+  }, []);
+
+  const triggerScoreGainOverlay = useCallback((input: { username: string; delta: number }): void => {
+    if (input.delta <= 0) return;
+    const id = Date.now() + Math.floor(Math.random() * 10_000);
+    setScoreGainOverlays((current) => [...current, { id, username: input.username, delta: input.delta }].slice(-6));
+    const timeoutId = window.setTimeout(() => {
+      setScoreGainOverlays((current) => current.filter((item) => item.id !== id));
+      scoreGainOverlayTimeoutsRef.current.delete(id);
+    }, 1_950);
+    scoreGainOverlayTimeoutsRef.current.set(id, timeoutId);
+  }, []);
+
   const runAdminAction = useCallback(
     async (
       action: AdminActionRequest["action"],
@@ -1647,7 +1794,8 @@ export function ChatApp() {
         targetUsername?: string;
         targetMessageId?: string;
         targetScore?: number;
-        targetRank?: "BRONZE" | "SILBER" | "GOLD" | "PLATIN";
+        targetRank?: MemberRank;
+        killEnabled?: boolean;
       },
     ) => {
       if (!session?.clientId || !session.devAuthToken) {
@@ -1665,6 +1813,7 @@ export function ChatApp() {
           targetMessageId: options?.targetMessageId,
           targetScore: options?.targetScore,
           targetRank: options?.targetRank,
+          killEnabled: options?.killEnabled,
         };
 
         const result = await apiJson<{ message: string }>("/api/admin", {
@@ -2086,26 +2235,64 @@ export function ChatApp() {
       memberHighlightResetTimeoutRef.current = window.setTimeout(() => {
         setHighlightOwnMember(false);
         memberHighlightResetTimeoutRef.current = null;
-      }, 1_300);
+      }, 1_650);
     }
     previousOwnMemberScoreRef.current = typeof currentScore === "number" ? currentScore : null;
   }, [ownMember?.score]);
 
   useEffect(() => {
+    const nextScores = new Map<string, number>();
+    const gains: Array<{ username: string; delta: number }> = [];
+
+    for (const user of users) {
+      const nextScore = user.member?.score;
+      if (typeof nextScore !== "number") continue;
+      nextScores.set(user.clientId, nextScore);
+      if (!memberScoresBootstrappedRef.current) continue;
+      const previousScore = knownMemberScoresRef.current.get(user.clientId);
+      if (typeof previousScore !== "number" || nextScore <= previousScore) continue;
+      gains.push({
+        username: user.username,
+        delta: nextScore - previousScore,
+      });
+    }
+
+    if (!memberScoresBootstrappedRef.current) {
+      memberScoresBootstrappedRef.current = true;
+      knownMemberScoresRef.current = nextScores;
+      return;
+    }
+
+    knownMemberScoresRef.current = nextScores;
+    if (gains.length === 0) return;
+    gains
+      .sort((a, b) => b.delta - a.delta)
+      .slice(0, 3)
+      .forEach((gain) => triggerScoreGainOverlay(gain));
+  }, [triggerScoreGainOverlay, users]);
+
+  useEffect(() => {
+    const scoreGainTimeouts = scoreGainOverlayTimeoutsRef.current;
     return () => {
       if (memberHighlightResetTimeoutRef.current !== null) {
         window.clearTimeout(memberHighlightResetTimeoutRef.current);
         memberHighlightResetTimeoutRef.current = null;
       }
+      if (rankCelebrationResetTimeoutRef.current !== null) {
+        window.clearTimeout(rankCelebrationResetTimeoutRef.current);
+        rankCelebrationResetTimeoutRef.current = null;
+      }
+      scoreGainTimeouts.forEach((timeoutId) => {
+        window.clearTimeout(timeoutId);
+      });
+      scoreGainTimeouts.clear();
     };
   }, []);
 
   useEffect(() => {
     if (!session) return;
 
-    const stream = new EventSource(
-      `/api/stream?limit=${SNAPSHOT_LIMIT}&clientId=${encodeURIComponent(session.clientId)}`,
-    );
+    let cancelled = false;
 
     const parseEvent = <TValue,>(event: MessageEvent<string>): TValue | null => {
       try {
@@ -2115,148 +2302,260 @@ export function ChatApp() {
       }
     };
 
-    const onSnapshot = (event: Event) => {
-      const parsed = parseEvent<SnapshotDTO>(event as MessageEvent<string>);
-      if (!parsed) return;
-      applySnapshot(parsed);
-      setError((current) => (current === "Echtzeitverbindung getrennt. Verbinde neu…" ? null : current));
+    const touchStreamActivity = () => {
+      lastStreamActivityAtRef.current = Date.now();
     };
 
-    const onPresenceUpdated = (event: Event) => {
-      const parsed = parseEvent<UserPresenceDTO>(event as MessageEvent<string>);
-      if (!parsed || isLeavingRef.current) return;
-      setUsers((current) => mergeUser(current, parsed));
-      syncSessionIdentityFromPresence(parsed);
+    const closeStream = () => {
+      if (!streamRef.current) return;
+      streamRef.current.close();
+      streamRef.current = null;
     };
 
-    const onUserUpdated = (event: Event) => {
-      const parsed = parseEvent<UserPresenceDTO>(event as MessageEvent<string>);
-      if (!parsed || isLeavingRef.current) return;
-      setUsers((current) => mergeUser(current, parsed));
-      syncSessionIdentityFromPresence(parsed);
+    const clearReconnectTimer = () => {
+      if (streamReconnectTimeoutRef.current === null) return;
+      window.clearTimeout(streamReconnectTimeoutRef.current);
+      streamReconnectTimeoutRef.current = null;
     };
 
-    const onMessageCreated = (event: Event) => {
-      const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
-      if (!parsed || isLeavingRef.current) return;
-      applyIncomingMessages([parsed], { notify: true });
-    };
-
-    const onMessageUpdated = (event: Event) => {
-      const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
-      if (!parsed || isLeavingRef.current) return;
-      applyIncomingMessages([parsed], { notify: false, preserveViewerReaction: true });
-    };
-
-    const onReactionReceived = (event: Event) => {
-      const parsed = parseEvent<{
-        targetUserId?: string;
-        targetUsername: string;
-        fromUsername: string;
-        messageId: string;
-        reaction: ReactionType;
-        messagePreview: string;
-        createdAt: string;
-      }>(event as MessageEvent<string>);
-      if (!parsed || isLeavingRef.current) return;
-
-      const currentUsername = session.username.trim().toLowerCase();
-      if (!currentUsername) return;
-      if (parsed.targetUserId && session.id && parsed.targetUserId !== session.id) return;
-      if (parsed.targetUsername.trim().toLowerCase() !== currentUsername) return;
-
-      const reactionMeta = REACTION_OPTIONS.find((entry) => entry.reaction === parsed.reaction);
-      const reactionLabel = reactionMeta ? `${reactionMeta.emoji} ${reactionMeta.label}` : parsed.reaction;
-      const message = `${parsed.fromUsername} hat mit ${reactionLabel} reagiert`;
-
-      setValidationNotice({
-        title: "Neue Reaktion",
-        message,
-      });
-
-      if (validationToastResetTimeoutRef.current !== null) {
-        window.clearTimeout(validationToastResetTimeoutRef.current);
-      }
-      validationToastResetTimeoutRef.current = window.setTimeout(() => {
-        setValidationNotice(null);
-        validationToastResetTimeoutRef.current = null;
-      }, 4_000);
-    };
-
-    const onTasteUpdated = (event: Event) => {
-      const parsed = parseEvent<{ userId: string; updatedAt: string; reason: "message" | "reaction" | "poll" | "tagging" }>(
-        event as MessageEvent<string>,
+    const scheduleReconnect = () => {
+      if (cancelled || isLeavingRef.current) return;
+      if (streamReconnectTimeoutRef.current !== null) return;
+      const attempt = streamReconnectAttemptRef.current;
+      const delay = Math.min(
+        STREAM_RECONNECT_MAX_MS,
+        STREAM_RECONNECT_BASE_MS * (2 ** Math.min(attempt, 4)),
       );
-      if (!parsed || !session.id) return;
-      if (parsed.userId !== session.id) return;
-
-      if (!tasteModalOpenRef.current) return;
-      if (tasteModalRefetchTimeoutRef.current !== null) {
-        window.clearTimeout(tasteModalRefetchTimeoutRef.current);
-      }
-      tasteModalRefetchTimeoutRef.current = window.setTimeout(() => {
-        void loadTasteProfileModalData();
-        tasteModalRefetchTimeoutRef.current = null;
-      }, 350);
+      streamReconnectAttemptRef.current += 1;
+      streamReconnectTimeoutRef.current = window.setTimeout(() => {
+        streamReconnectTimeoutRef.current = null;
+        if (cancelled || isLeavingRef.current) return;
+        void syncChatState().catch(() => {
+          // Best effort fallback while realtime reconnects.
+        });
+        openStream();
+      }, delay);
     };
 
-    const onPollUpdated = (event: Event) => {
-      const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
-      if (!parsed || isLeavingRef.current) return;
-      applyIncomingMessages([parsed], { notify: false, preserveViewerReaction: true });
+    const openStream = () => {
+      closeStream();
+      const stream = new EventSource(
+        `/api/stream?limit=${SNAPSHOT_LIMIT}&clientId=${encodeURIComponent(session.clientId)}`,
+      );
+      streamRef.current = stream;
+
+      const onSnapshot = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<SnapshotDTO>(event as MessageEvent<string>);
+        if (!parsed) return;
+        applySnapshot(parsed);
+        setError((current) => (current === "Echtzeitverbindung getrennt. Verbinde neu…" ? null : current));
+      };
+
+      const onPresenceUpdated = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<UserPresenceDTO>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        setUsers((current) => mergeUser(current, parsed));
+        syncSessionIdentityFromPresence(parsed);
+      };
+
+      const onUserUpdated = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<UserPresenceDTO>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        setUsers((current) => mergeUser(current, parsed));
+        syncSessionIdentityFromPresence(parsed);
+      };
+
+      const onMessageCreated = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        applyIncomingMessages([parsed], { notify: true });
+      };
+
+      const onMessageUpdated = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        applyIncomingMessages([parsed], { notify: false, preserveViewerReaction: true });
+      };
+
+      const onRankUp = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<{
+          userId: string;
+          clientId: string;
+          username: string;
+          previousRank: MemberRank;
+          rank: MemberRank;
+          score: number;
+          createdAt: string;
+        }>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        triggerRankCelebration({
+          username: parsed.username,
+          rankLabel: memberRankLabel(parsed.rank),
+        });
+      };
+
+      const onReactionReceived = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<{
+          targetUserId?: string;
+          targetUsername: string;
+          fromUsername: string;
+          messageId: string;
+          reaction: ReactionType;
+          messagePreview: string;
+          createdAt: string;
+        }>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+
+        const currentUsername = session.username.trim().toLowerCase();
+        if (!currentUsername) return;
+        if (parsed.targetUserId && session.id && parsed.targetUserId !== session.id) return;
+        if (parsed.targetUsername.trim().toLowerCase() !== currentUsername) return;
+
+        const reactionMeta = REACTION_OPTIONS.find((entry) => entry.reaction === parsed.reaction);
+        const reactionLabel = reactionMeta ? `${reactionMeta.emoji} ${reactionMeta.label}` : parsed.reaction;
+        const message = `${parsed.fromUsername} hat mit ${reactionLabel} reagiert`;
+
+        setValidationNotice({
+          title: "Neue Reaktion",
+          message,
+        });
+
+        if (validationToastResetTimeoutRef.current !== null) {
+          window.clearTimeout(validationToastResetTimeoutRef.current);
+        }
+        validationToastResetTimeoutRef.current = window.setTimeout(() => {
+          setValidationNotice(null);
+          validationToastResetTimeoutRef.current = null;
+        }, 4_000);
+      };
+
+      const onTasteUpdated = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<{ userId: string; updatedAt: string; reason: "message" | "reaction" | "poll" | "tagging" }>(
+          event as MessageEvent<string>,
+        );
+        if (!parsed || !session.id) return;
+        if (parsed.userId !== session.id) return;
+
+        if (!tasteModalOpenRef.current) return;
+        if (tasteModalRefetchTimeoutRef.current !== null) {
+          window.clearTimeout(tasteModalRefetchTimeoutRef.current);
+        }
+        tasteModalRefetchTimeoutRef.current = window.setTimeout(() => {
+          void loadTasteProfileModalData();
+          tasteModalRefetchTimeoutRef.current = null;
+        }, 350);
+      };
+
+      const onPollUpdated = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        applyIncomingMessages([parsed], { notify: false, preserveViewerReaction: true });
+      };
+
+      const onAiStatus = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<{ status: string; provider?: "chatgpt" | "grok"; model?: string }>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        const status = parsed.status || "online";
+        setAiStatus((current) => {
+          const nextProvider = parsed.provider || "chatgpt";
+          const model = parsed.model?.trim();
+          return {
+            ...current,
+            [nextProvider]: status,
+            ...(nextProvider === "chatgpt" && model ? { chatgptModel: model } : {}),
+            ...(nextProvider === "grok" && model ? { grokModel: model } : {}),
+            updatedAt: new Date().toISOString(),
+          };
+        });
+      };
+
+      const onBackgroundUpdated = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<ChatBackgroundDTO>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        setChatBackgroundUrl(parsed.url);
+      };
+
+      const onAppKillUpdated = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<AppKillDTO>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        setAppKillState(parsed);
+      };
+
+      const onPing = () => {
+        touchStreamActivity();
+      };
+
+      stream.onopen = () => {
+        touchStreamActivity();
+        streamReconnectAttemptRef.current = 0;
+        setError((current) => (current === "Echtzeitverbindung getrennt. Verbinde neu…" ? null : current));
+        void syncChatState().catch(() => {
+          // Best effort.
+        });
+      };
+      stream.addEventListener("snapshot", onSnapshot);
+      stream.addEventListener("presence.updated", onPresenceUpdated);
+      stream.addEventListener("user.updated", onUserUpdated);
+      stream.addEventListener("message.created", onMessageCreated);
+      stream.addEventListener("message.updated", onMessageUpdated);
+      stream.addEventListener("rank.up", onRankUp);
+      stream.addEventListener("reaction.received", onReactionReceived);
+      stream.addEventListener("taste.updated", onTasteUpdated);
+      stream.addEventListener("poll.updated", onPollUpdated);
+      stream.addEventListener("ai.status", onAiStatus);
+      stream.addEventListener("chat.background.updated", onBackgroundUpdated);
+      stream.addEventListener("app.kill.updated", onAppKillUpdated);
+      stream.addEventListener("ping", onPing);
+      stream.onerror = () => {
+        if (isLeavingRef.current) return;
+        setError((current) => current || "Echtzeitverbindung getrennt. Verbinde neu…");
+        closeStream();
+        scheduleReconnect();
+      };
     };
 
-    const onAiStatus = (event: Event) => {
-      const parsed = parseEvent<{ status: string; provider?: "chatgpt" | "grok"; model?: string }>(event as MessageEvent<string>);
-      if (!parsed || isLeavingRef.current) return;
-      const status = parsed.status || "online";
-      setAiStatus((current) => {
-        const nextProvider = parsed.provider || "chatgpt";
-        const model = parsed.model?.trim();
-        return {
-          ...current,
-          [nextProvider]: status,
-          ...(nextProvider === "chatgpt" && model ? { chatgptModel: model } : {}),
-          ...(nextProvider === "grok" && model ? { grokModel: model } : {}),
-          updatedAt: new Date().toISOString(),
-        };
-      });
-    };
+    touchStreamActivity();
+    openStream();
 
-    const onBackgroundUpdated = (event: Event) => {
-      const parsed = parseEvent<ChatBackgroundDTO>(event as MessageEvent<string>);
-      if (!parsed || isLeavingRef.current) return;
-      setChatBackgroundUrl(parsed.url);
-    };
-
-    stream.addEventListener("snapshot", onSnapshot);
-    stream.addEventListener("presence.updated", onPresenceUpdated);
-    stream.addEventListener("user.updated", onUserUpdated);
-    stream.addEventListener("message.created", onMessageCreated);
-    stream.addEventListener("message.updated", onMessageUpdated);
-    stream.addEventListener("reaction.received", onReactionReceived);
-    stream.addEventListener("taste.updated", onTasteUpdated);
-    stream.addEventListener("poll.updated", onPollUpdated);
-    stream.addEventListener("ai.status", onAiStatus);
-    stream.addEventListener("chat.background.updated", onBackgroundUpdated);
-    stream.onerror = () => {
-      if (isLeavingRef.current) return;
-      setError((current) => current || "Echtzeitverbindung getrennt. Verbinde neu…");
-    };
+    const watchdogInterval = window.setInterval(() => {
+      if (!streamRef.current || isLeavingRef.current) return;
+      const inactiveMs = Date.now() - lastStreamActivityAtRef.current;
+      if (inactiveMs <= STREAM_STALE_MS) return;
+      closeStream();
+      setError((current) => current || "Echtzeitverbindung instabil. Verbinde neu…");
+      scheduleReconnect();
+    }, STREAM_WATCHDOG_INTERVAL_MS);
 
     return () => {
+      cancelled = true;
+      window.clearInterval(watchdogInterval);
+      clearReconnectTimer();
       if (tasteModalRefetchTimeoutRef.current !== null) {
         window.clearTimeout(tasteModalRefetchTimeoutRef.current);
         tasteModalRefetchTimeoutRef.current = null;
       }
-      stream.close();
+      closeStream();
     };
   }, [
     applyIncomingMessages,
     applySnapshot,
     loadTasteProfileModalData,
     session,
+    syncChatState,
     syncSessionIdentityFromPresence,
+    triggerRankCelebration,
   ]);
 
   useEffect(() => {
@@ -3248,14 +3547,23 @@ export function ChatApp() {
   }
 
   async function onProfileCropConfirm(file: File) {
+    setProfileCropFile(null);
     setUploadingProfile(true);
+    const uploadController = new AbortController();
+    const uploadTimeout = window.setTimeout(() => {
+      uploadController.abort();
+    }, PROFILE_UPLOAD_TIMEOUT_MS);
     try {
-      const url = await uploadProfileImage(file);
+      const url = await uploadProfileImage(file, uploadController.signal);
       setProfilePictureDraft(url);
-      setProfileCropFile(null);
     } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Bild konnte nicht hochgeladen werden.");
+      if (uploadController.signal.aborted) {
+        setError("Upload dauert zu lange. Bitte Verbindung prüfen und erneut versuchen.");
+      } else {
+        setError(uploadError instanceof Error ? uploadError.message : "Bild konnte nicht hochgeladen werden.");
+      }
     } finally {
+      window.clearTimeout(uploadTimeout);
       setUploadingProfile(false);
     }
   }
@@ -3709,6 +4017,12 @@ export function ChatApp() {
     );
   }
 
+  if (appKillState.enabled) {
+    return (
+      <main className="fixed inset-0 z-[1300] h-[100dvh] w-full bg-black" aria-label="Kill-Switch aktiv" />
+    );
+  }
+
   return (
     <main
       style={chatBackgroundStyle}
@@ -3728,6 +4042,18 @@ export function ChatApp() {
         onOpenPointsInfo={openPointsInfoModal}
         onlineUsersContent={sidebarOnlineUsersContent}
       />
+
+      {rankCelebration ? (
+        <RankUpConfettiOverlay
+          confettiKey={rankCelebration.key}
+          username={rankCelebration.username}
+          rankLabel={rankCelebration.rankLabel}
+        />
+      ) : null}
+
+      {scoreGainOverlays.length > 0 && typeof document !== "undefined"
+        ? createPortal(<ScoreGainOverlay items={scoreGainOverlays} />, document.body)
+        : null}
 
       <div className="flex h-full min-h-0 flex-col lg:pl-72">
         <section

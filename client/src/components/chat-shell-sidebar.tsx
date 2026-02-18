@@ -28,6 +28,9 @@ const PROFILE_CARD_TINT_BY_RANK: Record<NonNullable<MemberProgressDTO["rank"]>, 
   SILBER: "rgba(100, 116, 139, 0.24)",
   GOLD: "rgba(161, 98, 7, 0.28)",
   PLATIN: "rgba(14, 116, 144, 0.24)",
+  DIAMANT: "rgba(37, 99, 235, 0.24)",
+  ONYX: "rgba(63, 63, 70, 0.24)",
+  TITAN: "rgba(124, 58, 237, 0.24)",
 };
 
 function profileCardGradient(member?: MemberProgressDTO): string | undefined {
@@ -118,7 +121,7 @@ function SidebarBody({
       <button
         type="button"
         onClick={onOpenProfileEditor}
-        className="glass-panel mt-2 flex items-center gap-3 rounded-xl p-3 text-left transition-[filter,background-color] hover:brightness-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+        className={`glass-panel mt-2 flex items-center gap-3 rounded-xl p-3 text-left transition-[filter,background-color] hover:brightness-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 ${memberHighlight ? "ppc-score-sidebar-pop" : ""}`}
         aria-label="Eigenes Profil öffnen"
         style={profileButtonGradient ? { backgroundImage: profileButtonGradient } : undefined}
       >

@@ -58,6 +58,7 @@ export function ProfileImageCropModal({
   const [panY, setPanY] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const cropSurfaceRef = useRef<HTMLDivElement>(null);
   const panXRef = useRef(0);
   const panYRef = useRef(0);
   const zoomRef = useRef(1);
@@ -92,6 +93,31 @@ export function ProfileImageCropModal({
   useEffect(() => {
     zoomRef.current = zoom;
   }, [zoom]);
+
+  function resetInteractionState(): void {
+    const surface = cropSurfaceRef.current;
+    const interaction = interactionRef.current;
+    for (const pointerId of interaction.pointers.keys()) {
+      if (!surface) continue;
+      try {
+        if (surface.hasPointerCapture(pointerId)) {
+          surface.releasePointerCapture(pointerId);
+        }
+      } catch {
+        // Safari may throw if pointer capture is unavailable or already released.
+      }
+    }
+
+    interaction.pointers.clear();
+    interaction.dragPointerId = null;
+    interaction.pinchStartDistance = null;
+  }
+
+  useEffect(() => {
+    return () => {
+      resetInteractionState();
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -141,7 +167,13 @@ export function ProfileImageCropModal({
     setError(null);
 
     const target = event.currentTarget;
-    target.setPointerCapture(event.pointerId);
+    if (event.pointerType !== "touch" && typeof target.setPointerCapture === "function") {
+      try {
+        target.setPointerCapture(event.pointerId);
+      } catch {
+        // Ignore capture errors on partially supported browsers.
+      }
+    }
 
     const interaction = interactionRef.current;
     interaction.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
@@ -194,8 +226,12 @@ export function ProfileImageCropModal({
     const interaction = interactionRef.current;
     interaction.pointers.delete(event.pointerId);
 
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Ignore release errors on browsers with inconsistent pointer capture behavior.
     }
 
     if (interaction.dragPointerId === event.pointerId) {
@@ -272,14 +308,20 @@ export function ProfileImageCropModal({
     const croppedFile = new File([blob], `${baseName}-cropped.png`, { type: "image/png" });
 
     try {
+      resetInteractionState();
       await onConfirm(croppedFile);
     } catch (confirmError) {
       setError(confirmError instanceof Error ? confirmError.message : "Das zugeschnittene Bild konnte nicht hochgeladen werden.");
     }
   }
 
+  function handleCancel(): void {
+    resetInteractionState();
+    onCancel();
+  }
+
   return (
-    <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-900/55 p-4" onClick={onCancel}>
+    <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-900/55 p-4" onClick={handleCancel}>
       <div
         className="w-full max-w-xl rounded-3xl border border-white/70 bg-white p-5 shadow-2xl"
         onClick={(event) => event.stopPropagation()}
@@ -294,6 +336,7 @@ export function ProfileImageCropModal({
 
         <div className="mx-auto w-[300px]">
           <div
+            ref={cropSurfaceRef}
             className="relative h-[300px] w-[300px] cursor-grab overflow-hidden rounded-full border-2 border-slate-200 bg-slate-100 shadow-inner active:cursor-grabbing"
             style={{ touchAction: "none" }}
             onPointerDown={handlePointerDown}
@@ -379,16 +422,15 @@ export function ProfileImageCropModal({
         <div className="mt-5 flex flex-wrap justify-end gap-2">
           <button
             type="button"
-            onClick={onCancel}
-            className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700"
-            disabled={busy}
+            onClick={handleCancel}
+            className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 [touch-action:manipulation]"
           >
             Abbrechen
           </button>
           <button
             type="button"
             onClick={() => void confirmCrop()}
-            className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white disabled:opacity-60"
+            className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white disabled:opacity-60 [touch-action:manipulation]"
             disabled={busy}
           >
             {busy ? "Wird hochgeladen…" : "Zuschneiden & hochladen"}

@@ -1,5 +1,5 @@
 export type ChatMessageType = "message" | "votingPoll" | "question" | "answer";
-export type MemberRank = "BRONZE" | "SILBER" | "GOLD" | "PLATIN";
+export type MemberRank = "BRONZE" | "SILBER" | "GOLD" | "PLATIN" | "DIAMANT" | "ONYX" | "TITAN";
 
 export interface MemberProgressDTO {
   brand: "PPC Score" | "PPC Member";
@@ -15,6 +15,8 @@ export type SseEventName =
   | "presence.updated"
   | "message.created"
   | "message.updated"
+  | "rank.up"
+  | "app.kill.updated"
   | "taste.updated"
   | "reaction.received"
   | "notification.created"
@@ -120,7 +122,8 @@ export type AdminActionType =
   | "delete_user"
   | "delete_message"
   | "set_user_score"
-  | "set_user_rank";
+  | "set_user_rank"
+  | "toggle_kill_all";
 
 export interface AdminOverviewRequest {
   clientId: string;
@@ -134,6 +137,13 @@ export interface AdminActionRequest extends AdminOverviewRequest {
   targetMessageId?: string;
   targetScore?: number;
   targetRank?: MemberRank;
+  killEnabled?: boolean;
+}
+
+export interface AppKillDTO {
+  enabled: boolean;
+  updatedAt: string | null;
+  updatedBy: string | null;
 }
 
 export interface AdminOverviewDTO {
@@ -142,6 +152,7 @@ export interface AdminOverviewDTO {
   messagesTotal: number;
   pollsTotal: number;
   blacklistTotal: number;
+  appKill: AppKillDTO;
 }
 
 export interface AdminActionResponse {
@@ -508,6 +519,7 @@ export interface SnapshotDTO {
   messages: MessageDTO[];
   aiStatus: AiStatusDTO;
   background: ChatBackgroundDTO;
+  appKill: AppKillDTO;
 }
 
 export interface SseEventPayloadMap {
@@ -515,6 +527,16 @@ export interface SseEventPayloadMap {
   "presence.updated": UserPresenceDTO;
   "message.created": MessageDTO;
   "message.updated": MessageDTO;
+  "rank.up": {
+    userId: string;
+    clientId: string;
+    username: string;
+    previousRank: MemberRank;
+    rank: MemberRank;
+    score: number;
+    createdAt: string;
+  };
+  "app.kill.updated": AppKillDTO;
   "taste.updated": {
     userId: string;
     updatedAt: string;
