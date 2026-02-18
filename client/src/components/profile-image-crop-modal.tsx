@@ -59,6 +59,8 @@ export function ProfileImageCropModal({
   const [error, setError] = useState<string | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cropSurfaceRef = useRef<HTMLDivElement>(null);
+  const touchActivationRef = useRef(false);
+  const touchActivationResetRef = useRef<number | null>(null);
   const panXRef = useRef(0);
   const panYRef = useRef(0);
   const zoomRef = useRef(1);
@@ -116,8 +118,35 @@ export function ProfileImageCropModal({
   useEffect(() => {
     return () => {
       resetInteractionState();
+      if (touchActivationResetRef.current !== null) {
+        window.clearTimeout(touchActivationResetRef.current);
+        touchActivationResetRef.current = null;
+      }
     };
   }, []);
+
+  function markTouchActivation(): void {
+    touchActivationRef.current = true;
+    if (touchActivationResetRef.current !== null) {
+      window.clearTimeout(touchActivationResetRef.current);
+    }
+    touchActivationResetRef.current = window.setTimeout(() => {
+      touchActivationRef.current = false;
+      touchActivationResetRef.current = null;
+    }, 400);
+  }
+
+  function shouldIgnoreClickAfterTouch(): boolean {
+    if (!touchActivationRef.current) {
+      return false;
+    }
+    touchActivationRef.current = false;
+    if (touchActivationResetRef.current !== null) {
+      window.clearTimeout(touchActivationResetRef.current);
+      touchActivationResetRef.current = null;
+    }
+    return true;
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -320,11 +349,36 @@ export function ProfileImageCropModal({
     onCancel();
   }
 
+  function handleCancelTouch(event: ReactPointerEvent<HTMLElement>): void {
+    if (event.pointerType !== "touch") return;
+    event.preventDefault();
+    event.stopPropagation();
+    markTouchActivation();
+    handleCancel();
+  }
+
+  function handleConfirmTouch(event: ReactPointerEvent<HTMLButtonElement>): void {
+    if (event.pointerType !== "touch") return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (busy) return;
+    markTouchActivation();
+    void confirmCrop();
+  }
+
   return (
-    <div className="fixed inset-0 z-[80] grid place-items-center bg-slate-900/55 p-4" onClick={handleCancel}>
+    <div
+      className="fixed inset-0 z-[80] grid place-items-center bg-slate-900/55 p-4"
+      onClick={() => {
+        if (shouldIgnoreClickAfterTouch()) return;
+        handleCancel();
+      }}
+      onPointerUp={handleCancelTouch}
+    >
       <div
         className="w-full max-w-xl rounded-3xl border border-white/70 bg-white p-5 shadow-2xl"
         onClick={(event) => event.stopPropagation()}
+        onPointerUp={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label="Profilbild zuschneiden"
@@ -422,14 +476,22 @@ export function ProfileImageCropModal({
         <div className="mt-5 flex flex-wrap justify-end gap-2">
           <button
             type="button"
-            onClick={handleCancel}
+            onClick={() => {
+              if (shouldIgnoreClickAfterTouch()) return;
+              handleCancel();
+            }}
+            onPointerUp={handleCancelTouch}
             className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 [touch-action:manipulation]"
           >
             Abbrechen
           </button>
           <button
             type="button"
-            onClick={() => void confirmCrop()}
+            onClick={() => {
+              if (shouldIgnoreClickAfterTouch()) return;
+              void confirmCrop();
+            }}
+            onPointerUp={handleConfirmTouch}
             className="h-10 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white disabled:opacity-60 [touch-action:manipulation]"
             disabled={busy}
           >
