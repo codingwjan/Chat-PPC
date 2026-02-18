@@ -1,98 +1,80 @@
-# ------------------------------
-# Dependencies / package managers
-# ------------------------------
+# OS noise
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Icon
+*.icloud
+
+# Editor/IDE
+.idea/
+.vscode/
+.vscode-test/
+*.swp
+*.swo
+*~
+
+# Local agent/config helpers
+.agents/
+
+# Dependencies
 node_modules/
-**/node_modules/
-.pnpm-store/
+.pnp
+.pnp.js
+
+# Package manager caches
 .npm/
-.yarn/
+.pnpm-store/
 .yarn/cache/
 .yarn/unplugged/
 .yarn/build-state.yml
 .yarn/install-state.gz
 
-# ------------------------------
-# Build outputs
-# ------------------------------
-.next/
-out/
-dist/
-build/
-coverage/
-.nyc_output/
-.turbo/
-.vercel/
-.cache/
-.parcel-cache/
-*.tsbuildinfo
-vite.svg
-
-# Legacy client artifacts
-client/legacy-cra/node_modules-old/
-client/legacy-cra/build-old/
-
-# ------------------------------
-# Environment and local secrets
-# ------------------------------
-.env
-.env.*
-**/.env
-**/.env.*
-
-# Keep committed env templates
-!.env.example
-!.env.*.example
-!**/.env.example
-!**/.env.*.example
-
-# ------------------------------
-# Logs and runtime files
-# ------------------------------
+# Logs and runtime artifacts
 logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-lerna-debug.log*
+.pnpm-debug.log*
 *.pid
 *.pid.lock
 *.seed
-*.stackdump
 
-# ------------------------------
-# Test reports / tooling
-# ------------------------------
-playwright-report/
-test-results/
+# Environment and secrets
+.env
+.env.*
+!.env.example
+!.env*.example
+
+# Test artifacts
+coverage/
+.nyc_output/
 *.lcov
 
-# ------------------------------
-# Databases / local state
-# ------------------------------
-**/prisma/dev.db
-**/prisma/dev.db-journal
+# Build outputs and caches
+.next/
+out/
+build/
+dist/
+.turbo/
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
 
-# ------------------------------
-# Editor / IDE
-# ------------------------------
-.idea/
-.vscode/
-*.suo
-*.ntvs*
-*.njsproj
-*.sln
-*.swp
-*.swo
-*~
+# TypeScript/Next generated files
+*.tsbuildinfo
+next-env.d.ts
 
-# ------------------------------
-# OS files
-# ------------------------------
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-Thumbs.db
-Desktop.ini
+# Vercel
+.vercel/
+
+# Prisma local DB (if used locally)
+prisma/dev.db*
+**/prisma/dev.db*
+
+# Misc generated files
+*.pem
+*.tgz

@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "User"
+  ADD COLUMN "ppcMemberScoreRaw" DOUBLE PRECISION NOT NULL DEFAULT 0,
+  ADD COLUMN "ppcMemberLastActiveAt" TIMESTAMP(3);

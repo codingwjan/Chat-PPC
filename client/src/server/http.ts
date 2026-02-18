@@ -10,5 +10,5 @@ export function handleApiError(error: unknown): NextResponse {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 
-  return NextResponse.json({ error: "Internal server error" }, { status: 500 });
+  return NextResponse.json({ error: "Interner Serverfehler" }, { status: 500 });
 }

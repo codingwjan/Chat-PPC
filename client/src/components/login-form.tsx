@@ -1,214 +1,215 @@
 "use client";
-/* eslint-disable @next/next/no-img-element */
 
-import { FormEvent, useRef, useState } from "react";
+import Link from "next/link";
+import { FormEvent, KeyboardEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { AuthWhatsNewPanel } from "@/components/auth-whats-new";
 import { apiJson } from "@/lib/http";
-import { getDefaultProfilePicture, saveSession } from "@/lib/session";
-import type { LoginRequest, UserPresenceDTO } from "@/lib/types";
+import { clearSession, getDefaultProfilePicture, loadSession, saveSession, type SessionState } from "@/lib/session";
+import type { AuthSessionDTO, AuthSignInRequest } from "@/lib/types";
 
-interface UploadResponse {
-  url: string;
-}
-
-function createClientId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-
-  return `${Date.now()}-${Math.floor(Math.random() * 1_000_000)}`;
-}
-
-async function uploadProfileImage(file: File): Promise<string> {
-  const formData = new FormData();
-  formData.set("file", file);
-
-  const response = await fetch("/api/uploads/profile", {
-    method: "POST",
-    body: formData,
+async function clearAuthSessionCookie(): Promise<void> {
+  await fetch("/api/auth/session", { method: "DELETE" }).catch(() => {
+    // Best effort.
   });
+}
 
-  if (!response.ok) {
-    const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error || "Upload failed");
-  }
-
-  const payload = (await response.json()) as UploadResponse;
-  return payload.url;
+function toSessionState(session: AuthSessionDTO): SessionState {
+  return {
+    id: session.id,
+    clientId: session.clientId,
+    loginName: session.loginName,
+    username: session.username,
+    profilePicture: session.profilePicture,
+    sessionToken: session.sessionToken,
+    sessionExpiresAt: session.sessionExpiresAt,
+    devMode: session.devMode,
+    devAuthToken: session.devAuthToken,
+  };
 }
 
 export function LoginForm() {
   const router = useRouter();
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const [username, setUsername] = useState("");
-  const [profilePicture, setProfilePicture] = useState("");
-  const [uploading, setUploading] = useState(false);
+  const [loginName, setLoginName] = useState("");
+  const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function onSubmit(event: FormEvent) {
-    event.preventDefault();
+  useEffect(() => {
+    let cancelled = false;
 
-    const trimmed = username.trim();
-    if (trimmed.length < 3) {
-      setError("Username must be at least 3 characters.");
-      return;
-    }
-
-    const avatarCandidate = profilePicture.trim();
-    if (avatarCandidate) {
-      try {
-        new URL(avatarCandidate);
-      } catch {
-        setError("Profile picture must be a valid URL.");
+    const bootstrap = async () => {
+      const storedSession = loadSession();
+      if (!storedSession || !storedSession.sessionToken) {
+        if (storedSession && !storedSession.sessionToken) {
+          clearSession();
+        }
+        await clearAuthSessionCookie();
         return;
       }
+
+      try {
+        const restored = await apiJson<AuthSessionDTO>("/api/auth/login", {
+          method: "POST",
+          body: JSON.stringify({
+            clientId: storedSession.clientId,
+            sessionToken: storedSession.sessionToken,
+          }),
+        });
+        if (cancelled) return;
+
+        saveSession(toSessionState(restored));
+        router.replace("/chat");
+      } catch {
+        if (cancelled) return;
+        clearSession();
+        await clearAuthSessionCookie();
+      }
+    };
+
+    void bootstrap();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
+  async function submitSignin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const normalizedLogin = loginName.trim().toLowerCase();
+    if (!normalizedLogin) {
+      setError("Bitte einen Login-Namen eingeben.");
+      return;
+    }
+    if (password.trim().length < 8) {
+      setError("Das Passwort muss mindestens 8 Zeichen haben.");
+      return;
     }
 
     setLoading(true);
     setError(null);
 
     try {
-      const payload: LoginRequest = {
-        username: trimmed,
-        clientId: createClientId(),
-        profilePicture: avatarCandidate || getDefaultProfilePicture(),
+      const payload: AuthSignInRequest = {
+        loginName: normalizedLogin,
+        password,
       };
 
-      const user = await apiJson<UserPresenceDTO>("/api/auth/login", {
+      const session = await apiJson<AuthSessionDTO>("/api/auth/signin", {
         method: "POST",
         body: JSON.stringify(payload),
       });
 
       saveSession({
-        clientId: user.clientId,
-        username: user.username,
-        profilePicture: user.profilePicture,
+        ...toSessionState(session),
+        profilePicture: session.profilePicture || getDefaultProfilePicture(),
       });
 
       router.push("/chat");
     } catch (submitError) {
-      setError(submitError instanceof Error ? submitError.message : "Login failed");
+      setError(submitError instanceof Error ? submitError.message : "Anmeldung fehlgeschlagen");
     } finally {
       setLoading(false);
     }
   }
 
-  async function onUploadChange(file: File | undefined) {
-    if (!file) return;
-
-    setUploading(true);
-    setError(null);
-
-    try {
-      const url = await uploadProfileImage(file);
-      setProfilePicture(url);
-    } catch (uploadError) {
-      setError(uploadError instanceof Error ? uploadError.message : "Upload failed");
-    } finally {
-      setUploading(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
-    }
+  function onKeyDown(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+    event.preventDefault();
+    if (loading) return;
+    event.currentTarget.form?.requestSubmit();
   }
 
   return (
-    <main className="h-[100dvh] w-screen overflow-y-auto bg-[radial-gradient(circle_at_top_left,_#dbeafe_0%,_#f8fafc_40%,_#eef2ff_100%)] px-4 py-6 sm:px-6 [padding-bottom:calc(env(safe-area-inset-bottom)+1rem)]">
-      <div className="mx-auto flex min-h-full max-w-4xl items-center">
-        <section className="grid w-full overflow-hidden rounded-3xl border border-white/70 bg-white/70 shadow-2xl backdrop-blur md:grid-cols-[1.1fr_1fr]">
-          <div className="bg-slate-900 p-8 text-white md:p-10">
-            <p className="mb-3 inline-flex rounded-full bg-white/10 px-3 py-1 text-xs font-semibold tracking-wide">
-              Chat PPC
-            </p>
-            <h1 className="text-3xl font-bold leading-tight">Jump into your group chat in seconds.</h1>
-            <p className="mt-4 text-sm text-slate-200">
-              Fast realtime chat, polls, questions, and fun social vibes built for small groups.
-            </p>
-            <div className="mt-8 rounded-2xl border border-white/15 bg-white/5 p-4 text-xs text-slate-200">
-              Tip: You can upload an avatar or paste an image URL.
+    <main className="brand-surface relative min-h-[100svh] overflow-hidden [font-family:var(--brand-font)]">
+      <div className="pointer-events-none absolute inset-0">
+        <div className="absolute -left-20 -top-24 h-72 w-72 rounded-full bg-cyan-200/45 blur-3xl" />
+        <div className="absolute right-[-120px] top-[28%] h-80 w-80 rounded-full bg-amber-200/45 blur-3xl" />
+        <div className="absolute bottom-[-160px] left-[35%] h-96 w-96 rounded-full bg-sky-200/35 blur-3xl" />
+      </div>
+
+      <div className="relative mx-auto grid min-h-[100svh] w-full max-w-6xl gap-6 px-4 py-6 sm:px-6 lg:grid-cols-[1fr_1.25fr] lg:items-center lg:py-10">
+        <AuthWhatsNewPanel />
+
+        <section className="glass-panel-strong rounded-3xl p-6 sm:p-8 lg:p-10">
+          <nav className="mb-4 flex flex-wrap gap-2" aria-label="Auth-Modus">
+            <Link
+              href="/login"
+              className="inline-flex h-10 items-center rounded-full border border-slate-900 bg-slate-900 px-4 text-sm font-semibold text-white"
+            >
+              Einloggen
+            </Link>
+            <Link
+              href="/signup"
+              className="inline-flex h-10 items-center rounded-full border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+            >
+              Account erstellen
+            </Link>
+          </nav>
+          <div className="inline-flex rounded-full border border-slate-200 bg-white px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">
+            Login
+          </div>
+          <h1 className="mt-4 text-[clamp(1.7rem,3vw,2.4rem)] font-semibold leading-tight text-slate-900">Willkommen zurück</h1>
+          <p className="mt-2 text-sm text-slate-600 sm:text-base">Mit deinem Login-Namen und Passwort bist du direkt wieder im Chat.</p>
+
+          <form className="mt-6 space-y-5" onSubmit={submitSignin}>
+            <div>
+              <label htmlFor="loginName" className="block text-sm font-medium text-slate-900">Login-Name</label>
+              <input
+                id="loginName"
+                type="text"
+                name="username"
+                autoComplete="username"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                value={loginName}
+                onChange={(event) => setLoginName(event.target.value)}
+                onKeyDown={onKeyDown}
+                placeholder="z. B. vorname.nachname"
+                className="mt-1.5 block h-12 w-full rounded-xl border border-slate-300/80 bg-white/90 px-3 text-base text-slate-900 outline-none ring-sky-300 transition focus-visible:ring-2"
+                required
+              />
             </div>
-          </div>
 
-          <div className="p-6 sm:p-8 md:p-10">
-            <h2 className="text-2xl font-bold text-slate-900 text-balance">Sign in</h2>
-            <p className="mt-1 text-sm text-slate-500">Pick a name and start chatting.</p>
+            <div>
+              <label htmlFor="password" className="block text-sm font-medium text-slate-900">Passwort</label>
+              <input
+                id="password"
+                type="password"
+                name="password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                onKeyDown={onKeyDown}
+                className="mt-1.5 block h-12 w-full rounded-xl border border-slate-300/80 bg-white/90 px-3 text-base text-slate-900 outline-none ring-sky-300 transition focus-visible:ring-2"
+                required
+              />
+              <p className="mt-1.5 text-xs font-medium text-sky-700">Tipp: Im Passwortmanager speichern, dann bleibst du dauerhaft schnell drin.</p>
+            </div>
 
-            <form className="mt-6 space-y-4" onSubmit={onSubmit}>
-              <label className="block text-sm font-medium text-slate-700">
-                Username
-                <input
-                  className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm transition focus:border-sky-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                  type="text"
-                  placeholder="e.g. jan_the_builder…"
-                  name="username"
-                  autoComplete="username"
-                  spellCheck={false}
-                  value={username}
-                  onChange={(event) => setUsername(event.target.value)}
-                />
-              </label>
-
-              <label className="block text-sm font-medium text-slate-700">
-                Profile picture URL (optional)
-                <input
-                  className="mt-1 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm transition focus:border-sky-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-                  type="url"
-                  placeholder="https://…"
-                  name="profile_picture"
-                  autoComplete="off"
-                  value={profilePicture}
-                  onChange={(event) => setProfilePicture(event.target.value)}
-                />
-              </label>
-
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  className="h-10 rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition hover:border-sky-300 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50"
-                  onClick={() => fileInputRef.current?.click()}
-                  disabled={uploading}
-                >
-                  {uploading ? "Uploading…" : "Upload Image"}
-                </button>
-                <input
-                  ref={fileInputRef}
-                  className="hidden"
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif"
-                  onChange={(event) => void onUploadChange(event.target.files?.[0])}
-                />
-                <div className="text-xs text-slate-500">Max 4MB</div>
+            {error ? (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700" aria-live="polite">
+                {error}
               </div>
+            ) : null}
 
-              <div className="flex items-center gap-3">
-                <img
-                  src={profilePicture || getDefaultProfilePicture()}
-                  alt="Avatar preview"
-                  className="h-12 w-12 rounded-full border border-slate-200 object-cover"
-                  width={48}
-                  height={48}
-                  loading="lazy"
-                />
-                <p className="text-xs text-slate-500">Avatar preview</p>
-              </div>
+            <button
+              className="flex h-11 w-full items-center justify-center rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white shadow-[0_10px_24px_rgba(15,23,42,0.25)] hover:bg-slate-800 disabled:opacity-70"
+              type="submit"
+              disabled={loading}
+            >
+              {loading ? "Bitte warten..." : "Anmelden"}
+            </button>
+          </form>
 
-              {error ? (
-                <div className="rounded-xl bg-rose-50 px-3 py-2 text-sm text-rose-600" aria-live="polite">
-                  {error}
-                </div>
-              ) : null}
-
-              <button
-                className="h-11 w-full rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-70"
-                type="submit"
-                disabled={loading || uploading}
-              >
-                {loading ? "Joining…" : "Enter Chat"}
-              </button>
-            </form>
-          </div>
+          <p className="mt-5 text-sm text-slate-600">
+            Noch kein Konto?{" "}
+            <Link className="font-semibold text-sky-700 hover:text-sky-800" href="/signup">
+              Zur Registrierung
+            </Link>
+          </p>
         </section>
       </div>
     </main>

@@ -7,7 +7,11 @@ loadEnv({ path: ".env" });
 loadEnv({ path: ".env.local" });
 
 const connectionString =
-  process.env.DATABASE_URL || "postgresql://postgres:postgres@localhost:5432/chat_ppc?schema=public";
+  process.env.DATABASE_URL ||
+  process.env.POSTGRES_PRISMA_URL ||
+  process.env.POSTGRES_URL ||
+  process.env.STORAGE_URL ||
+  "postgresql://postgres:postgres@localhost:5432/chat_ppc?schema=public";
 
 const globalForPrisma = globalThis as unknown as {
   prisma?: PrismaClient;

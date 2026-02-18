@@ -1,13 +1,38 @@
 import { NextResponse } from "next/server";
 import { parseCreateMessageRequest } from "@/server/contracts";
 import { createMessage, getMessages } from "@/server/chat-service";
+import { AppError } from "@/server/errors";
 import { handleApiError } from "@/server/http";
 
 export const runtime = "nodejs";
 
-export async function GET(): Promise<NextResponse> {
+function parseLimit(raw: string | null): number | undefined {
+  if (!raw) return undefined;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
+function parseDate(raw: string | null): Date | undefined {
+  if (!raw) return undefined;
+  const parsed = new Date(raw);
+  if (Number.isNaN(parsed.getTime())) {
+    return undefined;
+  }
+  return parsed;
+}
+
+export async function GET(request: Request): Promise<NextResponse> {
   try {
-    const messages = await getMessages();
+    const { searchParams } = new URL(request.url);
+    const limit = parseLimit(searchParams.get("limit"));
+    const before = parseDate(searchParams.get("before"));
+    const after = parseDate(searchParams.get("after"));
+    const viewerClientId = searchParams.get("clientId") || undefined;
+    if (before && after) {
+      throw new AppError("Verwende entweder before oder after, nicht beides", 400);
+    }
+
+    const messages = await getMessages({ limit, before, after, viewerClientId });
     return NextResponse.json(messages);
   } catch (error) {
     return handleApiError(error);

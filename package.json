@@ -11,5 +11,18 @@
     "typecheck": "pnpm -C client typecheck",
     "test": "pnpm -C client test",
     "import:legacy": "pnpm -C client import:legacy"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@prisma/engines",
+      "prisma",
+      "esbuild",
+      "sharp",
+      "unrs-resolver"
+    ],
+    "ignoredBuiltDependencies": [
+      "sharp",
+      "unrs-resolver"
+    ]
   }
 }

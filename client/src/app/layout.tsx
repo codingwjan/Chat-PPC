@@ -1,21 +1,98 @@
 import type { Metadata } from "next";
-import { IBM_Plex_Sans, Space_Grotesk } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
+import { JetBrains_Mono, Space_Grotesk } from "next/font/google";
 import "./globals.css";
 
-const headingFont = Space_Grotesk({
+const APP_NAME = "Chat-PPC";
+const APP_DESCRIPTION =
+  "Echtzeit-Gruppenchat mit Umfragen, Threads und KI-gestützten Antworten.";
+
+const brandSans = Space_Grotesk({
   subsets: ["latin"],
-  variable: "--font-heading",
+  variable: "--font-brand-sans",
+  display: "swap",
 });
 
-const bodyFont = IBM_Plex_Sans({
+const brandMono = JetBrains_Mono({
   subsets: ["latin"],
-  variable: "--font-body",
-  weight: ["400", "500", "600", "700"],
+  variable: "--font-brand-mono",
+  display: "swap",
 });
+
+function resolveMetadataBase() {
+  const raw =
+    process.env.NEXT_PUBLIC_SITE_URL ?? process.env.VERCEL_PROJECT_PRODUCTION_URL;
+
+  if (!raw) {
+    return undefined;
+  }
+
+  const normalized = raw.startsWith("http") ? raw : `https://${raw}`;
+
+  try {
+    return new URL(normalized);
+  } catch {
+    return undefined;
+  }
+}
 
 export const metadata: Metadata = {
-  title: "Chat PPC",
-  description: "Modernized Chat PPC with Next.js, Tailwind, and PostgreSQL",
+  metadataBase: resolveMetadataBase(),
+  title: {
+    default: APP_NAME,
+    template: `%s | ${APP_NAME}`,
+  },
+  description: APP_DESCRIPTION,
+  keywords: [
+    "chat",
+    "gruppenchat",
+    "echtzeit nachrichten",
+    "umfragen",
+    "ki chat",
+    "Chat-PPC",
+  ],
+  applicationName: APP_NAME,
+  alternates: {
+    canonical: "/",
+  },
+  robots: {
+    index: true,
+    follow: true,
+  },
+  themeColor: "#18181b",
+  manifest: "/manifest.webmanifest",
+  icons: {
+    icon: [
+      { url: "/favicon-32x32.png", type: "image/png", sizes: "32x32" },
+      { url: "/favicon-16x16.png", type: "image/png", sizes: "16x16" },
+      { url: "/icon-192.png", type: "image/png", sizes: "192x192" },
+      { url: "/icon-512.png", type: "image/png", sizes: "512x512" },
+      { url: "/favicon.ico" },
+    ],
+    apple: [{ url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" }],
+    shortcut: ["/favicon.ico"],
+  },
+  openGraph: {
+    type: "website",
+    siteName: APP_NAME,
+    url: "/",
+    title: APP_NAME,
+    description: APP_DESCRIPTION,
+    images: [
+      {
+        url: "/social-image.png",
+        width: 1200,
+        height: 630,
+        alt: `${APP_NAME} Vorschau`,
+      },
+    ],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: APP_NAME,
+    description: APP_DESCRIPTION,
+    images: ["/social-image.png"],
+  },
 };
 
 export default function RootLayout({
@@ -24,8 +101,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${headingFont.variable} ${bodyFont.variable} antialiased`}>{children}</body>
+    <html lang="de">
+      <body className={`${brandSans.variable} ${brandMono.variable} antialiased`}>
+        {children}
+        <Analytics />
+      </body>
     </html>
   );
 }
