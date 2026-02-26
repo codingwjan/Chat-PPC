@@ -10,7 +10,6 @@ import {
   useState,
   type CSSProperties,
   type ImgHTMLAttributes,
-  type SyntheticEvent,
 } from "react";
 import { MemberProgressInline } from "@/components/member-progress-inline";
 import { getDefaultProfilePicture } from "@/lib/default-avatar";
@@ -36,10 +35,8 @@ interface ChatMessageProps {
 }
 
 const IMAGE_URL_REGEX = /\.(jpeg|jpg|gif|png|webp|svg)(\?.*)?$/i;
-const DEFAULT_INLINE_IMAGE_ASPECT_RATIO = 4 / 3;
 const previewCache = new Map<string, LinkPreviewDTO | null>();
 const pendingPreviewRequests = new Map<string, Promise<LinkPreviewDTO | null>>();
-const imageAspectRatioCache = new Map<string, number>();
 const DEFAULT_PROFILE_PICTURE = getDefaultProfilePicture();
 const REACTION_OPTIONS: Array<{ reaction: ReactionType; emoji: string; label: string }> = [
   { reaction: "LIKE", emoji: "❤️", label: "Like" },
@@ -389,20 +386,6 @@ function InlineSharedImage({
   onOpenLightbox,
   onRemixImage,
 }: InlineSharedImageProps) {
-  const [aspectRatio, setAspectRatio] = useState<number>(() => {
-    const cached = imageAspectRatioCache.get(src);
-    return cached && Number.isFinite(cached) && cached > 0 ? cached : DEFAULT_INLINE_IMAGE_ASPECT_RATIO;
-  });
-
-  const handleImageLoad = useCallback((event: SyntheticEvent<HTMLImageElement>) => {
-    const element = event.currentTarget;
-    if (!element.naturalWidth || !element.naturalHeight) return;
-    const measuredRatio = element.naturalWidth / element.naturalHeight;
-    if (!Number.isFinite(measuredRatio) || measuredRatio <= 0) return;
-    imageAspectRatioCache.set(src, measuredRatio);
-    setAspectRatio((current) => (Math.abs(current - measuredRatio) < 0.01 ? current : measuredRatio));
-  }, [src]);
-
   return (
     <span className="my-3 inline-flex w-full max-w-full flex-col items-start gap-1">
       <button
@@ -413,11 +396,9 @@ function InlineSharedImage({
         <LazyImage
           src={src}
           alt={alt}
-          frameClassName="w-full rounded-2xl border border-slate-200 bg-slate-200/70 shadow-sm"
-          frameStyle={{ aspectRatio }}
+          frameClassName="aspect-square w-full rounded-2xl border border-slate-200 bg-slate-200/70 shadow-sm"
           imageClassName="h-full w-full rounded-2xl object-cover transition hover:shadow-md"
           pulseClassName="bg-slate-300/80"
-          onLoad={handleImageLoad}
         />
       </button>
       {onRemixImage ? (
