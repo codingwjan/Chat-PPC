@@ -3,7 +3,13 @@
 
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { Bars3Icon } from "@heroicons/react/24/outline";
+import {
+  ArrowDownTrayIcon,
+  Bars3Icon,
+  ClipboardDocumentIcon,
+  ShareIcon,
+  XMarkIcon,
+} from "@heroicons/react/24/outline";
 import {
   memo,
   useCallback,
@@ -1003,6 +1009,8 @@ export function ChatApp() {
   const [pendingDeliveries, setPendingDeliveries] = useState<Record<string, true>>({});
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
   const [lightboxCopyState, setLightboxCopyState] = useState<LightboxCopyState>("idle");
+  const [lightboxControlsVisible, setLightboxControlsVisible] = useState(true);
+  const [lightboxSupportsHover, setLightboxSupportsHover] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTargetState | null>(null);
 
   const [messageDraft, setMessageDraft] = useState("");
@@ -3246,8 +3254,21 @@ export function ChatApp() {
 
   const handleOpenLightbox = useCallback((url: string, alt?: string) => {
     window.requestAnimationFrame(() => {
+      setLightboxControlsVisible(true);
       setLightbox({ url, alt: alt || "Bildvorschau" });
     });
+  }, []);
+
+  const revealLightboxControls = useCallback(() => {
+    setLightboxControlsVisible(true);
+  }, []);
+
+  const hideLightboxControls = useCallback(() => {
+    setLightboxControlsVisible(false);
+  }, []);
+
+  const toggleLightboxControls = useCallback(() => {
+    setLightboxControlsVisible((current) => !current);
   }, []);
 
   const handleRemixImage = useCallback(
@@ -3411,7 +3432,29 @@ export function ChatApp() {
   }, []);
 
   useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const hoverMediaQuery = window.matchMedia("(hover: hover) and (pointer: fine)");
+    const syncLightboxHoverSupport = () => {
+      setLightboxSupportsHover(hoverMediaQuery.matches);
+    };
+    syncLightboxHoverSupport();
+
+    if (typeof hoverMediaQuery.addEventListener === "function") {
+      hoverMediaQuery.addEventListener("change", syncLightboxHoverSupport);
+      return () => {
+        hoverMediaQuery.removeEventListener("change", syncLightboxHoverSupport);
+      };
+    }
+
+    hoverMediaQuery.addListener(syncLightboxHoverSupport);
+    return () => {
+      hoverMediaQuery.removeListener(syncLightboxHoverSupport);
+    };
+  }, []);
+
+  useEffect(() => {
     setLightboxCopyState("idle");
+    setLightboxControlsVisible(true);
     if (lightboxCopyResetTimeoutRef.current !== null) {
       window.clearTimeout(lightboxCopyResetTimeoutRef.current);
       lightboxCopyResetTimeoutRef.current = null;
@@ -4650,25 +4693,32 @@ export function ChatApp() {
               className="relative max-h-[92vh] max-w-[92vw] pointer-events-auto"
               onClick={(event) => event.stopPropagation()}
               onPointerDown={(event) => event.stopPropagation()}
+              onMouseEnter={lightboxSupportsHover ? revealLightboxControls : undefined}
+              onMouseMove={lightboxSupportsHover ? revealLightboxControls : undefined}
+              onMouseLeave={lightboxSupportsHover ? hideLightboxControls : undefined}
               role="dialog"
               aria-modal="true"
               aria-label="Bildansicht"
             >
               <div
-                className="absolute left-2 right-2 top-2 z-10 flex flex-wrap items-center justify-end gap-2 pointer-events-auto"
+                className={`absolute left-2 right-2 top-2 z-10 flex flex-wrap items-center justify-end gap-2 pointer-events-auto transition-opacity duration-200 ${
+                  lightboxControlsVisible ? "opacity-100" : "pointer-events-none opacity-0"
+                }`}
                 onPointerDown={(event) => event.stopPropagation()}
+                aria-hidden={!lightboxControlsVisible}
               >
                 <button
                   type="button"
                   onClick={() => void shareLightboxImage()}
-                  className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white backdrop-blur-sm"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-full bg-black/65 px-3 text-xs font-semibold text-white backdrop-blur-sm"
                 >
+                  <ShareIcon aria-hidden="true" className="size-4" />
                   Teilen
                 </button>
                 <button
                   type="button"
                   onClick={() => void copyLightboxImage()}
-                  className={`h-9 rounded-full px-3 text-xs font-semibold text-white backdrop-blur-sm ${
+                  className={`inline-flex h-9 items-center gap-1.5 rounded-full px-3 text-xs font-semibold text-white backdrop-blur-sm ${
                     lightboxCopyState === "success"
                       ? "bg-emerald-600/90"
                       : lightboxCopyState === "link"
@@ -4678,6 +4728,7 @@ export function ChatApp() {
                         : "bg-black/65"
                   }`}
                 >
+                  <ClipboardDocumentIcon aria-hidden="true" className="size-4" />
                   {lightboxCopyState === "success"
                     ? "Bild kopiert"
                     : lightboxCopyState === "link"
@@ -4689,15 +4740,17 @@ export function ChatApp() {
                 <button
                   type="button"
                   onClick={downloadLightboxImage}
-                  className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white backdrop-blur-sm"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-full bg-black/65 px-3 text-xs font-semibold text-white backdrop-blur-sm"
                 >
+                  <ArrowDownTrayIcon aria-hidden="true" className="size-4" />
                   Herunterladen
                 </button>
                 <button
                   type="button"
                   onClick={() => setLightbox(null)}
-                  className="h-9 rounded-full bg-black/65 px-3 text-xs font-semibold text-white backdrop-blur-sm"
+                  className="inline-flex h-9 items-center gap-1.5 rounded-full bg-black/65 px-3 text-xs font-semibold text-white backdrop-blur-sm"
                 >
+                  <XMarkIcon aria-hidden="true" className="size-4" />
                   Schließen
                 </button>
               </div>
@@ -4706,6 +4759,12 @@ export function ChatApp() {
                 alt={lightbox.alt}
                 decoding="async"
                 className="max-h-[92vh] max-w-[92vw] rounded-2xl object-contain shadow-2xl"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (!lightboxSupportsHover) {
+                    toggleLightboxControls();
+                  }
+                }}
               />
             </div>
           </div>,
