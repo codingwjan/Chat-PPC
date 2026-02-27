@@ -5,6 +5,7 @@ loadEnv({ path: ".env" });
 loadEnv({ path: ".env.local" });
 
 const databaseUrl =
+  process.env.DATABASE_URL_UNPOOLED ||
   process.env.DATABASE_URL ||
   process.env.POSTGRES_PRISMA_URL ||
   process.env.POSTGRES_URL ||
@@ -12,7 +13,7 @@ const databaseUrl =
 
 if (!databaseUrl) {
   throw new Error(
-    "Missing database connection string. Set DATABASE_URL (preferred) or POSTGRES_PRISMA_URL / POSTGRES_URL.",
+    "Missing database connection string. Set DATABASE_URL_UNPOOLED (preferred for migrations) or DATABASE_URL / POSTGRES_PRISMA_URL / POSTGRES_URL.",
   );
 }
 

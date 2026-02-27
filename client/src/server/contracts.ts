@@ -5,7 +5,9 @@ import type {
   AdminOverviewRequest,
   AuthSignInRequest,
   AuthSignUpRequest,
+  CreateBotRequest,
   CreateMessageRequest,
+  DeleteBotRequest,
   ExtendPollRequest,
   LoginRequest,
   MarkNotificationsReadRequest,
@@ -13,6 +15,7 @@ import type {
   ReactMessageRequest,
   RenameUserRequest,
   TypingRequest,
+  UpdateBotRequest,
   UpdateChatBackgroundRequest,
   UpdateOwnAccountRequest,
   VotePollRequest,
@@ -237,6 +240,50 @@ const publicUserProfileQuerySchema = z.object({
   targetClientId: text("targetClientId"),
 });
 
+const botManagerQuerySchema = z.object({
+  clientId: text("clientId"),
+});
+
+const botBaseSchema = z.object({
+  clientId: text("clientId"),
+  displayName: text("displayName").min(2, "displayName muss mindestens 2 Zeichen lang sein").max(40, "displayName darf höchstens 40 Zeichen lang sein"),
+  profilePicture: profilePictureUrl("profilePicture").optional(),
+  mentionHandle: text("mentionHandle")
+    .transform((value) => value.replace(/^@+/, "").toLowerCase())
+    .refine((value) => /^[a-z0-9-]{3,24}$/.test(value), {
+      message: "mentionHandle muss 3-24 Zeichen haben (a-z, 0-9, -)",
+    }),
+  languagePreference: z.enum(["de", "en", "all"]).optional(),
+  instructions: text("instructions")
+    .min(1, "instructions ist erforderlich")
+    .max(1000, "instructions darf höchstens 1000 Zeichen lang sein"),
+  catchphrases: z
+    .array(
+      z.string().trim().min(1, "catchphrases[] darf nicht leer sein").max(240, "catchphrases[] darf höchstens 240 Zeichen lang sein"),
+    )
+    .max(8, "catchphrases unterstützt maximal 8 Einträge"),
+  autonomousEnabled: z.boolean().optional(),
+  autonomousMinIntervalMinutes: z.coerce.number().int().min(5, "autonomousMinIntervalMinutes muss mindestens 5 sein").max(1440, "autonomousMinIntervalMinutes darf höchstens 1440 sein").optional(),
+  autonomousMaxIntervalMinutes: z.coerce.number().int().min(5, "autonomousMaxIntervalMinutes muss mindestens 5 sein").max(1440, "autonomousMaxIntervalMinutes darf höchstens 1440 sein").optional(),
+  autonomousPrompt: z.string().trim().max(280, "autonomousPrompt darf höchstens 280 Zeichen lang sein").optional(),
+}).superRefine((value, ctx) => {
+  const min = value.autonomousMinIntervalMinutes;
+  const max = value.autonomousMaxIntervalMinutes;
+  if (typeof min === "number" && typeof max === "number" && max < min) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "autonomousMaxIntervalMinutes muss mindestens so groß wie autonomousMinIntervalMinutes sein",
+      path: ["autonomousMaxIntervalMinutes"],
+    });
+  }
+});
+
+const createBotSchema = botBaseSchema;
+const updateBotSchema = botBaseSchema;
+const deleteBotSchema = z.object({
+  clientId: text("clientId"),
+});
+
 const tasteEventsQuerySchema = z.object({
   clientId: text("clientId"),
   limit: z.coerce.number().int().min(1).max(200).optional(),
@@ -409,6 +456,24 @@ export function parsePublicUserProfileQueryRequest(payload: unknown): {
   targetClientId: string;
 } {
   return parseOrThrow(publicUserProfileQuerySchema, payload);
+}
+
+export function parseBotManagerQueryRequest(payload: unknown): {
+  clientId: string;
+} {
+  return parseOrThrow(botManagerQuerySchema, payload);
+}
+
+export function parseCreateBotRequest(payload: unknown): CreateBotRequest {
+  return parseOrThrow(createBotSchema, payload);
+}
+
+export function parseUpdateBotRequest(payload: unknown): UpdateBotRequest {
+  return parseOrThrow(updateBotSchema, payload);
+}
+
+export function parseDeleteBotRequest(payload: unknown): DeleteBotRequest {
+  return parseOrThrow(deleteBotSchema, payload);
 }
 
 export function parseTasteEventsQueryRequest(payload: unknown): {

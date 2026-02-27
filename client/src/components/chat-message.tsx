@@ -694,7 +694,7 @@ function ChatMessageComponent({
                         <span className="font-semibold text-slate-600">{message.username}</span>
                       )}
                     </p>
-                    <MemberProgressInline member={message.member} variant="chat" />
+                    <MemberProgressInline member={message.member} bot={message.bot} variant="chat" />
                   </div>
                 </div>
                 <time className="shrink-0 text-xs text-slate-400" dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
@@ -828,7 +828,7 @@ function ChatMessageComponent({
                     <span className="font-semibold text-slate-600">{message.username}</span>
                   )}
                 </p>
-                <MemberProgressInline member={message.member} variant="chat" />
+                <MemberProgressInline member={message.member} bot={message.bot} variant="chat" />
               </div>
             </div>
             <time className="text-xs text-slate-400" dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
@@ -918,7 +918,7 @@ function ChatMessageComponent({
               ) : (
                 <p className="text-sm font-semibold text-slate-900">{message.username}</p>
               )}
-              <MemberProgressInline member={message.member} variant="chat" />
+              <MemberProgressInline member={message.member} bot={message.bot} variant="chat" />
               <time className="text-xs text-slate-400" dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
               {onStartReply ? (
                 <button
@@ -992,7 +992,7 @@ function ChatMessageComponent({
                 }
 
                 // @username detection
-                const mentionMatch = part.match(/^@(\w+)$/);
+                const mentionMatch = part.match(/^@([a-z0-9-]+)$/i);
                 if (mentionMatch) {
                   const username = mentionMatch[1];
                   return (

@@ -4,6 +4,7 @@ import {
   computeDecayedMemberScore,
   getNextMemberRank,
   isMemberRankUpgrade,
+  PPC_MEMBER_BOT_CREATED_POINTS,
   PPC_MEMBER_POINT_RULES,
   PPC_MEMBER_SCORE_WEIGHTS,
   resolveMemberRank,
@@ -72,8 +73,10 @@ describe("member-progress", () => {
     expect(PPC_MEMBER_POINT_RULES.some((rule) => rule.id === "usernameChanges" && rule.points === 5)).toBe(true);
   });
 
-  it("does not award points for tagging completed", () => {
+  it("awards 100 points for bot creation and hides zero-point tagging from the menu", () => {
+    expect(PPC_MEMBER_BOT_CREATED_POINTS).toBe(100);
+    expect(PPC_MEMBER_POINT_RULES.some((rule) => rule.id === "botsCreated" && rule.points === 100)).toBe(true);
     expect(PPC_MEMBER_SCORE_WEIGHTS.taggingCompleted).toBe(0);
-    expect(PPC_MEMBER_POINT_RULES.some((rule) => rule.id === "taggingCompleted" && rule.points === 0)).toBe(true);
+    expect(PPC_MEMBER_POINT_RULES.some((rule) => rule.id === "taggingCompleted")).toBe(false);
   });
 });

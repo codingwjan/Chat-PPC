@@ -23,6 +23,8 @@ export type SseEventName =
   | "notification.read"
   | "poll.updated"
   | "user.updated"
+  | "bot.updated"
+  | "bot.deleted"
   | "chat.background.updated"
   | "ai.status";
 
@@ -65,6 +67,28 @@ export interface UpdateOwnAccountRequest {
   currentPassword: string;
   newLoginName?: string;
   newPassword?: string;
+}
+
+export type BotLanguagePreference = "de" | "en" | "all";
+
+export interface CreateBotRequest {
+  clientId: string;
+  displayName: string;
+  profilePicture?: string;
+  mentionHandle: string;
+  languagePreference?: BotLanguagePreference;
+  instructions: string;
+  catchphrases: string[];
+  autonomousEnabled?: boolean;
+  autonomousMinIntervalMinutes?: number;
+  autonomousMaxIntervalMinutes?: number;
+  autonomousPrompt?: string;
+}
+
+export interface UpdateBotRequest extends CreateBotRequest {}
+
+export interface DeleteBotRequest {
+  clientId: string;
 }
 
 export interface PresencePingRequest {
@@ -189,6 +213,40 @@ export interface AdminResetUserPasswordResponse {
   message: string;
 }
 
+export interface BotIdentityDTO {
+  id: string;
+  clientId: string;
+  displayName: string;
+  mentionHandle: string;
+  createdByUserId: string;
+  createdByUsername: string;
+  provider: "grok";
+}
+
+export interface ManagedBotDTO {
+  id: string;
+  displayName: string;
+  profilePicture: string;
+  mentionHandle: string;
+  languagePreference: BotLanguagePreference;
+  instructions: string;
+  catchphrases: string[];
+  autonomousEnabled?: boolean;
+  autonomousMinIntervalMinutes?: number;
+  autonomousMaxIntervalMinutes?: number;
+  autonomousPrompt?: string;
+  autonomousNextAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BotManagerDTO {
+  items: ManagedBotDTO[];
+  limit: number;
+  used: number;
+  remaining: number;
+}
+
 export interface DeveloperUserTasteDTO {
   userId: string;
   clientId: string;
@@ -213,7 +271,9 @@ export interface UserPresenceDTO {
   status: string;
   isOnline: boolean;
   lastSeenAt: string | null;
+  mentionHandle?: string;
   member?: MemberProgressDTO;
+  bot?: BotIdentityDTO;
 }
 
 export interface PublicUserProfileStatsDTO {
@@ -234,7 +294,9 @@ export interface PublicUserProfileDTO {
   isOnline: boolean;
   lastSeenAt: string | null;
   memberSince: string | null;
+  mentionHandle?: string;
   member?: MemberProgressDTO;
+  bot?: BotIdentityDTO;
   stats: PublicUserProfileStatsDTO;
 }
 
@@ -310,6 +372,7 @@ export interface MessageDTO {
   oldusername?: string;
   oldmessage?: string;
   member?: MemberProgressDTO;
+  bot?: BotIdentityDTO;
   tagging?: MessageTaggingDTO;
   reactions?: MessageReactionsDTO;
   poll?: {
@@ -400,6 +463,7 @@ export interface TasteProfileDetailedDTO {
   generatedAt: string;
   member?: MemberProgressDTO;
   memberBreakdown: {
+    botsCreated: number;
     messagesCreated: number;
     reactionsGiven: number;
     reactionsReceived: number;
@@ -555,6 +619,8 @@ export interface SseEventPayloadMap {
   "notification.read": { userId: string; notificationIds?: string[] };
   "poll.updated": MessageDTO;
   "user.updated": UserPresenceDTO;
+  "bot.updated": UserPresenceDTO;
+  "bot.deleted": { clientId: string; botId: string };
   "chat.background.updated": ChatBackgroundDTO;
   "ai.status": { status: string; provider?: "chatgpt" | "grok"; model?: string };
 }

@@ -73,11 +73,38 @@ model User {
   behaviorEvents   UserBehaviorEvent[]
   notifications    Notification[]    @relation("NotificationTargetUser")
   actorNotifications Notification[]  @relation("NotificationActorUser")
+  ownedBots        Bot[]
 
   @@index([isOnline])
   @@index([lastSeenAt])
   @@index([username])
   @@index([sessionToken])
+}
+
+model Bot {
+  id                         String    @id @default(cuid())
+  ownerUserId                String
+  displayName                String
+  profilePicture             String
+  mentionHandle              String   @unique
+  languagePreference         String   @default("all")
+  instructions               String
+  catchphrases               Json
+  autonomousEnabled          Boolean  @default(false)
+  autonomousMinIntervalMinutes Int    @default(60)
+  autonomousMaxIntervalMinutes Int    @default(240)
+  autonomousPrompt           String?
+  autonomousNextAt           DateTime?
+  deletedAt                  DateTime?
+  createdAt                  DateTime @default(now())
+  updatedAt                  DateTime @updatedAt
+  owner                      User     @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  messages                   Message[]
+  aiJobs                     AiJob[]
+
+  @@index([ownerUserId, createdAt])
+  @@index([deletedAt, displayName])
+  @@index([autonomousEnabled, autonomousNextAt])
 }
 
 model BlacklistEntry {
@@ -92,6 +119,7 @@ model Message {
   type                 MessageType
   content              String
   authorId             String?
+  botId                String?
   authorName           String
   authorProfilePicture String
   optionOne            String?
@@ -108,6 +136,7 @@ model Message {
   createdAt            DateTime    @default(now())
   updatedAt            DateTime    @updatedAt
   author               User?       @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  bot                  Bot?        @relation(fields: [botId], references: [id], onDelete: SetNull)
   questionMessage      Message?    @relation("MessageAnswers", fields: [questionMessageId], references: [id], onDelete: SetNull)
   answers              Message[]   @relation("MessageAnswers")
   pollVotes            PollVote[]
@@ -120,6 +149,7 @@ model Message {
 
   @@index([type])
   @@index([createdAt])
+  @@index([botId])
   @@index([questionMessageId])
   @@index([taggingStatus, createdAt])
 }
@@ -234,7 +264,10 @@ model PollChoiceVote {
 
 model AiJob {
   id              String      @id @default(cuid())
-  sourceMessageId String      @unique
+  sourceMessageId String
+  targetKey       String
+  provider        String?
+  botId           String?
   username        String
   message         String
   imageUrls       Json
@@ -247,8 +280,11 @@ model AiJob {
   lastError       String?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
+  bot             Bot?        @relation(fields: [botId], references: [id], onDelete: SetNull)
 
+  @@unique([sourceMessageId, targetKey])
   @@index([status, runAt, createdAt])
+  @@index([botId, status, runAt])
 }
 
 model MessageTagJob {

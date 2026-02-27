@@ -7,6 +7,7 @@ import {
   ArrowDownTrayIcon,
   Bars3Icon,
   ClipboardDocumentIcon,
+  PlusIcon,
   ShareIcon,
   XMarkIcon,
 } from "@heroicons/react/24/outline";
@@ -45,10 +46,13 @@ import type {
   AppKillDTO,
   AiStatusDTO,
   AuthSessionDTO,
+  BotLanguagePreference,
+  BotManagerDTO,
   ChatBackgroundDTO,
   CreateMessageRequest,
   ExtendPollRequest,
   LoginResponseDTO,
+  ManagedBotDTO,
   MediaItemDTO,
   MediaPageDTO,
   MemberRank,
@@ -163,6 +167,7 @@ const STREAM_RECONNECT_BASE_MS = 900;
 const STREAM_RECONNECT_MAX_MS = 8_000;
 const STREAM_STALE_MS = 45_000;
 const STREAM_WATCHDOG_INTERVAL_MS = 10_000;
+const AI_WORKER_POLL_INTERVAL_MS = 60_000;
 const PROFILE_UPLOAD_TIMEOUT_MS = 20_000;
 const AUTO_SCROLL_NEAR_BOTTOM_PX = 420;
 const TOP_LOAD_TRIGGER_PX = 160;
@@ -212,6 +217,10 @@ function aiTagForReplyMessage(message: MessageDTO): "chatgpt" | "grok" | null {
   return null;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function ensureLeadingAiReplyTag(draft: string, provider: "chatgpt" | "grok"): string {
   const oppositeProvider = provider === "chatgpt" ? "grok" : "chatgpt";
   let nextDraft = draft;
@@ -223,6 +232,19 @@ function ensureLeadingAiReplyTag(draft: string, provider: "chatgpt" | "grok"): s
     nextDraft = toggleLeadingAiTag(nextDraft, provider);
   }
   return nextDraft;
+}
+
+function ensureLeadingMentionTag(draft: string, mentionHandle: string): string {
+  const normalizedHandle = mentionHandle.trim().replace(/^@+/, "");
+  if (!normalizedHandle) return draft;
+
+  const leadingMentionPattern = new RegExp(`^\\s*@${escapeRegExp(normalizedHandle)}\\b`, "i");
+  if (leadingMentionPattern.test(draft)) {
+    return draft;
+  }
+
+  const trimmedDraft = draft.trimStart();
+  return trimmedDraft ? `@${normalizedHandle} ${trimmedDraft}` : `@${normalizedHandle} `;
 }
 
 function mergeUser(users: UserPresenceDTO[], next: UserPresenceDTO): UserPresenceDTO[] {
@@ -554,7 +576,9 @@ function toSyntheticPublicProfile(user: UserPresenceDTO): PublicUserProfileDTO {
     isOnline: user.isOnline,
     lastSeenAt: user.lastSeenAt,
     memberSince: null,
+    mentionHandle: user.mentionHandle,
     member: user.member,
+    bot: user.bot,
     stats: {
       postsTotal: 0,
       reactionsGiven: 0,
@@ -759,72 +783,124 @@ const MessageList = memo(function MessageList({
 interface OnlineUsersListProps {
   users: UserPresenceDTO[];
   avatarSizeClassName: string;
+  currentUserId?: string | null;
+  currentUsername?: string | null;
+  botSlots?: { limit: number; used: number; remaining: number };
+  onOpenBotCreator?: () => void;
   onOpenMemberProfile: (user: UserPresenceDTO) => void;
 }
 
 const OnlineUsersList = memo(function OnlineUsersList({
   users,
   avatarSizeClassName,
+  currentUserId,
+  currentUsername,
+  botSlots,
+  onOpenBotCreator,
   onOpenMemberProfile,
 }: OnlineUsersListProps) {
-  const defaultProfilePicture = normalizeProfilePictureUrl(undefined);
+  const normalizedCurrentUsername = currentUsername?.trim().toLowerCase() || null;
+  const ownBots = users.filter((user) => {
+    if (!user.bot) return false;
+    if (currentUserId && user.bot.createdByUserId === currentUserId) return true;
+    if (!currentUserId && normalizedCurrentUsername) {
+      return user.bot.createdByUsername.trim().toLowerCase() === normalizedCurrentUsername;
+    }
+    return false;
+  });
+  const ownBotIds = new Set(ownBots.map((user) => user.clientId));
+  const restUsers = users.filter((user) => !ownBotIds.has(user.clientId));
+  const remainingBotSlots = Math.max(0, botSlots?.remaining ?? 0);
+  const canCreateBot = remainingBotSlots > 0;
+  const createBotSubtitle =
+    ownBots.length === 0
+      ? "Eigenen Charakter anlegen"
+      : !canCreateBot
+        ? "Bot-Limit erreicht"
+        : (botSlots?.limit ?? 1) <= 1
+          ? "Zweiter Bot erst ab Rank Platin"
+          : remainingBotSlots === 1
+            ? "1 weiterer Bot-Slot frei"
+            : `${remainingBotSlots} weitere Bot-Slots frei`;
+
+  const renderUserRow = (user: UserPresenceDTO) => {
+    const avatarUrl = normalizeProfilePictureUrl(user.profilePicture);
+    const status = formatPresenceStatus(user);
+    return (
+      <button
+        key={user.clientId}
+        type="button"
+        onClick={() => onOpenMemberProfile(user)}
+        className="flex w-full items-center gap-3 rounded-xl border border-slate-200 bg-slate-100 px-2.5 py-2 text-left transition hover:bg-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+        aria-label={`Profil von ${user.username} öffnen`}
+      >
+        <div className={`${avatarSizeClassName} shrink-0 overflow-hidden rounded-full border border-slate-200`}>
+          <img
+            src={avatarUrl}
+            alt={`${user.username} Profilbild`}
+            className="h-full w-full object-cover"
+            loading="lazy"
+            decoding="async"
+            width={44}
+            height={44}
+          />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-semibold text-slate-900">{user.username}</p>
+          <div className="mt-1 space-y-1">
+            <p className="truncate text-xs text-slate-600">{status}</p>
+            <div>
+              <MemberProgressInline member={user.member} bot={user.bot} variant="list" />
+            </div>
+          </div>
+          {shouldShowAiProgress(user) ? (
+            <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
+              <div
+                className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out animate-pulse"
+                style={{ width: `${aiProgressForStatus(user.status)}%` }}
+              />
+            </div>
+          ) : null}
+        </div>
+      </button>
+    );
+  };
+
   return (
     <>
-      {users.map((user) => {
-        const avatarUrl = normalizeProfilePictureUrl(user.profilePicture);
-        const status = formatPresenceStatus(user);
-        return (
-          <button
-            key={user.clientId}
-            type="button"
-            onClick={() => onOpenMemberProfile(user)}
-            className="flex w-full items-center gap-3 rounded-xl border border-slate-200 bg-slate-100 px-2.5 py-2 text-left transition hover:bg-slate-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
-            aria-label={`Profil von ${user.username} öffnen`}
+      {onOpenBotCreator ? (
+        <button
+          type="button"
+          onClick={onOpenBotCreator}
+          className={`flex w-full items-center gap-3 rounded-xl border px-2.5 py-2 text-left transition focus-visible:outline-none focus-visible:ring-2 ${
+            canCreateBot
+              ? "border-slate-200 bg-white hover:bg-slate-50 focus-visible:ring-sky-300"
+              : "border-slate-200 bg-slate-50 opacity-80 hover:bg-slate-100 hover:opacity-100 focus-visible:ring-slate-300"
+          }`}
+          aria-label="Bot-Editor öffnen"
+        >
+          <div
+            className={`${avatarSizeClassName} flex shrink-0 items-center justify-center rounded-full border ${
+              canCreateBot
+                ? "border-sky-200 bg-sky-50 text-sky-700"
+                : "border-slate-300 bg-slate-200 text-slate-600"
+            }`}
           >
-            {avatarUrl === defaultProfilePicture ? (
-              <div className={`${avatarSizeClassName} shrink-0 overflow-hidden rounded-full border border-slate-200`}>
-                <img
-                  src={avatarUrl}
-                  alt={`${user.username} Profilbild`}
-                  className="h-full w-full object-cover"
-                  loading="lazy"
-                  decoding="async"
-                  width={44}
-                  height={44}
-                />
-              </div>
-            ) : (
-              <div className={`${avatarSizeClassName} shrink-0 overflow-hidden rounded-full border border-slate-200`}>
-                <img
-                  src={avatarUrl}
-                  alt={`${user.username} Profilbild`}
-                  className="h-full w-full object-cover"
-                  loading="lazy"
-                  decoding="async"
-                  width={44}
-                  height={44}
-                />
-              </div>
-            )}
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-semibold text-slate-900">{user.username}</p>
-              <div className="mt-1 space-y-1">
-                <p className="truncate text-xs text-slate-600">{status}</p>
-                <div>
-                  <MemberProgressInline member={user.member} variant="list" />
-                </div>
-              </div>
-              {shouldShowAiProgress(user) ? (
-                <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-sky-100">
-                  <div
-                    className="h-full rounded-full bg-sky-500 transition-[width] duration-300 ease-out animate-pulse"
-                    style={{ width: `${aiProgressForStatus(user.status)}%` }}
-                  />
-                </div>
-              ) : null}
-            </div>
-          </button>
-        );
+            <PlusIcon className="h-5 w-5" aria-hidden="true" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className={`truncate text-sm font-semibold ${canCreateBot ? "text-slate-900" : "text-slate-700"}`}>
+              Bot erstellen
+            </p>
+            <p className="mt-1 truncate text-xs text-slate-500">
+              {createBotSubtitle}
+            </p>
+          </div>
+        </button>
+      ) : null}
+      {ownBots.map((user) => renderUserRow(user))}
+      {restUsers.map((user) => {
+        return renderUserRow(user);
       })}
     </>
   );
@@ -920,6 +996,7 @@ export function ChatApp() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
   const profileUploadRef = useRef<HTMLInputElement>(null);
+  const botProfileUploadRef = useRef<HTMLInputElement>(null);
   const chatUploadRef = useRef<HTMLInputElement>(null);
   const backgroundUploadRef = useRef<HTMLInputElement>(null);
   const messageInputRef = useRef<HTMLTextAreaElement>(null);
@@ -1023,6 +1100,7 @@ export function ChatApp() {
   const [pollExtendDraft, setPollExtendDraft] = useState<PollExtendDraftState | null>(null);
 
   const [editingProfile, setEditingProfile] = useState(false);
+  const [editingBots, setEditingBots] = useState(false);
   const [memberDrawerOpen, setMemberDrawerOpen] = useState(false);
   const [memberDrawerProfile, setMemberDrawerProfile] = useState<PublicUserProfileDTO | null>(null);
   const [memberDrawerOwnStats, setMemberDrawerOwnStats] = useState<PublicUserProfileStatsDTO | null>(null);
@@ -1032,6 +1110,7 @@ export function ChatApp() {
   const [savingProfile, setSavingProfile] = useState(false);
   const [savingSecurity, setSavingSecurity] = useState(false);
   const [profileCropFile, setProfileCropFile] = useState<File | null>(null);
+  const [profileCropTarget, setProfileCropTarget] = useState<"profile" | "bot" | null>(null);
   const [usernameDraft, setUsernameDraft] = useState(() => loadSession()?.username || "");
   const [loginNameDraft, setLoginNameDraft] = useState(() => loadSession()?.loginName || "");
   const [currentPasswordDraft, setCurrentPasswordDraft] = useState("");
@@ -1040,6 +1119,29 @@ export function ChatApp() {
   const [profilePictureDraft, setProfilePictureDraft] = useState(
     () => loadSession()?.profilePicture || getDefaultProfilePicture(),
   );
+  const [managedBots, setManagedBots] = useState<ManagedBotDTO[]>([]);
+  const [botSlots, setBotSlots] = useState<{ limit: number; used: number; remaining: number }>({
+    limit: 1,
+    used: 0,
+    remaining: 1,
+  });
+  const [loadingBots, setLoadingBots] = useState(false);
+  const [savingBot, setSavingBot] = useState(false);
+  const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
+  const [botComposerOpen, setBotComposerOpen] = useState(false);
+  const [botAutomationExpanded, setBotAutomationExpanded] = useState(false);
+  const [editingBotId, setEditingBotId] = useState<string | null>(null);
+  const [botNameDraft, setBotNameDraft] = useState("");
+  const [botProfilePictureDraft, setBotProfilePictureDraft] = useState(getDefaultProfilePicture());
+  const [botHandleDraft, setBotHandleDraft] = useState("");
+  const [botLanguagePreferenceDraft, setBotLanguagePreferenceDraft] = useState<BotLanguagePreference>("all");
+  const [botInstructionsDraft, setBotInstructionsDraft] = useState("");
+  const [botCatchphrasesDraft, setBotCatchphrasesDraft] = useState("");
+  const [botAutonomousEnabledDraft, setBotAutonomousEnabledDraft] = useState(false);
+  const [botAutonomousMinMinutesDraft, setBotAutonomousMinMinutesDraft] = useState("60");
+  const [botAutonomousMaxMinutesDraft, setBotAutonomousMaxMinutesDraft] = useState("240");
+  const [botAutonomousPromptDraft, setBotAutonomousPromptDraft] = useState("");
+  const [uploadingBotProfile, setUploadingBotProfile] = useState(false);
 
   const [showMentionSuggestions, setShowMentionSuggestions] = useState(false);
   const [mentionFilter, setMentionFilter] = useState("");
@@ -1047,10 +1149,14 @@ export function ChatApp() {
   const [composerHistoryIndex, setComposerHistoryIndex] = useState(-1);
   const [isDraggingUpload, setIsDraggingUpload] = useState(false);
   const [profileDropActive, setProfileDropActive] = useState(false);
+  const [botProfileDropActive, setBotProfileDropActive] = useState(false);
   const [composerHeightPx, setComposerHeightPx] = useState(DEFAULT_COMPOSER_HEIGHT_PX);
   const [, startUiTransition] = useTransition();
   const isDeveloperMode = Boolean(session?.devMode && session.devAuthToken);
   const profileEditorCloseBlocked = profileCropFile !== null;
+  const maxBotCatchphraseLength = 240;
+  const minBotAutonomousIntervalMinutes = 5;
+  const maxBotAutonomousIntervalMinutes = 1440;
 
   const sessionProfilePicture = useMemo(
     () => normalizeProfilePictureUrl(session?.profilePicture),
@@ -1087,6 +1193,75 @@ export function ChatApp() {
     }),
     [ownWindowStats],
   );
+  const botPreviewProfilePicture = normalizeProfilePictureUrl(botProfilePictureDraft);
+  const botCreationLimitReached = managedBots.length >= botSlots.limit;
+  const botLimitReached = !editingBotId && botCreationLimitReached;
+  const botDisplayNameValue = botNameDraft.trim();
+  const botHandlePreview = botHandleDraft.trim().replace(/^@+/, "").toLowerCase();
+  const botHandlePatternValid = botHandlePreview.length === 0 || /^[a-z0-9-]+$/.test(botHandlePreview);
+  const botHandleLengthValid =
+    botHandlePreview.length === 0 || (botHandlePreview.length >= 3 && botHandlePreview.length <= 24);
+  const botNameLengthValid =
+    botDisplayNameValue.length === 0 || (botDisplayNameValue.length >= 2 && botDisplayNameValue.length <= 40);
+  const botInstructionsLength = botInstructionsDraft.trim().length;
+  const botInstructionsValid = botInstructionsLength > 0 && botInstructionsLength <= 1000;
+  const botCatchphraseCount = botCatchphrasesDraft
+    .split("\n")
+    .map((entry) => entry.trim())
+    .filter(Boolean).length;
+  const botCatchphraseLineLengthValid = botCatchphrasesDraft
+    .split("\n")
+    .map((entry) => entry.trim())
+    .every((entry) => entry.length === 0 || entry.length <= maxBotCatchphraseLength);
+  const botCatchphraseLimitValid = botCatchphraseCount <= 8;
+  const parsedBotAutonomousMinMinutes = Number.parseInt(botAutonomousMinMinutesDraft, 10);
+  const parsedBotAutonomousMaxMinutes = Number.parseInt(botAutonomousMaxMinutesDraft, 10);
+  const botAutonomousMinValid =
+    Number.isFinite(parsedBotAutonomousMinMinutes)
+    && parsedBotAutonomousMinMinutes >= minBotAutonomousIntervalMinutes
+    && parsedBotAutonomousMinMinutes <= maxBotAutonomousIntervalMinutes;
+  const botAutonomousMaxValid =
+    Number.isFinite(parsedBotAutonomousMaxMinutes)
+    && parsedBotAutonomousMaxMinutes >= minBotAutonomousIntervalMinutes
+    && parsedBotAutonomousMaxMinutes <= maxBotAutonomousIntervalMinutes;
+  const botAutonomousRangeValid =
+    !botAutonomousEnabledDraft
+    || (botAutonomousMinValid && botAutonomousMaxValid && parsedBotAutonomousMaxMinutes >= parsedBotAutonomousMinMinutes);
+  const botAutonomousPromptValid = botAutonomousPromptDraft.trim().length <= 280;
+  const botFormReady = Boolean(
+    botDisplayNameValue
+    && botHandlePreview
+    && botNameLengthValid
+    && botHandlePatternValid
+    && botHandleLengthValid
+    && botInstructionsValid
+    && botAutonomousRangeValid
+    && botAutonomousPromptValid
+    && botCatchphraseLineLengthValid
+    && botCatchphraseLimitValid,
+  );
+  const botSaveDisabled = savingBot || botLimitReached || isLeaving || !botFormReady;
+  const botHelperText = botLimitReached
+    ? "Dein aktueller Rang ist voll belegt. Bearbeite einen bestehenden Bot oder steig auf."
+    : !botNameLengthValid
+      ? "Name: 2 bis 40 Zeichen."
+      : !botHandlePatternValid
+        ? "Handle: nur a-z, 0-9 und Bindestriche."
+        : !botHandleLengthValid
+          ? "Handle: 3 bis 24 Zeichen."
+            : !botInstructionsValid
+              ? "Anweisungen: 1 bis 1000 Zeichen."
+              : !botAutonomousRangeValid
+                ? `Autopost-Intervall: ${minBotAutonomousIntervalMinutes} bis ${maxBotAutonomousIntervalMinutes} Minuten, Max >= Min.`
+                : !botAutonomousPromptValid
+                  ? "Autopost-Fokus: höchstens 280 Zeichen."
+            : !botCatchphraseLineLengthValid
+              ? `Jede Catchphrase darf höchstens ${maxBotCatchphraseLength} Zeichen lang sein.`
+            : !botCatchphraseLimitValid
+              ? "Maximal 8 Catchphrases, jeweils eine pro Zeile."
+              : "Handle wird automatisch kleingeschrieben und kann von allen im Chat gepingt werden.";
+  const botComposerTitle = editingBotId ? "Bot bearbeiten" : "Neuen Bot erstellen";
+  const botInstructionsRemaining = Math.max(0, 1000 - botInstructionsLength);
   const ownScore = ownMember?.score ?? 0;
   const ownProgressPercent = useMemo(() => {
     if (!ownMember) return 0;
@@ -1147,7 +1322,11 @@ export function ChatApp() {
 
   const filteredMentionUsers = useMemo(() => {
     if (!mentionFilter) return onlineUsers;
-    return onlineUsers.filter((user) => user.username.toLowerCase().includes(mentionFilter.toLowerCase()));
+    const normalizedFilter = mentionFilter.toLowerCase();
+    return onlineUsers.filter((user) =>
+      user.username.toLowerCase().includes(normalizedFilter)
+      || user.bot?.mentionHandle.toLowerCase().includes(normalizedFilter),
+    );
   }, [onlineUsers, mentionFilter]);
 
   const ownMessageHistory = useMemo(() => {
@@ -1273,7 +1452,7 @@ export function ChatApp() {
 
       const cursor = event.target.selectionStart ?? value.length;
       const textBefore = value.slice(Math.max(0, cursor - 80), cursor);
-      const match = textBefore.match(/(?:^|\s)@(\w*)$/);
+      const match = textBefore.match(/(?:^|\s)@([\w-]*)$/);
       if (match) {
         const nextFilter = match[1];
         startUiTransition(() => {
@@ -1362,6 +1541,20 @@ export function ChatApp() {
       targetClientId,
     });
     return apiJson<PublicUserProfileDTO>(`/api/users/profile?${searchParams.toString()}`, {
+      cache: "no-store",
+    });
+  }, [session?.clientId]);
+
+  const fetchManagedBots = useCallback(async (): Promise<BotManagerDTO> => {
+    if (!session?.clientId) {
+      return {
+        items: [],
+        limit: 1,
+        used: 0,
+        remaining: 1,
+      };
+    }
+    return apiJson<BotManagerDTO>(`/api/bots?clientId=${encodeURIComponent(session.clientId)}`, {
       cache: "no-store",
     });
   }, [session?.clientId]);
@@ -2376,6 +2569,20 @@ export function ChatApp() {
         syncSessionIdentityFromPresence(parsed);
       };
 
+      const onBotUpdated = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<UserPresenceDTO>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        setUsers((current) => mergeUser(current, parsed));
+      };
+
+      const onBotDeleted = (event: Event) => {
+        touchStreamActivity();
+        const parsed = parseEvent<{ clientId: string; botId: string }>(event as MessageEvent<string>);
+        if (!parsed || isLeavingRef.current) return;
+        setUsers((current) => current.filter((user) => user.clientId !== parsed.clientId));
+      };
+
       const onMessageCreated = (event: Event) => {
         touchStreamActivity();
         const parsed = parseEvent<MessageDTO>(event as MessageEvent<string>);
@@ -2516,6 +2723,8 @@ export function ChatApp() {
       stream.addEventListener("snapshot", onSnapshot);
       stream.addEventListener("presence.updated", onPresenceUpdated);
       stream.addEventListener("user.updated", onUserUpdated);
+      stream.addEventListener("bot.updated", onBotUpdated);
+      stream.addEventListener("bot.deleted", onBotDeleted);
       stream.addEventListener("message.created", onMessageCreated);
       stream.addEventListener("message.updated", onMessageUpdated);
       stream.addEventListener("rank.up", onRankUp);
@@ -2764,6 +2973,7 @@ export function ChatApp() {
         setMobileSidebarOpen(false);
         if (!profileEditorCloseBlocked) {
           setEditingProfile(false);
+          setEditingBots(false);
         }
         setMemberDrawerOpen(false);
         setShowBackgroundModal(false);
@@ -2848,6 +3058,16 @@ export function ChatApp() {
   useEffect(() => {
     if (!session) return;
     kickOffAiWorker();
+  }, [kickOffAiWorker, session]);
+
+  useEffect(() => {
+    if (!session) return;
+    const interval = window.setInterval(() => {
+      kickOffAiWorker();
+    }, AI_WORKER_POLL_INTERVAL_MS);
+    return () => {
+      window.clearInterval(interval);
+    };
   }, [kickOffAiWorker, session]);
 
   const updatePollOptionValue = useCallback((index: number, value: string) => {
@@ -3242,8 +3462,11 @@ export function ChatApp() {
     });
 
     const aiProviderTag = aiTagForReplyMessage(message);
+    const botMentionHandle = message.bot?.mentionHandle;
     if (aiProviderTag) {
       setMessageDraft((current) => ensureLeadingAiReplyTag(current, aiProviderTag));
+    } else if (botMentionHandle) {
+      setMessageDraft((current) => ensureLeadingMentionTag(current, botMentionHandle));
     }
 
     setComposerMode("message");
@@ -3546,6 +3769,187 @@ export function ChatApp() {
     }
   }
 
+  async function refreshManagedBots(): Promise<void> {
+    if (!session?.clientId) return;
+    setLoadingBots(true);
+    try {
+      const result = await fetchManagedBots();
+      setManagedBots(result.items);
+      setBotSlots({
+        limit: result.limit,
+        used: result.used,
+        remaining: result.remaining,
+      });
+    } catch (botError) {
+      setError(botError instanceof Error ? botError.message : "Bots konnten nicht geladen werden.");
+    } finally {
+      setLoadingBots(false);
+    }
+  }
+
+  function resetBotEditor(): void {
+    setEditingBotId(null);
+    setBotNameDraft("");
+    setBotProfilePictureDraft(getDefaultProfilePicture());
+    setBotHandleDraft("");
+    setBotLanguagePreferenceDraft("all");
+    setBotInstructionsDraft("");
+    setBotCatchphrasesDraft("");
+    setBotAutonomousEnabledDraft(false);
+    setBotAutonomousMinMinutesDraft("60");
+    setBotAutonomousMaxMinutesDraft("240");
+    setBotAutonomousPromptDraft("");
+    setBotAutomationExpanded(false);
+    setBotProfileDropActive(false);
+    setBotComposerOpen(false);
+  }
+
+  function openNewBotComposer(): void {
+    setEditingBotId(null);
+    setBotNameDraft("");
+    setBotProfilePictureDraft(getDefaultProfilePicture());
+    setBotHandleDraft("");
+    setBotLanguagePreferenceDraft("all");
+    setBotInstructionsDraft("");
+    setBotCatchphrasesDraft("");
+    setBotAutonomousEnabledDraft(false);
+    setBotAutonomousMinMinutesDraft("60");
+    setBotAutonomousMaxMinutesDraft("240");
+    setBotAutonomousPromptDraft("");
+    setBotAutomationExpanded(false);
+    setBotProfileDropActive(false);
+    setBotComposerOpen(true);
+  }
+
+  async function saveBot(): Promise<void> {
+    if (!session?.clientId) return;
+    const displayName = botNameDraft.trim();
+    const profilePicture = botProfilePictureDraft.trim() || getDefaultProfilePicture();
+    const mentionHandle = botHandleDraft.trim().replace(/^@+/, "");
+    const instructions = botInstructionsDraft.trim();
+    const catchphrases = botCatchphrasesDraft
+      .split("\n")
+      .map((entry) => entry.trim())
+      .filter(Boolean);
+    const autonomousMinIntervalMinutes = botAutonomousMinValid ? parsedBotAutonomousMinMinutes : 60;
+    const autonomousMaxIntervalMinutes = botAutonomousMaxValid
+      ? Math.max(autonomousMinIntervalMinutes, parsedBotAutonomousMaxMinutes)
+      : Math.max(autonomousMinIntervalMinutes, 240);
+
+    if (!displayName || !mentionHandle || !instructions) {
+      setError("Bitte Name, Handle und Anweisungen für den Bot ausfüllen.");
+      return;
+    }
+
+    setSavingBot(true);
+    try {
+      if (editingBotId) {
+        await apiJson<ManagedBotDTO>(`/api/bots/${encodeURIComponent(editingBotId)}`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            clientId: session.clientId,
+            displayName,
+            profilePicture,
+            mentionHandle,
+            languagePreference: botLanguagePreferenceDraft,
+            instructions,
+            catchphrases,
+            autonomousEnabled: botAutonomousEnabledDraft,
+            autonomousMinIntervalMinutes,
+            autonomousMaxIntervalMinutes,
+            autonomousPrompt: botAutonomousPromptDraft.trim(),
+          }),
+        });
+      } else {
+        await apiJson<ManagedBotDTO>("/api/bots", {
+          method: "POST",
+          body: JSON.stringify({
+            clientId: session.clientId,
+            displayName,
+            profilePicture,
+            mentionHandle,
+            languagePreference: botLanguagePreferenceDraft,
+            instructions,
+            catchphrases,
+            autonomousEnabled: botAutonomousEnabledDraft,
+            autonomousMinIntervalMinutes,
+            autonomousMaxIntervalMinutes,
+            autonomousPrompt: botAutonomousPromptDraft.trim(),
+          }),
+        });
+      }
+
+      await refreshManagedBots();
+      resetBotEditor();
+      setEditingBots(true);
+      setError(null);
+    } catch (botError) {
+      setError(botError instanceof Error ? botError.message : "Bot konnte nicht gespeichert werden.");
+    } finally {
+      setSavingBot(false);
+    }
+  }
+
+  function startEditBot(bot: ManagedBotDTO): void {
+    setEditingBotId(bot.id);
+    setBotNameDraft(bot.displayName);
+    setBotProfilePictureDraft(bot.profilePicture || getDefaultProfilePicture());
+    setBotHandleDraft(bot.mentionHandle);
+    setBotLanguagePreferenceDraft(bot.languagePreference);
+    setBotInstructionsDraft(bot.instructions);
+    setBotCatchphrasesDraft(bot.catchphrases.join("\n"));
+    setBotAutonomousEnabledDraft(Boolean(bot.autonomousEnabled));
+    setBotAutonomousMinMinutesDraft(String(bot.autonomousMinIntervalMinutes ?? 60));
+    setBotAutonomousMaxMinutesDraft(String(bot.autonomousMaxIntervalMinutes ?? 240));
+    setBotAutonomousPromptDraft(bot.autonomousPrompt || "");
+    setBotAutomationExpanded(Boolean(bot.autonomousEnabled || bot.autonomousPrompt));
+    setBotProfileDropActive(false);
+    setBotComposerOpen(true);
+  }
+
+  async function removeBot(botId: string): Promise<void> {
+    if (!session?.clientId) return;
+    if (typeof window !== "undefined") {
+      const confirmed = window.confirm("Diesen Bot wirklich löschen?");
+      if (!confirmed) return;
+    }
+    setDeletingBotId(botId);
+    try {
+      await apiJson<{ ok: true }>(`/api/bots/${encodeURIComponent(botId)}`, {
+        method: "DELETE",
+        body: JSON.stringify({
+          clientId: session.clientId,
+        }),
+      });
+      if (editingBotId === botId) {
+        resetBotEditor();
+      }
+      await refreshManagedBots();
+      setError(null);
+    } catch (botError) {
+      setError(botError instanceof Error ? botError.message : "Bot konnte nicht gelöscht werden.");
+    } finally {
+      setDeletingBotId(null);
+    }
+  }
+
+  function clearProfileCropState(): void {
+    setProfileCropFile(null);
+    setProfileCropTarget(null);
+  }
+
+  async function onBotProfileImageUpload(file: File | undefined) {
+    if (!file) return;
+    if (!SUPPORTED_PROFILE_UPLOAD_MIME_TYPES.has(file.type)) {
+      setError("Nur jpg, png, webp oder gif werden unterstützt.");
+      return;
+    }
+    setError(null);
+    setProfileCropTarget("bot");
+    setProfileCropFile(file);
+    if (botProfileUploadRef.current) botProfileUploadRef.current.value = "";
+  }
+
   async function onProfileImageUpload(file: File | undefined) {
     if (!file) return;
     if (!SUPPORTED_PROFILE_UPLOAD_MIME_TYPES.has(file.type)) {
@@ -3553,8 +3957,24 @@ export function ChatApp() {
       return;
     }
     setError(null);
+    setProfileCropTarget("profile");
     setProfileCropFile(file);
     if (profileUploadRef.current) profileUploadRef.current.value = "";
+  }
+
+  function onBotProfileImagePaste(event: ClipboardEvent<HTMLElement>): void {
+    const imageFiles = extractSupportedImageFiles(event.clipboardData, SUPPORTED_PROFILE_UPLOAD_MIME_TYPES);
+    if (imageFiles.length > 0) {
+      event.preventDefault();
+      void onBotProfileImageUpload(imageFiles[0]);
+      return;
+    }
+
+    const pastedText = event.clipboardData.getData("text/plain").trim();
+    if (/^(https?:\/\/\S+|\/[^/\s].*)$/i.test(pastedText)) {
+      event.preventDefault();
+      setBotProfilePictureDraft(pastedText);
+    }
   }
 
   function onProfileImagePaste(event: ClipboardEvent<HTMLElement>): void {
@@ -3589,16 +4009,51 @@ export function ChatApp() {
     void onProfileImageUpload(imageFiles[0]);
   }
 
+  function onBotProfileImageDragOver(event: DragEvent<HTMLElement>): void {
+    if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setBotProfileDropActive(true);
+  }
+
+  function onBotProfileImageDragLeave(event: DragEvent<HTMLElement>): void {
+    const nextTarget = event.relatedTarget as Node | null;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+    setBotProfileDropActive(false);
+  }
+
+  function onBotProfileImageDrop(event: DragEvent<HTMLElement>): void {
+    event.preventDefault();
+    setBotProfileDropActive(false);
+
+    const imageFiles = extractSupportedImageFiles(event.dataTransfer, SUPPORTED_PROFILE_UPLOAD_MIME_TYPES);
+    if (imageFiles.length === 0) {
+      setError("Nur jpg, png, webp oder gif werden unterstützt.");
+      return;
+    }
+    void onBotProfileImageUpload(imageFiles[0]);
+  }
+
   async function onProfileCropConfirm(file: File) {
-    setProfileCropFile(null);
-    setUploadingProfile(true);
+    const cropTarget = profileCropTarget || "profile";
+    if (cropTarget === "bot") {
+      setUploadingBotProfile(true);
+    } else {
+      setUploadingProfile(true);
+    }
     const uploadController = new AbortController();
     const uploadTimeout = window.setTimeout(() => {
       uploadController.abort();
     }, PROFILE_UPLOAD_TIMEOUT_MS);
     try {
       const url = await uploadProfileImage(file, uploadController.signal);
-      setProfilePictureDraft(url);
+      if (cropTarget === "bot") {
+        setBotProfilePictureDraft(url);
+      } else {
+        setProfilePictureDraft(url);
+      }
+      setError(null);
+      clearProfileCropState();
     } catch (uploadError) {
       if (uploadController.signal.aborted) {
         setError("Upload dauert zu lange. Bitte Verbindung prüfen und erneut versuchen.");
@@ -3607,7 +4062,11 @@ export function ChatApp() {
       }
     } finally {
       window.clearTimeout(uploadTimeout);
-      setUploadingProfile(false);
+      if (cropTarget === "bot") {
+        setUploadingBotProfile(false);
+      } else {
+        setUploadingProfile(false);
+      }
     }
   }
 
@@ -3683,11 +4142,11 @@ export function ChatApp() {
     void onChatImageDrop(imageFiles);
   }
 
-  function selectMentionUser(username: string): void {
+  function selectMentionUser(mentionValue: string): void {
     const selectionStart = messageInputRef.current?.selectionStart || 0;
     const textBefore = messageDraft.slice(0, selectionStart);
     const textAfter = messageDraft.slice(selectionStart);
-    const newTextBefore = textBefore.replace(/@(\w*)$/, `@${username} `);
+    const newTextBefore = textBefore.replace(/@([\w-]*)$/, `@${mentionValue} `);
     setMessageDraft(newTextBefore + textAfter);
     setShowMentionSuggestions(false);
   }
@@ -3708,7 +4167,7 @@ export function ChatApp() {
         event.preventDefault();
         const user = filteredMentionUsers[mentionIndex];
         if (!user) return;
-        selectMentionUser(user.username);
+        selectMentionUser(user.bot?.mentionHandle || user.username);
         return;
       }
       if (event.key === "Escape") {
@@ -3859,9 +4318,16 @@ export function ChatApp() {
     setCurrentPasswordDraft("");
     setNewPasswordDraft("");
     setConfirmNewPasswordDraft("");
+    setEditingBotId(null);
+    setBotNameDraft("");
+    setBotProfilePictureDraft(getDefaultProfilePicture());
+    setBotHandleDraft("");
+    setBotInstructionsDraft("");
+    setBotCatchphrasesDraft("");
     startUiTransition(() => {
       setMobileSidebarOpen(false);
       setProfileDropActive(false);
+      setEditingBots(false);
       setMemberDrawerOpen(false);
       setEditingProfile(true);
     });
@@ -3882,6 +4348,27 @@ export function ChatApp() {
       setNewPasswordDraft("");
       setConfirmNewPasswordDraft("");
     }, 0);
+  }, [profileEditorCloseBlocked, startUiTransition]);
+
+  const openBotEditor = useCallback((): void => {
+    if (!session) return;
+    startUiTransition(() => {
+      setMobileSidebarOpen(false);
+      setProfileDropActive(false);
+      setEditingProfile(false);
+      setMemberDrawerOpen(false);
+      setEditingBots(true);
+    });
+    window.setTimeout(() => {
+      void refreshManagedBots();
+    }, 0);
+  }, [refreshManagedBots, session, startUiTransition]);
+
+  const closeBotEditor = useCallback((): void => {
+    if (profileEditorCloseBlocked) return;
+    startUiTransition(() => {
+      setEditingBots(false);
+    });
   }, [profileEditorCloseBlocked, startUiTransition]);
 
   const openSharedBackgroundModal = useCallback((): void => {
@@ -3936,7 +4423,7 @@ export function ChatApp() {
       setMemberDrawerOwnStats(ownCachedProfile?.stats ?? fallbackOwnStats);
     });
 
-    if (AI_CLIENT_IDS.has(user.clientId)) {
+    if (AI_CLIENT_IDS.has(user.clientId) || user.bot) {
       setMemberDrawerLoading(false);
       setMemberDrawerProfile(toSyntheticPublicProfile(user));
       return;
@@ -3988,6 +4475,37 @@ export function ChatApp() {
   }, [fetchPublicUserProfile, ownProfileStats, ownWindowStats, session?.clientId, startUiTransition]);
 
   const openMessageAuthorProfile = useCallback((message: MessageDTO): void => {
+    if (message.bot) {
+      const botUser = onlineUsers.find((user) => user.clientId === message.bot?.clientId);
+      if (botUser) {
+        void openMemberProfile(botUser);
+        return;
+      }
+
+      const ownCachedProfile = session?.clientId ? publicProfileCacheRef.current[session.clientId] : undefined;
+      const fallbackProfile = toSyntheticPublicProfile({
+        id: message.bot.clientId,
+        clientId: message.bot.clientId,
+        username: message.bot.displayName,
+        profilePicture: normalizeProfilePictureUrl(message.profilePicture),
+        status: "online",
+        isOnline: true,
+        lastSeenAt: null,
+        mentionHandle: message.bot.mentionHandle,
+        member: undefined,
+        bot: message.bot,
+      });
+      startUiTransition(() => {
+        setMobileSidebarOpen(false);
+        setMemberDrawerOpen(true);
+        setMemberDrawerLoading(false);
+        setMemberDrawerError(null);
+        setMemberDrawerOwnStats(ownCachedProfile?.stats ?? (ownWindowStats ? ownProfileStats : null));
+        setMemberDrawerProfile(fallbackProfile);
+      });
+      return;
+    }
+
     const normalizedAuthor = message.username.trim().toLowerCase();
     const matchedOnlineUserById = message.authorId
       ? users.find((user) => user.id === message.authorId)
@@ -4036,15 +4554,406 @@ export function ChatApp() {
     void openMemberProfile(user);
   }, [openMemberProfile]);
 
+  const handleOpenBotCreator = useCallback((): void => {
+    openBotEditor();
+  }, [openBotEditor]);
+
   const sidebarOnlineUsersContent = useMemo(
     () => (
       <OnlineUsersList
         users={sidebarOnlineUsers}
         avatarSizeClassName="h-11 w-11"
+        currentUserId={session?.id ?? null}
+        currentUsername={session?.username ?? null}
+        botSlots={botSlots}
+        onOpenBotCreator={handleOpenBotCreator}
         onOpenMemberProfile={handleOpenSidebarMemberProfile}
       />
     ),
-    [handleOpenSidebarMemberProfile, sidebarOnlineUsers],
+    [botSlots, handleOpenBotCreator, handleOpenSidebarMemberProfile, session?.id, session?.username, sidebarOnlineUsers],
+  );
+  const botManagerSection = (
+    <section
+      className="space-y-3"
+      data-testid="bot-manager-section"
+      onPaste={onBotProfileImagePaste}
+    >
+      <div className="rounded-2xl border border-slate-200 bg-white px-4 py-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            <h3 className="text-lg font-semibold text-slate-900">Meine Bots</h3>
+            <p className="mt-1 text-sm text-slate-500">{botSlots.used} von {botSlots.limit} belegt</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => openNewBotComposer()}
+            disabled={botCreationLimitReached}
+            aria-label="Neuen Bot erstellen"
+            className="inline-flex h-10 items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <PlusIcon className="h-4 w-4" aria-hidden="true" />
+            Neuer Bot
+          </button>
+        </div>
+        {botCreationLimitReached ? (
+          <p className="mt-3 text-xs text-slate-500">
+            Alle Slots belegt. Bearbeite einen Bot oder steig im Rang auf.
+          </p>
+        ) : null}
+      </div>
+
+      {loadingBots ? <p className="text-sm text-slate-500">Bots werden geladen…</p> : null}
+
+      <div className="space-y-2">
+        {managedBots.map((bot) => (
+          <div
+            key={bot.id}
+            className="rounded-xl border border-slate-200 bg-white px-3 py-3"
+            data-testid={`bot-card-${bot.id}`}
+          >
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="h-10 w-10 shrink-0 overflow-hidden rounded-full border border-slate-200 bg-slate-50">
+                    <img
+                      src={normalizeProfilePictureUrl(bot.profilePicture)}
+                      alt={`${bot.displayName} Profilbild`}
+                      className="h-full w-full object-cover"
+                      loading="lazy"
+                      decoding="async"
+                      width={40}
+                      height={40}
+                    />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-slate-900">{bot.displayName}</p>
+                    <p className="truncate text-xs font-medium text-sky-700">@{bot.mentionHandle}</p>
+                    <p className="mt-0.5 line-clamp-1 text-sm text-slate-500">
+                      {(bot.instructions.split("\n")[0] || bot.instructions).trim()}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2 sm:justify-end">
+                <button
+                  type="button"
+                  onClick={() => startEditBot(bot)}
+                  data-testid={`bot-edit-${bot.id}`}
+                  className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                >
+                  Bearbeiten
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void removeBot(bot.id)}
+                  disabled={deletingBotId === bot.id}
+                  data-testid={`bot-delete-${bot.id}`}
+                  className="h-9 rounded-lg border border-rose-200 bg-white px-3 text-sm font-medium text-rose-700 transition hover:bg-rose-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-200 disabled:opacity-60"
+                >
+                  {deletingBotId === bot.id ? "Löscht…" : "Löschen"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+        {managedBots.length === 0 && !loadingBots ? (
+          <p className="rounded-xl border border-dashed border-slate-300 bg-white px-4 py-4 text-sm text-slate-500">
+            Noch kein Bot erstellt.
+          </p>
+        ) : null}
+      </div>
+
+      {botComposerOpen ? (
+        <div className="space-y-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm shadow-slate-200/40">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Editor</p>
+              <h4 className="mt-1 text-base font-semibold text-slate-900">{botComposerTitle}</h4>
+            </div>
+            <button
+              type="button"
+              onClick={() => resetBotEditor()}
+              data-testid="bot-reset-button"
+              className="inline-flex h-9 items-center justify-center rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+            >
+              Schließen
+            </button>
+          </div>
+
+          <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-slate-50/70 px-3 py-2.5">
+            <div className="h-11 w-11 shrink-0 overflow-hidden rounded-full border border-slate-200 bg-white">
+              <img
+                src={botPreviewProfilePicture}
+                alt="Bot Profilbild Vorschau"
+                className="h-full w-full object-cover"
+                loading="lazy"
+                decoding="async"
+                width={44}
+                height={44}
+              />
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-slate-900">{botDisplayNameValue || "Dein Bot"}</p>
+              <p className="truncate text-xs font-medium text-sky-700">@{botHandlePreview || "handle"}</p>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700" htmlFor="bot-display-name">
+              Name
+            </label>
+            <input
+              id="bot-display-name"
+              name="bot-display-name"
+              data-testid="bot-name-input"
+              value={botNameDraft}
+              onChange={(event) => setBotNameDraft(event.target.value)}
+              placeholder="z. B. Peter Griffin"
+              maxLength={40}
+              autoComplete="off"
+              className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+            />
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700" htmlFor="bot-handle">
+              Handle
+            </label>
+            <div className="mt-1.5 flex items-center rounded-xl border border-slate-200 bg-white px-3">
+              <span className="text-sm font-semibold text-sky-700">@</span>
+              <input
+                id="bot-handle"
+                name="bot-handle"
+                data-testid="bot-handle-input"
+                value={botHandleDraft}
+                onChange={(event) => setBotHandleDraft(event.target.value.replace(/^@+/, "").replace(/\s+/g, "-"))}
+                placeholder="peter-griffin"
+                maxLength={24}
+                autoComplete="off"
+                spellCheck={false}
+                className="h-11 w-full bg-transparent px-2 text-sm text-slate-900 focus-visible:outline-none"
+              />
+            </div>
+            <p className="mt-1 text-xs text-slate-500">So wird der Bot im Chat getriggert.</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700" htmlFor="bot-language-preference">
+              Sprache
+            </label>
+            <select
+              id="bot-language-preference"
+              name="bot-language-preference"
+              data-testid="bot-language-input"
+              value={botLanguagePreferenceDraft}
+              onChange={(event) => setBotLanguagePreferenceDraft(event.target.value as BotLanguagePreference)}
+              className="mt-1.5 h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+            >
+              <option value="de">Deutsch</option>
+              <option value="en">Englisch</option>
+              <option value="all">Alle Sprachen</option>
+            </select>
+            <p className="mt-1 text-xs text-slate-500">Alle Sprachen passt sich an die Sprache der Nachricht an.</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700" htmlFor="bot-instructions">
+              Anweisungen
+            </label>
+            <textarea
+              id="bot-instructions"
+              name="bot-instructions"
+              data-testid="bot-instructions-input"
+              value={botInstructionsDraft}
+              onChange={(event) => setBotInstructionsDraft(event.target.value)}
+              rows={5}
+              placeholder="Beschreibe kurz, wie die Figur spricht und reagiert."
+              maxLength={1000}
+              className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+            />
+            <p className="mt-1 text-xs text-slate-500">{botInstructionsRemaining} Zeichen frei</p>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-slate-700" htmlFor="bot-catchphrases">
+              Catchphrases
+            </label>
+            <textarea
+              id="bot-catchphrases"
+              name="bot-catchphrases"
+              data-testid="bot-catchphrases-input"
+              value={botCatchphrasesDraft}
+              onChange={(event) => setBotCatchphrasesDraft(event.target.value)}
+              rows={3}
+              placeholder={"Giggity\nShut up, Meg"}
+              className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+            />
+            <p className="mt-1 text-xs text-slate-500">Optional, eine Zeile pro Satz.</p>
+          </div>
+
+          <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Profilbild</p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => botProfileUploadRef.current?.click()}
+                disabled={uploadingBotProfile}
+                className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:opacity-60"
+              >
+                {uploadingBotProfile ? "Lädt Bild…" : "Bild hochladen"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setBotProfilePictureDraft(getDefaultProfilePicture())}
+                disabled={uploadingBotProfile}
+                className="h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:opacity-60"
+              >
+                Standardbild
+              </button>
+            </div>
+            <div
+              className={`rounded-lg border px-3 py-2 transition ${
+                botProfileDropActive
+                  ? "border-sky-400 bg-sky-50"
+                  : "border-slate-200 bg-white"
+              }`}
+              tabIndex={0}
+              onDragOver={onBotProfileImageDragOver}
+              onDragEnter={onBotProfileImageDragOver}
+              onDragLeave={onBotProfileImageDragLeave}
+              onDrop={onBotProfileImageDrop}
+            >
+              <p className="text-xs text-slate-500">Bild hierher ziehen oder per Cmd/Ctrl + V einfügen.</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700" htmlFor="bot-profile-picture-url">
+                Bild-Link
+              </label>
+              <input
+                id="bot-profile-picture-url"
+                name="bot-profile-picture-url"
+                type="url"
+                data-testid="bot-profile-picture-url-input"
+                value={botProfilePictureDraft}
+                onChange={(event) => setBotProfilePictureDraft(event.target.value)}
+                placeholder="https://example.com/bot.png"
+                autoComplete="off"
+                spellCheck={false}
+                className="mt-1.5 h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-3 rounded-xl border border-slate-200 bg-slate-50/60 p-3">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Autopost</p>
+              <button
+                type="button"
+                onClick={() => setBotAutomationExpanded((current) => !current)}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+              >
+                {botAutomationExpanded ? "Optionen ausblenden" : "Mehr Optionen"}
+              </button>
+            </div>
+
+            <label className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2.5">
+              <span className="text-sm font-medium text-slate-700">Spontane Nachrichten</span>
+              <input
+                type="checkbox"
+                checked={botAutonomousEnabledDraft}
+                onChange={(event) => {
+                  setBotAutonomousEnabledDraft(event.target.checked);
+                  if (event.target.checked) {
+                    setBotAutomationExpanded(true);
+                  }
+                }}
+              />
+            </label>
+
+            {botAutomationExpanded ? (
+              <>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700" htmlFor="bot-auto-minutes-min">
+                      Min. Minuten
+                    </label>
+                    <input
+                      id="bot-auto-minutes-min"
+                      name="bot-auto-minutes-min"
+                      type="number"
+                      min={minBotAutonomousIntervalMinutes}
+                      max={maxBotAutonomousIntervalMinutes}
+                      value={botAutonomousMinMinutesDraft}
+                      onChange={(event) => setBotAutonomousMinMinutesDraft(event.target.value)}
+                      className="mt-1.5 h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-slate-700" htmlFor="bot-auto-minutes-max">
+                      Max. Minuten
+                    </label>
+                    <input
+                      id="bot-auto-minutes-max"
+                      name="bot-auto-minutes-max"
+                      type="number"
+                      min={minBotAutonomousIntervalMinutes}
+                      max={maxBotAutonomousIntervalMinutes}
+                      value={botAutonomousMaxMinutesDraft}
+                      onChange={(event) => setBotAutonomousMaxMinutesDraft(event.target.value)}
+                      className="mt-1.5 h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700" htmlFor="bot-auto-prompt">
+                    Gedanken-Fokus
+                  </label>
+                  <textarea
+                    id="bot-auto-prompt"
+                    name="bot-auto-prompt"
+                    value={botAutonomousPromptDraft}
+                    onChange={(event) => setBotAutonomousPromptDraft(event.target.value)}
+                    rows={3}
+                    maxLength={280}
+                    placeholder="Optional: Worüber soll der Bot spontan posten?"
+                    className="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+                  />
+                </div>
+              </>
+            ) : null}
+          </div>
+
+          <p
+              className={`text-sm ${
+                botFormReady || botLimitReached ? "text-slate-600" : "text-rose-700"
+              }`}
+            data-testid="bot-helper-text"
+          >
+            {botHelperText}
+          </p>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void saveBot()}
+              disabled={botSaveDisabled}
+              data-testid="bot-save-button"
+              className="h-11 rounded-xl bg-slate-900 px-4 text-sm font-semibold text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 disabled:opacity-60"
+            >
+              {savingBot ? "Speichert…" : editingBotId ? "Änderungen speichern" : "Bot erstellen"}
+            </button>
+            <button
+              type="button"
+              onClick={() => resetBotEditor()}
+              data-testid={editingBotId ? "bot-cancel-edit-button" : "bot-close-button"}
+              className="h-11 rounded-xl border border-slate-200 bg-white px-4 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300"
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </section>
   );
 
   if (!session) {
@@ -4080,6 +4989,7 @@ export function ChatApp() {
         memberHighlight={highlightOwnMember}
         onOpenProfileEditor={openProfileEditor}
         onOpenDevMenu={isDeveloperMode ? openDevMenu : undefined}
+        onOpenBots={openBotEditor}
         onOpenSharedBackground={openSharedBackgroundModal}
         onOpenMedia={openMediaModal}
         onOpenPointsInfo={openPointsInfoModal}
@@ -4314,7 +5224,7 @@ export function ChatApp() {
           open={showPointsInfo}
           onClose={() => setShowPointsInfo(false)}
           title="Wie bekomme ich PPC Score?"
-          description="Diese Aktionen geben dir Punkte."
+          description="So wird dein PPC Score aktuell wirklich berechnet."
           maxWidthClassName="sm:max-w-lg"
           bodyClassName="space-y-4"
           footer={(
@@ -4329,11 +5239,25 @@ export function ChatApp() {
             </div>
           )}
         >
+          <div className="rounded-2xl border border-sky-100 bg-sky-50/80 p-3">
+            <p className="text-sm font-semibold text-slate-900">Direkte Punkte pro Aktion</p>
+            <p className="mt-1 text-xs leading-5 text-slate-600">
+              Dein Rohscore steigt durch diese Aktionen. Der sichtbare PPC Score sinkt bei längerer Inaktivität
+              langsam wieder ab.
+            </p>
+          </div>
+
           <div className="space-y-2">
             {PPC_MEMBER_POINT_RULES.map((rule) => (
-              <div key={rule.id} className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
-                <p className="text-sm text-slate-700">{rule.label}</p>
-                <span className="rounded-full border border-sky-200 bg-sky-50 px-2 py-0.5 text-xs font-semibold text-sky-700">
+              <div
+                key={rule.id}
+                className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5"
+              >
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-slate-800">{rule.label}</p>
+                  <p className="mt-0.5 text-xs leading-5 text-slate-600">{rule.description}</p>
+                </div>
+                <span className="shrink-0 rounded-full border border-sky-200 bg-white px-2 py-0.5 text-xs font-semibold text-sky-700">
                   +{rule.points}
                 </span>
               </div>
@@ -4457,6 +5381,38 @@ export function ChatApp() {
         accept="image/png,image/jpeg,image/webp,image/gif"
         onChange={(event) => void onProfileImageUpload(event.target.files?.[0])}
       />
+
+      <input
+        ref={botProfileUploadRef}
+        type="file"
+        className="hidden"
+        accept="image/png,image/jpeg,image/webp,image/gif"
+        onChange={(event) => void onBotProfileImageUpload(event.target.files?.[0])}
+      />
+
+      {editingBots ? (
+        <AppOverlayDialog
+          open={editingBots}
+          onClose={closeBotEditor}
+          title="Bots"
+          description="Erstelle und verwalte deine Charaktere."
+          maxWidthClassName="sm:max-w-3xl"
+          bodyClassName="space-y-3"
+          footer={(
+            <div className="flex flex-wrap gap-2 sm:justify-end">
+              <button
+                type="button"
+                onClick={closeBotEditor}
+                className="inline-flex w-full justify-center rounded-md bg-white px-3 py-2 text-sm font-semibold text-slate-900 shadow-xs inset-ring-1 inset-ring-slate-300 hover:bg-slate-50 sm:w-auto"
+              >
+                Schließen
+              </button>
+            </div>
+          )}
+        >
+          {botManagerSection}
+        </AppOverlayDialog>
+      ) : null}
 
       {editingProfile ? (
         <AppOverlayDialog
@@ -4677,8 +5633,8 @@ export function ChatApp() {
         <ProfileImageCropModal
           key={`${profileCropFile.name}-${profileCropFile.size}-${profileCropFile.lastModified}`}
           file={profileCropFile}
-          busy={uploadingProfile}
-          onCancel={() => setProfileCropFile(null)}
+          busy={profileCropTarget === "bot" ? uploadingBotProfile : uploadingProfile}
+          onCancel={clearProfileCropState}
           onConfirm={onProfileCropConfirm}
         />
       ) : null}
