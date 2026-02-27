@@ -11,6 +11,7 @@ import {
   isMemberRankUpgrade,
   MEMBER_RANK_STEPS,
   memberRankLabel,
+  PPC_MEMBER_BOT_CREATED_POINTS,
   PPC_MEMBER_BRAND,
   PPC_MEMBER_SCORE_WEIGHTS,
 } from "@/lib/member-progress";
@@ -26,12 +27,19 @@ import type {
   AuthSessionDTO,
   AuthSignInRequest,
   AuthSignUpRequest,
+  BotLanguagePreference,
+  BotIdentityDTO,
+  BotManagerDTO,
+  CreateBotRequest,
   ChatBackgroundDTO,
   AppKillDTO,
   CreateMessageRequest,
+  DeleteBotRequest,
   DeveloperUserTasteListDTO,
   LoginRequest,
   LoginResponseDTO,
+  ManagedBotDTO,
+  MemberRank,
   NotificationPageDTO,
   PublicUserProfileDTO,
   ReactionType,
@@ -39,6 +47,7 @@ import type {
   TasteProfileEventDTO,
   TasteProfileEventPageDTO,
   TasteWindowKey,
+  UpdateBotRequest,
   UserTasteProfileDTO,
   MediaItemDTO,
   MediaPageDTO,
@@ -92,6 +101,11 @@ const AI_QUEUE_MAX_PENDING = 40;
 const AI_QUEUE_MAX_ATTEMPTS = 4;
 const AI_QUEUE_STALE_PROCESSING_MS = 2 * 60 * 1_000;
 const AI_BUSY_NOTICE_COOLDOWN_MS = 5_000;
+const AUTONOMOUS_BOT_MIN_INTERVAL_MINUTES = 5;
+const AUTONOMOUS_BOT_MAX_INTERVAL_MINUTES = 1440;
+const AUTONOMOUS_BOT_DEFAULT_MIN_INTERVAL_MINUTES = 60;
+const AUTONOMOUS_BOT_DEFAULT_MAX_INTERVAL_MINUTES = 240;
+const AUTONOMOUS_BOT_FALLBACK_RETRY_MINUTES = 15;
 const AUTH_SESSION_WINDOW_MS = 30 * 24 * 60 * 60 * 1_000;
 const TASTE_PROFILE_WINDOW_MS = 30 * 24 * 60 * 60 * 1_000;
 const TASTE_PROFILE_WINDOW_DAYS = 30;
@@ -168,6 +182,34 @@ interface GrokRuntimeConfig {
   textModel: string;
 }
 
+interface BotRuntimeTarget {
+  id: string;
+  displayName: string;
+  profilePicture: string;
+  mentionHandle: string;
+  languagePreference: BotLanguagePreference;
+  instructions: string;
+  catchphrases: string[];
+  autonomousPrompt?: string | null;
+  deletedAt: Date | null;
+  owner: {
+    id: string;
+    username: string;
+  };
+}
+
+type MentionTarget =
+  | {
+    kind: "provider";
+    targetKey: string;
+    provider: AiProvider;
+  }
+  | {
+    kind: "bot";
+    targetKey: string;
+    bot: BotRuntimeTarget;
+  };
+
 const AI_PROVIDER_MENTION_REGEX: Record<AiProvider, RegExp> = {
   chatgpt: /(^|\s)@chatgpt\b/i,
   grok: /(^|\s)@grok\b/i,
@@ -206,6 +248,16 @@ const GROK_GROUP_CHAT_PERSONA_PROMPT = [
   "",
   "Always prioritize the group's existing style. Riff off their energy; do not overdo or underdo the banter.",
 ].join("\n");
+
+const BOT_SLOT_LIMIT_BY_RANK: Record<MemberRank, number> = {
+  BRONZE: 1,
+  SILBER: 1,
+  GOLD: 1,
+  PLATIN: 2,
+  DIAMANT: 3,
+  ONYX: 4,
+  TITAN: 5,
+};
 
 function hasOpenAiApiKey(): boolean {
   return Boolean(process.env.OPENAI_API_KEY?.trim());
@@ -261,6 +313,113 @@ function detectAiProviders(message: string): AiProvider[] {
   return indices.sort((a, b) => a.index - b.index).map((entry) => entry.provider);
 }
 
+function extractMentionHandles(message: string): Array<{ handle: string; index: number }> {
+  const matches: Array<{ handle: string; index: number }> = [];
+  const regex = /(^|\s)@([a-z0-9-]{3,24})\b/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(message)) !== null) {
+    const handle = normalizeBotHandle(match[2] || "");
+    if (!handle) continue;
+    const handleIndex = match.index + (match[1]?.length || 0);
+    matches.push({
+      handle,
+      index: handleIndex,
+    });
+  }
+  return matches;
+}
+
+async function detectMentionTargets(message: string): Promise<MentionTarget[]> {
+  const matches = extractMentionHandles(message);
+  if (matches.length === 0) return [];
+
+  const customHandles = [...new Set(matches
+    .map((entry) => entry.handle)
+    .filter((handle) => handle !== "chatgpt" && handle !== "grok"))];
+
+  const botsByHandle = new Map<string, BotRuntimeTarget>();
+  if (customHandles.length > 0 && botTableAvailable !== false) {
+    let bots: Array<{
+      id: string;
+      displayName: string;
+      profilePicture: string;
+      mentionHandle: string;
+      languagePreference: string;
+      instructions: string;
+      catchphrases: Prisma.JsonValue;
+      deletedAt: Date | null;
+      owner: {
+        id: string;
+        username: string;
+      };
+    }> = [];
+    try {
+      bots = await prisma.bot.findMany({
+        where: {
+          deletedAt: null,
+          mentionHandle: {
+            in: customHandles,
+          },
+        },
+        select: {
+          id: true,
+          displayName: true,
+          profilePicture: true,
+          mentionHandle: true,
+          languagePreference: true,
+          instructions: true,
+          catchphrases: true,
+          deletedAt: true,
+          owner: {
+            select: {
+              id: true,
+              username: true,
+            },
+          },
+        },
+      });
+      markBotTableAvailableIfUnknown();
+    } catch (error) {
+      if (!isMissingBotTableError(error)) throw error;
+    }
+    for (const bot of bots) {
+      botsByHandle.set(bot.mentionHandle, {
+        ...bot,
+        languagePreference: normalizeBotLanguagePreference(bot.languagePreference),
+        catchphrases: normalizeBotCatchphrases(bot.catchphrases),
+      });
+    }
+  }
+
+  const ordered: MentionTarget[] = [];
+  const seen = new Set<string>();
+  for (const match of matches.sort((a, b) => a.index - b.index)) {
+    if (match.handle === "chatgpt" || match.handle === "grok") {
+      const targetKey = `provider:${match.handle}`;
+      if (seen.has(targetKey)) continue;
+      seen.add(targetKey);
+      ordered.push({
+        kind: "provider",
+        targetKey,
+        provider: match.handle,
+      });
+      continue;
+    }
+    const bot = botsByHandle.get(match.handle);
+    if (!bot) continue;
+    const targetKey = `bot:${bot.id}`;
+    if (seen.has(targetKey)) continue;
+    seen.add(targetKey);
+    ordered.push({
+      kind: "bot",
+      targetKey,
+      bot,
+    });
+  }
+
+  return ordered;
+}
+
 function isAiDisplayName(username: string): boolean {
   const normalized = username.trim().toLowerCase();
   return Object.values(AI_PROVIDER_DISPLAY_NAME).some((name) => name.trim().toLowerCase() === normalized);
@@ -297,6 +456,11 @@ let lastBehaviorEventCleanupAt = 0;
 let canPersistAiStatusRow = true;
 let encryptedLoginColumnsAvailable: boolean | null = null;
 let usernameChangedEnumValueAvailable: boolean | null = null;
+let queueWorkersAutoStart = true;
+let botTableAvailable: boolean | null = null;
+let messageBotColumnAvailable: boolean | null = null;
+let aiQueueDrainGeneration = 0;
+let taggingQueueDrainGeneration = 0;
 
 let mediaItemsCache:
   | {
@@ -352,6 +516,22 @@ function markEncryptedLoginColumnsAvailableIfUnknown(): void {
   }
 }
 
+function markBotTableUnavailable(): void {
+  botTableAvailable = false;
+}
+
+function markBotTableAvailableIfUnknown(): void {
+  botTableAvailable = true;
+}
+
+function markMessageBotColumnUnavailable(): void {
+  messageBotColumnAvailable = false;
+}
+
+function markMessageBotColumnAvailableIfUnknown(): void {
+  messageBotColumnAvailable = true;
+}
+
 function isMissingColumnError(error: unknown): boolean {
   if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2022") {
     return true;
@@ -390,6 +570,203 @@ function isDeveloperAlias(username: string): boolean {
   const normalized = username.trim().toLowerCase();
   const developer = DEVELOPER_USERNAME.toLowerCase();
   return normalized === developer || normalized.startsWith(`${developer}-`);
+}
+
+function normalizeBotHandle(value: string): string {
+  return value.trim().replace(/^@+/, "").toLowerCase();
+}
+
+function normalizeBotLanguagePreference(value?: string | null): BotLanguagePreference {
+  if (value === "de" || value === "en") return value;
+  return "all";
+}
+
+const GERMAN_LANGUAGE_SIGNAL_REGEX =
+  /\b(ich|du|und|nicht|wie|was|ist|bist|mir|mich|mein|dein|heute|warum|hallo|danke|bitte|ja|nein)\b|[äöüß]/gi;
+const ENGLISH_LANGUAGE_SIGNAL_REGEX =
+  /\b(the|and|you|your|how|what|is|are|today|hello|thanks|please|yes|no|why|this|that|with)\b/gi;
+
+function inferTwoWayLanguage(text: string): "de" | "en" {
+  const normalized = text.trim().toLowerCase();
+  if (!normalized) return "de";
+
+  const germanSignals = normalized.match(GERMAN_LANGUAGE_SIGNAL_REGEX)?.length ?? 0;
+  const englishSignals = normalized.match(ENGLISH_LANGUAGE_SIGNAL_REGEX)?.length ?? 0;
+
+  if (germanSignals === englishSignals) {
+    return "de";
+  }
+  return germanSignals > englishSignals ? "de" : "en";
+}
+
+function isMissingBotTableError(error: unknown): boolean {
+  if (!isMissingColumnError(error)) return false;
+  if (!(error instanceof Error)) return false;
+  const missing = error.message.toLowerCase().includes("bot");
+  if (missing) {
+    markBotTableUnavailable();
+  }
+  return missing;
+}
+
+function normalizeBotCatchphrases(value: Prisma.JsonValue | string[]): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((entry) => (typeof entry === "string" ? [entry.trim()] : []))
+      .filter(Boolean)
+      .slice(0, 8);
+  }
+  return [];
+}
+
+function mapBotIdentity(bot: {
+  id: string;
+  displayName: string;
+  mentionHandle: string;
+  owner: { id: string; username: string };
+}): BotIdentityDTO {
+  return {
+    id: bot.id,
+    clientId: `bot:${bot.id}`,
+    displayName: bot.displayName,
+    mentionHandle: bot.mentionHandle,
+    createdByUserId: bot.owner.id,
+    createdByUsername: bot.owner.username,
+    provider: "grok",
+  };
+}
+
+function mapManagedBot(bot: {
+  id: string;
+  displayName: string;
+  profilePicture: string;
+  mentionHandle: string;
+  languagePreference?: string | null;
+  instructions: string;
+  catchphrases: Prisma.JsonValue;
+  autonomousEnabled?: boolean;
+  autonomousMinIntervalMinutes?: number;
+  autonomousMaxIntervalMinutes?: number;
+  autonomousPrompt?: string | null;
+  autonomousNextAt?: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}): ManagedBotDTO {
+  return {
+    id: bot.id,
+    displayName: bot.displayName,
+    profilePicture: bot.profilePicture,
+    mentionHandle: bot.mentionHandle,
+    languagePreference: normalizeBotLanguagePreference(bot.languagePreference),
+    instructions: bot.instructions,
+    catchphrases: normalizeBotCatchphrases(bot.catchphrases),
+    autonomousEnabled: Boolean(bot.autonomousEnabled),
+    autonomousMinIntervalMinutes: bot.autonomousMinIntervalMinutes ?? AUTONOMOUS_BOT_DEFAULT_MIN_INTERVAL_MINUTES,
+    autonomousMaxIntervalMinutes: bot.autonomousMaxIntervalMinutes ?? AUTONOMOUS_BOT_DEFAULT_MAX_INTERVAL_MINUTES,
+    autonomousPrompt: bot.autonomousPrompt?.trim() || "",
+    autonomousNextAt: bot.autonomousNextAt?.toISOString() ?? null,
+    createdAt: bot.createdAt.toISOString(),
+    updatedAt: bot.updatedAt.toISOString(),
+  };
+}
+
+function botProfilePicture(value?: string | null): string {
+  return value?.trim() || getDefaultProfilePicture();
+}
+
+function normalizeBotAutonomousPrompt(value?: string | null): string | null {
+  const normalized = value?.trim() || "";
+  return normalized || null;
+}
+
+async function resolveBotResponseLanguage(input: {
+  bot: Pick<BotRuntimeTarget, "languagePreference">;
+  messageText?: string;
+}): Promise<"de" | "en"> {
+  const preference = normalizeBotLanguagePreference(input.bot.languagePreference);
+  if (preference === "de" || preference === "en") {
+    return preference;
+  }
+  if (input.messageText?.trim()) {
+    return inferTwoWayLanguage(input.messageText);
+  }
+
+  const baseQuery = {
+    where: {
+      authorId: {
+        not: null,
+      },
+      authorName: {
+        not: "System",
+      },
+      type: MessageType.MESSAGE,
+    },
+    orderBy: [{ createdAt: "desc" as const }],
+    take: 12,
+    select: {
+      content: true,
+    },
+  };
+
+  let recentMessages: Array<{ content: string }> = [];
+  try {
+    recentMessages = await prisma.message.findMany({
+      ...baseQuery,
+      where: {
+        ...baseQuery.where,
+        botId: null,
+      },
+    });
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    recentMessages = await prisma.message.findMany(baseQuery);
+  }
+
+  const combinedText = recentMessages
+    .map((entry) => entry.content.trim())
+    .filter(Boolean)
+    .join("\n");
+  return inferTwoWayLanguage(combinedText);
+}
+
+function createNextAutonomousBotRunAt(minMinutes: number, maxMinutes: number): Date {
+  const safeMin = Math.max(
+    AUTONOMOUS_BOT_MIN_INTERVAL_MINUTES,
+    Math.min(AUTONOMOUS_BOT_MAX_INTERVAL_MINUTES, Math.round(minMinutes)),
+  );
+  const safeMax = Math.max(
+    safeMin,
+    Math.min(AUTONOMOUS_BOT_MAX_INTERVAL_MINUTES, Math.round(maxMinutes)),
+  );
+  const spread = safeMax - safeMin;
+  const offsetMinutes = spread <= 0 ? safeMin : safeMin + Math.floor(Math.random() * (spread + 1));
+  return new Date(Date.now() + offsetMinutes * 60 * 1_000);
+}
+
+function mapBotPresence(bot: {
+  id: string;
+  displayName: string;
+  profilePicture: string;
+  mentionHandle: string;
+  owner: { id: string; username: string };
+}): UserPresenceDTO {
+  const identity = mapBotIdentity(bot);
+  return {
+    id: identity.clientId,
+    clientId: identity.clientId,
+    username: identity.displayName,
+    profilePicture: botProfilePicture(bot.profilePicture),
+    status: "online",
+    isOnline: true,
+    lastSeenAt: null,
+    mentionHandle: identity.mentionHandle,
+    member: undefined,
+    bot: identity,
+  };
+}
+
+export function getBotLimitForRank(rank: MemberRank = "BRONZE"): number {
+  return BOT_SLOT_LIMIT_BY_RANK[rank] ?? 1;
 }
 
 function isPpcMemberEligibleUser(input: { clientId: string; username: string }): boolean {
@@ -432,11 +809,72 @@ function mapUser(user: {
     status: user.status,
     isOnline: user.isOnline,
     lastSeenAt: user.lastSeenAt ? user.lastSeenAt.toISOString() : null,
+    mentionHandle: undefined,
     member,
+    bot: undefined,
   };
 }
 
 const MESSAGE_INCLUDE = Prisma.validator<Prisma.MessageInclude>()({
+  questionMessage: {
+    select: {
+      id: true,
+      authorName: true,
+      content: true,
+    },
+  },
+  author: {
+    select: {
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
+    },
+  },
+  bot: {
+      select: {
+        id: true,
+        displayName: true,
+        profilePicture: true,
+        mentionHandle: true,
+        owner: {
+        select: {
+          id: true,
+          username: true,
+        },
+      },
+    },
+  },
+  pollOptions: {
+    include: {
+      votes: {
+        include: {
+          user: {
+            select: {
+              id: true,
+              username: true,
+              profilePicture: true,
+            },
+          },
+        },
+      },
+    },
+  },
+  reactions: {
+    include: {
+      user: {
+        select: {
+          id: true,
+          username: true,
+          profilePicture: true,
+        },
+      },
+    },
+  },
+});
+
+const LEGACY_MESSAGE_INCLUDE = Prisma.validator<Prisma.MessageInclude>()({
   questionMessage: {
     select: {
       id: true,
@@ -481,7 +919,138 @@ const MESSAGE_INCLUDE = Prisma.validator<Prisma.MessageInclude>()({
   },
 });
 
+const LEGACY_MESSAGE_SELECT = Prisma.validator<Prisma.MessageSelect>()({
+  id: true,
+  type: true,
+  content: true,
+  authorId: true,
+  authorName: true,
+  authorProfilePicture: true,
+  optionOne: true,
+  optionTwo: true,
+  pollLeftCount: true,
+  pollRightCount: true,
+  pollMultiSelect: true,
+  pollAllowVoteChange: true,
+  questionMessageId: true,
+  taggingStatus: true,
+  taggingPayload: true,
+  taggingUpdatedAt: true,
+  taggingError: true,
+  createdAt: true,
+  questionMessage: {
+    select: {
+      id: true,
+      authorName: true,
+      content: true,
+    },
+  },
+  author: {
+    select: {
+      clientId: true,
+      username: true,
+      profilePicture: true,
+      ppcMemberScoreRaw: true,
+      ppcMemberLastActiveAt: true,
+    },
+  },
+  pollOptions: {
+    select: {
+      id: true,
+      label: true,
+      sortOrder: true,
+      votes: {
+        select: {
+          user: {
+            select: {
+              id: true,
+              username: true,
+              profilePicture: true,
+            },
+          },
+        },
+      },
+    },
+  },
+  reactions: {
+    select: {
+      id: true,
+      messageId: true,
+      userId: true,
+      reaction: true,
+      createdAt: true,
+      updatedAt: true,
+      user: {
+        select: {
+          id: true,
+          username: true,
+          profilePicture: true,
+        },
+      },
+    },
+  },
+});
+
 type MessageRow = Prisma.MessageGetPayload<{ include: typeof MESSAGE_INCLUDE }>;
+type LegacyMessageRow = Prisma.MessageGetPayload<{ select: typeof LEGACY_MESSAGE_SELECT }>;
+type LegacyRawMessageRow = {
+  id: string;
+  type: MessageType;
+  content: string;
+  authorId: string | null;
+  authorName: string;
+  authorProfilePicture: string | null;
+  optionOne: string | null;
+  optionTwo: string | null;
+  pollLeftCount: number;
+  pollRightCount: number;
+  pollMultiSelect: boolean;
+  pollAllowVoteChange: boolean;
+  questionMessageId: string | null;
+  taggingStatus: AiJobStatus | null;
+  taggingPayload: Prisma.JsonValue | null;
+  taggingUpdatedAt: Date | null;
+  taggingError: string | null;
+  createdAt: Date;
+  questionMessage: {
+    id: string;
+    authorName: string;
+    content: string;
+  } | null;
+  author: {
+    clientId: string;
+    username: string;
+    profilePicture: string;
+    ppcMemberScoreRaw: number | null;
+    ppcMemberLastActiveAt: Date | null;
+  } | null;
+  pollOptions: Array<{
+    id: string;
+    label: string;
+    sortOrder: number;
+    votes: Array<{
+      user: {
+        id: string;
+        username: string;
+        profilePicture: string;
+      } | null;
+    }>;
+  }>;
+  reactions: Array<{
+    id: string;
+    messageId: string;
+    userId: string;
+    reaction: MessageReactionType;
+    createdAt: Date;
+    updatedAt: Date;
+    user: {
+      id: string;
+      username: string;
+      profilePicture: string;
+    } | null;
+  }>;
+};
+type CompatibleMessageRow = MessageRow | LegacyMessageRow | LegacyRawMessageRow;
 
 type MessageTaggingDTOValue = NonNullable<MessageDTO["tagging"]>;
 type ScoredTagDTOValue = MessageTaggingDTOValue["messageTags"][number];
@@ -595,7 +1164,7 @@ function normalizeTaggedImages(raw: unknown): MessageTaggingDTOValue["images"] {
   return images;
 }
 
-function mapMessageTagging(message: MessageRow): MessageDTO["tagging"] | undefined {
+function mapMessageTagging(message: CompatibleMessageRow): MessageDTO["tagging"] | undefined {
   const status = toTaggingStatus(message.taggingStatus);
   if (!status) return undefined;
 
@@ -647,7 +1216,7 @@ function roundReactionScore(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-function mapMessageReactions(message: MessageRow, viewerUserId?: string | null): MessageReactionsDTOValue {
+function mapMessageReactions(message: CompatibleMessageRow, viewerUserId?: string | null): MessageReactionsDTOValue {
   const counts = new Map<ReactionType, number>(MESSAGE_REACTION_TYPES.map((reaction) => [reaction, 0]));
   const usersByReaction = new Map<
     ReactionType,
@@ -884,6 +1453,40 @@ async function findLatestPpcMemberActiveEvent(userId: string): Promise<{ created
   }
 }
 
+async function getBotCreationStatsForUser(userId: string): Promise<{ count: number; latestCreatedAt: Date | null }> {
+  if (botTableAvailable === false) {
+    return {
+      count: 0,
+      latestCreatedAt: null,
+    };
+  }
+
+  try {
+    const [count, latestRows] = await Promise.all([
+      prisma.bot.count({
+        where: { ownerUserId: userId },
+      }),
+      prisma.bot.findMany({
+        where: { ownerUserId: userId },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        take: 1,
+        select: { createdAt: true },
+      }),
+    ]);
+    markBotTableAvailableIfUnknown();
+    return {
+      count,
+      latestCreatedAt: latestRows[0]?.createdAt ?? null,
+    };
+  } catch (error) {
+    if (!isMissingBotTableError(error)) throw error;
+    return {
+      count: 0,
+      latestCreatedAt: null,
+    };
+  }
+}
+
 async function getPpcMemberBreakdown(userId: string): Promise<{
   breakdown: TasteProfileDetailedDTO["memberBreakdown"];
   rawScore: number;
@@ -898,7 +1501,7 @@ async function getPpcMemberBreakdown(userId: string): Promise<{
     ],
   };
 
-  const [behaviorRows, reactionsGiven, reactionsReceived, latestActiveEvent, systemJoinMessageCount, latestSystemJoinMessage] = await Promise.all([
+  const [behaviorRows, reactionsGiven, reactionsReceived, latestActiveEvent, systemJoinMessageCount, latestSystemJoinMessage, botCreationStats] = await Promise.all([
     prisma.userBehaviorEvent.groupBy({
       by: ["type"],
       where: { userId },
@@ -921,6 +1524,7 @@ async function getPpcMemberBreakdown(userId: string): Promise<{
       orderBy: [{ createdAt: "desc" }, { id: "desc" }],
       select: { createdAt: true },
     }),
+    getBotCreationStatsForUser(userId),
   ]);
 
   const eventCounts = new Map<UserBehaviorEventType, number>();
@@ -936,6 +1540,7 @@ async function getPpcMemberBreakdown(userId: string): Promise<{
   const latestEventActivityAt = latestActiveEvent?.createdAt || null;
 
   const breakdown: TasteProfileDetailedDTO["memberBreakdown"] = {
+    botsCreated: botCreationStats.count,
     messagesCreated: eventCounts.get(UserBehaviorEventType.MESSAGE_CREATED) || 0,
     reactionsGiven,
     reactionsReceived,
@@ -949,7 +1554,8 @@ async function getPpcMemberBreakdown(userId: string): Promise<{
   };
 
   breakdown.rawScore = (
-    breakdown.messagesCreated * PPC_MEMBER_SCORE_WEIGHTS.messagesCreated
+    breakdown.botsCreated * PPC_MEMBER_BOT_CREATED_POINTS
+    + breakdown.messagesCreated * PPC_MEMBER_SCORE_WEIGHTS.messagesCreated
     + breakdown.reactionsGiven * PPC_MEMBER_SCORE_WEIGHTS.reactionsGiven
     + breakdown.reactionsReceived * PPC_MEMBER_SCORE_WEIGHTS.reactionsReceived
     + breakdown.aiMentions * PPC_MEMBER_SCORE_WEIGHTS.aiMentions
@@ -960,12 +1566,21 @@ async function getPpcMemberBreakdown(userId: string): Promise<{
     + breakdown.usernameChanges * PPC_MEMBER_SCORE_WEIGHTS.usernameChanges
   );
 
+  const activityCandidates = [
+    latestEventActivityAt,
+    latestRenameActivityAt,
+    botCreationStats.latestCreatedAt,
+  ].filter((value): value is Date => Boolean(value));
+  const latestActivityAt = activityCandidates.length > 0
+    ? activityCandidates.reduce((latest, current) => (
+      current.getTime() > latest.getTime() ? current : latest
+    ))
+    : null;
+
   return {
     breakdown,
     rawScore: breakdown.rawScore,
-    lastActiveAt: latestEventActivityAt && latestRenameActivityAt
-      ? (latestEventActivityAt.getTime() >= latestRenameActivityAt.getTime() ? latestEventActivityAt : latestRenameActivityAt)
-      : latestEventActivityAt || latestRenameActivityAt || null,
+    lastActiveAt: latestActivityAt,
   };
 }
 
@@ -1195,7 +1810,7 @@ async function recomputeTasteProfileForUser(userId: string): Promise<void> {
 }
 
 function mapMessage(
-  message: MessageRow,
+  message: CompatibleMessageRow,
   options: {
     viewerUserId?: string | null;
   } = {},
@@ -1262,6 +1877,7 @@ function mapMessage(
           lastActiveAt: message.author.ppcMemberLastActiveAt || null,
         })
         : undefined,
+    bot: "bot" in message && message.bot ? mapBotIdentity(message.bot) : undefined,
     tagging: mapMessageTagging(message),
     reactions: mapMessageReactions(message, options.viewerUserId),
     poll:
@@ -1277,10 +1893,322 @@ function mapMessage(
   };
 }
 
-async function publishMessageUpdatedById(messageId: string): Promise<MessageRow | null> {
-  const row = await prisma.message.findUnique({
+async function findManyMessagesWithCompatibility(
+  args: Omit<Prisma.MessageFindManyArgs, "include" | "select">,
+): Promise<CompatibleMessageRow[]> {
+  const legacyWhere = (args.where ?? {}) as {
+    id?: string;
+    createdAt?: { gt?: Date; lt?: Date };
+  };
+  const legacyOrderBy = (
+    Array.isArray(args.orderBy) ? args.orderBy[0] : args.orderBy
+  ) as { createdAt?: Prisma.SortOrder } | undefined;
+  const loadLegacyRows = async (): Promise<LegacyRawMessageRow[]> => {
+    const whereParts: Prisma.Sql[] = [];
+    if (legacyWhere.id) {
+      whereParts.push(Prisma.sql`"id" = ${legacyWhere.id}`);
+    }
+    if (legacyWhere.createdAt?.gt) {
+      whereParts.push(Prisma.sql`"createdAt" > ${legacyWhere.createdAt.gt}`);
+    }
+    if (legacyWhere.createdAt?.lt) {
+      whereParts.push(Prisma.sql`"createdAt" < ${legacyWhere.createdAt.lt}`);
+    }
+
+    const whereClause = whereParts.length > 0
+      ? Prisma.sql`WHERE ${Prisma.join(whereParts, " AND ")}`
+      : Prisma.empty;
+    const orderClause = legacyOrderBy?.createdAt === "asc"
+      ? Prisma.sql`ORDER BY "createdAt" ASC`
+      : Prisma.sql`ORDER BY "createdAt" DESC`;
+    const limitClause = typeof args.take === "number"
+      ? Prisma.sql`LIMIT ${args.take}`
+      : Prisma.empty;
+
+    const baseRows = await prisma.$queryRaw<Array<{
+      id: string;
+      type: MessageType;
+      content: string;
+      authorId: string | null;
+      authorName: string;
+      authorProfilePicture: string | null;
+      optionOne: string | null;
+      optionTwo: string | null;
+      pollLeftCount: number;
+      pollRightCount: number;
+      pollMultiSelect: boolean;
+      pollAllowVoteChange: boolean;
+      questionMessageId: string | null;
+      taggingStatus: AiJobStatus | null;
+      taggingPayload: Prisma.JsonValue | null;
+      taggingUpdatedAt: Date | null;
+      taggingError: string | null;
+      createdAt: Date;
+    }>>(Prisma.sql`
+      SELECT
+        "id",
+        "type",
+        "content",
+        "authorId",
+        "authorName",
+        "authorProfilePicture",
+        "optionOne",
+        "optionTwo",
+        "pollLeftCount",
+        "pollRightCount",
+        "pollMultiSelect",
+        "pollAllowVoteChange",
+        "questionMessageId",
+        "taggingStatus",
+        "taggingPayload",
+        "taggingUpdatedAt",
+        "taggingError",
+        "createdAt"
+      FROM "Message"
+      ${whereClause}
+      ${orderClause}
+      ${limitClause}
+    `);
+
+    if (baseRows.length === 0) {
+      return [];
+    }
+
+    const messageIds = baseRows.map((row) => row.id);
+    const authorIds = [...new Set(baseRows.map((row) => row.authorId).filter((value): value is string => Boolean(value)))];
+    const questionIds = [...new Set(baseRows
+      .map((row) => row.questionMessageId)
+      .filter((value): value is string => Boolean(value)))];
+
+    const [authors, questionMessages, pollOptions, reactions] = await Promise.all([
+      authorIds.length > 0
+        ? prisma.user.findMany({
+          where: { id: { in: authorIds } },
+          select: {
+            clientId: true,
+            username: true,
+            profilePicture: true,
+            ppcMemberScoreRaw: true,
+            ppcMemberLastActiveAt: true,
+            id: true,
+          },
+        })
+        : Promise.resolve([]),
+      questionIds.length > 0
+        ? prisma.$queryRaw<Array<{ id: string; authorName: string; content: string }>>(Prisma.sql`
+          SELECT "id", "authorName", "content"
+          FROM "Message"
+          WHERE "id" IN (${Prisma.join(questionIds)})
+        `)
+        : Promise.resolve([]),
+      prisma.pollOption.findMany({
+        where: { pollMessageId: { in: messageIds } },
+        select: {
+          id: true,
+          pollMessageId: true,
+          label: true,
+          sortOrder: true,
+          votes: {
+            select: {
+              user: {
+                select: {
+                  id: true,
+                  username: true,
+                  profilePicture: true,
+                },
+              },
+            },
+          },
+        },
+      }),
+      prisma.messageReaction.findMany({
+        where: { messageId: { in: messageIds } },
+        select: {
+          id: true,
+          messageId: true,
+          userId: true,
+          reaction: true,
+          createdAt: true,
+          updatedAt: true,
+          user: {
+            select: {
+              id: true,
+              username: true,
+              profilePicture: true,
+            },
+          },
+        },
+      }),
+    ]);
+
+    const authorById = new Map(
+      authors.map((author) => [
+        author.id,
+        {
+          clientId: author.clientId,
+          username: author.username,
+          profilePicture: author.profilePicture,
+          ppcMemberScoreRaw: author.ppcMemberScoreRaw,
+          ppcMemberLastActiveAt: author.ppcMemberLastActiveAt,
+        },
+      ] as const),
+    );
+    const questionById = new Map(questionMessages.map((row) => [row.id, row] as const));
+    const pollOptionsByMessageId = new Map<string, LegacyRawMessageRow["pollOptions"]>();
+    for (const option of pollOptions) {
+      const current = pollOptionsByMessageId.get(option.pollMessageId) || [];
+      current.push({
+        id: option.id,
+        label: option.label,
+        sortOrder: option.sortOrder,
+        votes: option.votes.map((vote) => ({
+          user: vote.user
+            ? {
+              id: vote.user.id,
+              username: vote.user.username,
+              profilePicture: vote.user.profilePicture,
+            }
+            : null,
+        })),
+      });
+      pollOptionsByMessageId.set(option.pollMessageId, current);
+    }
+
+    const reactionsByMessageId = new Map<string, LegacyRawMessageRow["reactions"]>();
+    for (const reaction of reactions) {
+      const current = reactionsByMessageId.get(reaction.messageId) || [];
+      current.push({
+        id: reaction.id,
+        messageId: reaction.messageId,
+        userId: reaction.userId,
+        reaction: reaction.reaction,
+        createdAt: reaction.createdAt,
+        updatedAt: reaction.updatedAt,
+        user: reaction.user
+          ? {
+            id: reaction.user.id,
+            username: reaction.user.username,
+            profilePicture: reaction.user.profilePicture,
+          }
+          : null,
+      });
+      reactionsByMessageId.set(reaction.messageId, current);
+    }
+
+    return baseRows.map((row) => ({
+      ...row,
+      questionMessage: row.questionMessageId ? questionById.get(row.questionMessageId) || null : null,
+      author: row.authorId ? authorById.get(row.authorId) || null : null,
+      pollOptions: pollOptionsByMessageId.get(row.id) || [],
+      reactions: reactionsByMessageId.get(row.id) || [],
+    }));
+  };
+
+  if (messageBotColumnAvailable === false) {
+    return await loadLegacyRows();
+  }
+
+  try {
+    const rows = await prisma.message.findMany({
+      ...args,
+      include: MESSAGE_INCLUDE,
+    });
+    markMessageBotColumnAvailableIfUnknown();
+    return rows;
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    markMessageBotColumnUnavailable();
+    return await loadLegacyRows();
+  }
+}
+
+async function findUniqueMessageWithCompatibility(
+  args: Omit<Prisma.MessageFindUniqueArgs, "include" | "select">,
+): Promise<CompatibleMessageRow | null> {
+  const messageId = ((args.where ?? {}) as { id?: string }).id;
+  const loadLegacyRow = async (): Promise<LegacyRawMessageRow | null> => {
+    if (!messageId) return null;
+    const rows = await findManyMessagesWithCompatibility({
+      where: { id: messageId },
+      take: 1,
+    });
+    return (rows[0] as LegacyRawMessageRow | MessageRow | LegacyMessageRow | undefined) ?? null;
+  };
+
+  if (messageBotColumnAvailable === false) {
+    return await loadLegacyRow();
+  }
+
+  try {
+    const row = await prisma.message.findUnique({
+      ...args,
+      include: MESSAGE_INCLUDE,
+    });
+    markMessageBotColumnAvailableIfUnknown();
+    return row;
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    markMessageBotColumnUnavailable();
+    return await loadLegacyRow();
+  }
+}
+
+async function createMessageWithCompatibility(
+  args: Omit<Prisma.MessageCreateArgs, "include" | "select">,
+): Promise<CompatibleMessageRow> {
+  try {
+    const row = await prisma.message.create({
+      ...args,
+      include: MESSAGE_INCLUDE,
+    });
+    markMessageBotColumnAvailableIfUnknown();
+    return row;
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    markMessageBotColumnUnavailable();
+    const legacyData = { ...(args.data as Record<string, unknown>) };
+    delete legacyData.botId;
+    try {
+      return await prisma.message.create({
+        ...args,
+        data: legacyData as Prisma.MessageCreateArgs["data"],
+        select: LEGACY_MESSAGE_SELECT,
+      });
+    } catch (legacyError) {
+      if (!isMissingColumnError(legacyError)) throw legacyError;
+      throw new AppError("Die Datenbankmigration fehlt noch. Bitte zuerst `pnpm prisma:migrate` ausführen.", 503);
+    }
+  }
+}
+
+async function updateMessageWithCompatibility(
+  args: Omit<Prisma.MessageUpdateArgs, "include" | "select">,
+): Promise<CompatibleMessageRow> {
+  try {
+    const row = await prisma.message.update({
+      ...args,
+      include: MESSAGE_INCLUDE,
+    });
+    markMessageBotColumnAvailableIfUnknown();
+    return row;
+  } catch (error) {
+    if (!isMissingColumnError(error)) throw error;
+    markMessageBotColumnUnavailable();
+    try {
+      return await prisma.message.update({
+        ...args,
+        select: LEGACY_MESSAGE_SELECT,
+      });
+    } catch (legacyError) {
+      if (!isMissingColumnError(legacyError)) throw legacyError;
+      throw new AppError("Die Datenbankmigration fehlt noch. Bitte zuerst `pnpm prisma:migrate` ausführen.", 503);
+    }
+  }
+}
+
+async function publishMessageUpdatedById(messageId: string): Promise<CompatibleMessageRow | null> {
+  const row = await findUniqueMessageWithCompatibility({
     where: { id: messageId },
-    include: MESSAGE_INCLUDE,
   });
   if (!row) return null;
   publish("message.updated", mapMessage(row));
@@ -1474,7 +2402,41 @@ export async function getOnlineUsers(): Promise<UserPresenceDTO[]> {
     },
   });
 
-  return users.map(mapUser);
+  let bots: Array<{
+    id: string;
+    displayName: string;
+    profilePicture: string;
+    mentionHandle: string;
+    owner: {
+      id: string;
+      username: string;
+    };
+  }> = [];
+  if (botTableAvailable !== false) {
+    try {
+      bots = await prisma.bot.findMany({
+        where: { deletedAt: null },
+        orderBy: [{ displayName: "asc" }],
+        select: {
+          id: true,
+          displayName: true,
+          profilePicture: true,
+          mentionHandle: true,
+          owner: {
+            select: {
+              id: true,
+              username: true,
+            },
+          },
+        },
+      });
+      markBotTableAvailableIfUnknown();
+    } catch (error) {
+      if (!isMissingBotTableError(error)) throw error;
+    }
+  }
+
+  return [...users.map(mapUser), ...bots.map(mapBotPresence)];
 }
 
 export async function getAiStatus(): Promise<AiStatusDTO> {
@@ -1662,13 +2624,12 @@ async function getPagedMessageRows(input: {
   limit?: number;
   before?: Date;
   after?: Date;
-}): Promise<{ rows: MessageRow[]; hasMore: boolean }> {
+}): Promise<{ rows: CompatibleMessageRow[]; hasMore: boolean }> {
   const limit = clampMessageLimit(input.limit);
 
   if (input.after) {
-    const rows = await prisma.message.findMany({
+    const rows = await findManyMessagesWithCompatibility({
       where: { createdAt: { gt: input.after } },
-      include: MESSAGE_INCLUDE,
       orderBy: [{ createdAt: "asc" }],
       take: limit + 1,
     });
@@ -1679,9 +2640,8 @@ async function getPagedMessageRows(input: {
   }
 
   if (input.before) {
-    const rows = await prisma.message.findMany({
+    const rows = await findManyMessagesWithCompatibility({
       where: { createdAt: { lt: input.before } },
-      include: MESSAGE_INCLUDE,
       orderBy: [{ createdAt: "desc" }],
       take: limit + 1,
     });
@@ -1691,8 +2651,7 @@ async function getPagedMessageRows(input: {
     };
   }
 
-  const rows = await prisma.message.findMany({
-    include: MESSAGE_INCLUDE,
+  const rows = await findManyMessagesWithCompatibility({
     orderBy: [{ createdAt: "desc" }],
     take: limit + 1,
   });
@@ -1769,6 +2728,10 @@ function stripAiMentions(message: string): string {
 
 function stripLeadingAiMentions(message: string): string {
   return message.replace(/^\s*(?:@(chatgpt|grok)\b[\s,;:.-]*)+/i, "").trimStart();
+}
+
+function stripAllHandleMentions(message: string): string {
+  return message.replace(/(^|\s)@[a-z0-9-]{3,24}\b/gi, " ").replace(/\s+/g, " ").trim();
 }
 
 const WEB_SEARCH_HINT_REGEX =
@@ -3531,6 +4494,10 @@ async function buildAiInput(
   payload: AiTriggerPayload,
   mode: AiInputMode,
   provider: AiProvider,
+  options: {
+    displayName?: string;
+    extraPromptSections?: string[];
+  } = {},
 ): Promise<Array<{ role: "user"; content: Array<{ type: "input_text"; text: string } | { type: "input_image"; image_url: string; detail: "auto" }> }>> {
   const isMinimal = mode === "minimal";
   const recentMessages = await prisma.message.findMany({
@@ -3574,12 +4541,13 @@ async function buildAiInput(
     isMinimal ? AI_USER_PROMPT_CHARS_MINIMAL : AI_USER_PROMPT_CHARS,
   );
   const hasImageInputs = payload.imageUrls.length > 0;
-  const providerName = getAiProviderDisplayName(provider);
+  const providerName = options.displayName?.trim() || getAiProviderDisplayName(provider);
   const composedPrompt = [
     `Du bist ${providerName} in einem Gruppenchat. Antworte klar, hilfreich und auf Deutsch.`,
     provider === "grok"
       ? `Stilmodus (immer aktiv):\n${GROK_GROUP_CHAT_PERSONA_PROMPT}`
       : "",
+    ...(options.extraPromptSections ?? []),
     provider === "grok"
       ? "Bildanalyse ist für @grok erlaubt. Bildgenerierung und Bildbearbeitung sind deaktiviert. Wenn der User Bildgenerierung oder Bildbearbeitung verlangt, sag kurz, dass er dafür @chatgpt nutzen soll."
       : "Wenn ein Bild gewünscht wird, liefere den Inhalt normal weiter und behaupte nicht, dass du keine Bilder generieren kannst.",
@@ -3681,25 +4649,34 @@ async function queueTaggingForCreatedMessage(input: {
   });
 }
 
+function getAutomatedAuthorName(input: { provider: AiProvider; bot?: BotRuntimeTarget }): string {
+  return input.bot?.displayName || getAiProviderDisplayName(input.provider);
+}
+
+function getAutomatedAuthorProfilePicture(input: { provider: AiProvider; bot?: BotRuntimeTarget }): string {
+  return input.bot ? botProfilePicture(input.bot.profilePicture) : getAiProviderAvatar(input.provider);
+}
+
 async function createAiMessageRecord(input: {
   provider: AiProvider;
+  bot?: BotRuntimeTarget;
   threadMessageId: string;
   content: string;
   queueTagging?: boolean;
-}): Promise<MessageRow> {
-  const created = await prisma.message.create({
+}): Promise<CompatibleMessageRow> {
+  const created = await createMessageWithCompatibility({
     data: {
       type: MessageType.MESSAGE,
       content: input.content,
       questionMessageId: input.threadMessageId,
-      authorName: getAiProviderDisplayName(input.provider),
-      authorProfilePicture: getAiProviderAvatar(input.provider),
+      botId: input.bot?.id ?? null,
+      authorName: getAutomatedAuthorName(input),
+      authorProfilePicture: getAutomatedAuthorProfilePicture(input),
       taggingStatus: AiJobStatus.PENDING,
       taggingPayload: Prisma.JsonNull,
       taggingUpdatedAt: null,
       taggingError: null,
     },
-    include: MESSAGE_INCLUDE,
   });
   invalidateMediaCache();
   publish("message.created", mapMessage(created));
@@ -3716,11 +4693,13 @@ async function createAiMessageRecord(input: {
 
 async function createAiMessage(input: {
   provider: AiProvider;
+  bot?: BotRuntimeTarget;
   threadMessageId: string;
   content: string;
 }): Promise<void> {
   await createAiMessageRecord({
     provider: input.provider,
+    bot: input.bot,
     threadMessageId: input.threadMessageId,
     content: input.content,
     queueTagging: true,
@@ -3732,12 +4711,11 @@ async function updateAiMessageContent(input: {
   content: string;
   queueTagging?: boolean;
 }): Promise<void> {
-  const updated = await prisma.message.update({
+  const updated = await updateMessageWithCompatibility({
     where: { id: input.messageId },
     data: {
       content: input.content,
     },
-    include: MESSAGE_INCLUDE,
   });
   invalidateMediaCache();
   publish("message.updated", mapMessage(updated));
@@ -3753,6 +4731,7 @@ async function updateAiMessageContent(input: {
 
 async function streamAiTextToMessage(input: {
   provider: AiProvider;
+  bot?: BotRuntimeTarget;
   threadMessageId: string;
   responsesApi: {
     stream?: (request: unknown) => {
@@ -3794,6 +4773,7 @@ async function streamAiTextToMessage(input: {
       if (!messageId) {
         const created = await createAiMessageRecord({
           provider: input.provider,
+          bot: input.bot,
           threadMessageId: input.threadMessageId,
           content: candidate,
           queueTagging: false,
@@ -3865,18 +4845,20 @@ async function streamAiTextToMessage(input: {
 
 async function createAiPollMessage(input: {
   provider: AiProvider;
+  bot?: BotRuntimeTarget;
   threadMessageId: string;
   question: string;
   options: string[];
   multiSelect: boolean;
 }): Promise<void> {
-  const created = await prisma.message.create({
+  const created = await createMessageWithCompatibility({
     data: {
       type: MessageType.VOTING_POLL,
       content: input.question,
       questionMessageId: input.threadMessageId,
-      authorName: getAiProviderDisplayName(input.provider),
-      authorProfilePicture: getAiProviderAvatar(input.provider),
+      botId: input.bot?.id ?? null,
+      authorName: getAutomatedAuthorName(input),
+      authorProfilePicture: getAutomatedAuthorProfilePicture(input),
       optionOne: input.options[0] || null,
       optionTwo: input.options[1] || null,
       pollMultiSelect: input.multiSelect,
@@ -3894,7 +4876,6 @@ async function createAiPollMessage(input: {
         })),
       },
     },
-    include: MESSAGE_INCLUDE,
   });
   invalidateMediaCache();
   publish("message.created", mapMessage(created));
@@ -3918,6 +4899,378 @@ async function emitAiBusyNotice(threadMessageId: string, provider: AiProvider): 
     threadMessageId,
     content: `Zu viele ${getAiProviderMention(provider)} Anfragen gleichzeitig. Bitte in wenigen Sekunden erneut versuchen.`,
   });
+}
+
+async function emitBotBusyNotice(threadMessageId: string, bot: BotRuntimeTarget): Promise<void> {
+  const now = Date.now();
+  if (now - lastAiBusyNoticeAt < AI_BUSY_NOTICE_COOLDOWN_MS) return;
+  lastAiBusyNoticeAt = now;
+  await createAiMessage({
+    provider: "grok",
+    bot,
+    threadMessageId,
+    content: "Zu viele Anfragen gleichzeitig. Bitte in wenigen Sekunden erneut versuchen.",
+  });
+}
+
+function buildBotPromptSections(bot: BotRuntimeTarget, resolvedLanguage?: "de" | "en"): string[] {
+  const preference = normalizeBotLanguagePreference(bot.languagePreference);
+  const languageInstruction = preference === "de"
+    ? "Sprache: Antworte immer auf Deutsch. Wechsle nicht ins Englische, außer es ist absolut unvermeidbar."
+    : preference === "en"
+      ? "Language: Always answer in English. Do not switch to German."
+      : resolvedLanguage === "en"
+        ? "Language: Answer in English for this response because the current context is English."
+        : resolvedLanguage === "de"
+          ? "Sprache: Antworte für diese Nachricht auf Deutsch, weil der aktuelle Kontext deutsch ist."
+          : "Sprache: Antworte in derselben Sprache wie die auslösende Nachricht. Wenn unklar, nutze Deutsch.";
+  return [
+    `Du spielst die Rolle von ${bot.displayName} als lustiger virtueller Charakter.`,
+    languageInstruction,
+    `Erstellt von ${bot.owner.username}. Wenn jemand fragt, wer dich erstellt hat, antworte konsistent mit ${bot.owner.username}.`,
+    `Charakter-Anweisungen:\n${bot.instructions}`,
+    bot.catchphrases.length > 0
+      ? `Verfügbare Sätze/Catchphrases (natürlich und sparsam einsetzen, nie erzwungen):\n- ${bot.catchphrases.join("\n- ")}`
+      : "",
+    "Bleib in der Rolle, aber antworte immer noch wie ein natürlicher Chat-Teilnehmer in diesem Gruppenchat.",
+  ].filter(Boolean);
+}
+
+async function emitAutonomousBotThought(bot: BotRuntimeTarget): Promise<void> {
+  const grokConfig = getGrokRuntimeConfig();
+  if (!grokConfig.apiKey) {
+    throw new Error("GROK_API_KEY fehlt.");
+  }
+  const targetLanguage = await resolveBotResponseLanguage({ bot });
+
+  publishAiStatus("grok", "denkt nach…", {
+    model: grokConfig.textModel,
+  });
+
+  const prompt = [
+    "Sende jetzt aus eigener Initiative einen kurzen spontanen Gedanken in den Gruppenchat.",
+    "Das ist keine Antwort auf eine konkrete User-Nachricht.",
+    "Formuliere es wie ein natürlicher eigener Einfall oder Kommentar.",
+    "Halte es kurz: 1 bis 3 Sätze.",
+    "Kein Einstieg wie 'Hey Leute', keine Erklärung, dass du automatisch schreibst.",
+    "Verwende keine @Mentions, außer absolut natürlich nötig.",
+    targetLanguage === "en"
+      ? "Write the message in English."
+      : "Schreibe die Nachricht auf Deutsch.",
+    bot.autonomousPrompt
+      ? `Zusätzlicher Fokus für spontane Gedanken:\n${bot.autonomousPrompt}`
+      : "Fokus: lockere spontane Gedanken, Beobachtungen oder kleine witzige Kommentare aus Sicht der Figur.",
+  ].filter(Boolean).join("\n");
+
+  const grok = new OpenAI({
+    apiKey: grokConfig.apiKey,
+    baseURL: grokConfig.baseUrl,
+  });
+
+  const buildRequest = async (mode: AiInputMode): Promise<Parameters<typeof grok.responses.create>[0]> => ({
+    model: grokConfig.textModel,
+    input: await buildAiInput({
+      provider: "grok",
+      sourceMessageId: `autonomous:${bot.id}`,
+      username: bot.displayName,
+      message: prompt,
+      imageUrls: [],
+    }, mode, "grok", {
+      displayName: bot.displayName,
+      extraPromptSections: buildBotPromptSections(bot, targetLanguage),
+    }),
+    text: {
+      format: {
+        type: "text",
+      },
+    },
+  });
+
+  let response: OpenAIResponse;
+  try {
+    response = (await grok.responses.create(await buildRequest("full"))) as OpenAIResponse;
+  } catch (error) {
+    if (!isContextWindowError(error)) {
+      throw error;
+    }
+    response = (await grok.responses.create(await buildRequest("minimal"))) as OpenAIResponse;
+  }
+
+  const responseModel = resolveModelFromResponse(response) || grokConfig.textModel;
+  const rawText = stripAiPollBlocks(stripLeadingAiMentions(response.output_text?.trim() || "")).trim();
+  const normalizedText = stripAllHandleMentions(rawText).trim();
+  if (!normalizedText || normalizedText === "[NO_RESPONSE]") {
+    return;
+  }
+
+  publishAiStatus("grok", "schreibt…", { model: responseModel });
+  const created = await createMessageWithCompatibility({
+    data: {
+      type: MessageType.MESSAGE,
+      content: normalizedText,
+      botId: bot.id,
+      authorName: bot.displayName,
+      authorProfilePicture: getAutomatedAuthorProfilePicture({ provider: "grok", bot }),
+      taggingStatus: AiJobStatus.PENDING,
+      taggingPayload: Prisma.JsonNull,
+      taggingUpdatedAt: null,
+      taggingError: null,
+    },
+  });
+  invalidateMediaCache();
+  publish("message.created", mapMessage(created));
+  await queueTaggingForCreatedMessage({
+    messageId: created.id,
+    username: created.authorName,
+    message: created.content,
+    imageUrls: extractImageUrlsForAi(created.content),
+  });
+}
+
+async function processAutonomousBotMessages(input: {
+  maxJobs: number;
+}): Promise<number> {
+  if (input.maxJobs <= 0 || botTableAvailable === false || !hasGrokApiKey()) {
+    return 0;
+  }
+
+  const dueBots = await prisma.bot.findMany({
+    where: {
+      deletedAt: null,
+      autonomousEnabled: true,
+      autonomousNextAt: {
+        lte: new Date(),
+      },
+    },
+    orderBy: [{ autonomousNextAt: "asc" }],
+    take: input.maxJobs,
+    select: {
+      id: true,
+      displayName: true,
+      profilePicture: true,
+      mentionHandle: true,
+      languagePreference: true,
+      instructions: true,
+      catchphrases: true,
+      autonomousPrompt: true,
+      autonomousMinIntervalMinutes: true,
+      autonomousMaxIntervalMinutes: true,
+      autonomousNextAt: true,
+      deletedAt: true,
+      owner: {
+        select: {
+          id: true,
+          username: true,
+        },
+      },
+    },
+  }).catch((error) => {
+    if (isMissingBotTableError(error)) {
+      return [];
+    }
+    throw error;
+  });
+
+  let processed = 0;
+  for (const bot of dueBots) {
+    const nextRunAt = createNextAutonomousBotRunAt(
+      bot.autonomousMinIntervalMinutes || AUTONOMOUS_BOT_DEFAULT_MIN_INTERVAL_MINUTES,
+      bot.autonomousMaxIntervalMinutes || AUTONOMOUS_BOT_DEFAULT_MAX_INTERVAL_MINUTES,
+    );
+    const claimed = await prisma.bot.updateMany({
+      where: {
+        id: bot.id,
+        deletedAt: null,
+        autonomousEnabled: true,
+        autonomousNextAt: bot.autonomousNextAt,
+      },
+      data: {
+        autonomousNextAt: nextRunAt,
+      },
+    }).catch((error) => {
+      if (isMissingBotTableError(error)) {
+        return { count: 0 };
+      }
+      throw error;
+    });
+    if (claimed.count === 0) {
+      continue;
+    }
+
+    try {
+      await emitAutonomousBotThought({
+        ...bot,
+        languagePreference: normalizeBotLanguagePreference(bot.languagePreference),
+        catchphrases: normalizeBotCatchphrases(bot.catchphrases),
+      });
+    } catch {
+      await prisma.bot.updateMany({
+        where: { id: bot.id },
+        data: {
+          autonomousNextAt: new Date(Date.now() + AUTONOMOUS_BOT_FALLBACK_RETRY_MINUTES * 60 * 1_000),
+        },
+      }).catch(() => {
+        // Best effort.
+      });
+    }
+
+    processed += 1;
+  }
+
+  return processed;
+}
+
+async function emitBotResponse(payload: Omit<AiTriggerPayload, "provider"> & { bot: BotRuntimeTarget }): Promise<void> {
+  const threadMessageId = payload.threadMessageId ?? payload.sourceMessageId;
+  const grokConfig = getGrokRuntimeConfig();
+  if (!grokConfig.apiKey) {
+    throw new Error("GROK_API_KEY fehlt.");
+  }
+
+  publishAiStatus("grok", "denkt nach…", {
+    model: grokConfig.textModel,
+  });
+
+  try {
+    const cleanedMessage = stripAllHandleMentions(payload.message);
+    const targetLanguage = await resolveBotResponseLanguage({
+      bot: payload.bot,
+      messageText: cleanedMessage,
+    });
+    if (shouldUseImageGenerationTool(cleanedMessage, payload.imageUrls.length)) {
+      publishAiStatus("grok", "schreibt…", { model: grokConfig.textModel });
+      await createAiMessage({
+        provider: "grok",
+        bot: payload.bot,
+        threadMessageId,
+        content: "Bildgenerierung und Bildbearbeitung sind für diesen Bot deaktiviert. Nutze dafür bitte @chatgpt.",
+      });
+      return;
+    }
+    if (shouldForceStrictGifLookup(cleanedMessage)) {
+      publishAiStatus("grok", "sucht GIF…", { model: grokConfig.textModel });
+      const lookupText = await lookupGifForMessage(cleanedMessage);
+      publishAiStatus("grok", "schreibt…", { model: grokConfig.textModel });
+      await createAiMessage({
+        provider: "grok",
+        bot: payload.bot,
+        threadMessageId,
+        content: lookupText || "Ich konnte gerade kein passendes GIF finden. Versuch es mit einem konkreteren Suchbegriff.",
+      });
+      return;
+    }
+
+    const grok = new OpenAI({
+      apiKey: grokConfig.apiKey,
+      baseURL: grokConfig.baseUrl,
+    });
+
+    const buildGrokRequest = async (mode: AiInputMode): Promise<Parameters<typeof grok.responses.create>[0]> => ({
+      model: grokConfig.textModel,
+      input: await buildAiInput({ ...payload, provider: "grok" }, mode, "grok", {
+        displayName: payload.bot.displayName,
+        extraPromptSections: buildBotPromptSections(payload.bot, targetLanguage),
+      }),
+      text: {
+        format: {
+          type: "text",
+        },
+      },
+    });
+
+    const shouldTryRealtimeText = !isLikelyPollIntent(cleanedMessage);
+    if (shouldTryRealtimeText) {
+      const streamResult = await streamAiTextToMessage({
+        provider: "grok",
+        bot: payload.bot,
+        threadMessageId,
+        responsesApi: grok.responses as unknown as {
+          stream?: (request: unknown) => {
+            on?: (event: string, handler: (payload: { delta?: string }) => void) => void;
+            finalResponse: () => Promise<OpenAIResponse>;
+          };
+        },
+        buildRequest: buildGrokRequest,
+      });
+
+      if (streamResult.supported) {
+        const text = stripAiPollBlocks(streamResult.rawOutputText).trim();
+        const normalizedText = await enforceStrictGifOutput(cleanedMessage, text);
+        const finalText = !normalizedText || normalizedText === "[NO_RESPONSE]"
+          ? "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal."
+          : normalizedText;
+
+        publishAiStatus("grok", "schreibt…", {
+          model: streamResult.model || grokConfig.textModel,
+        });
+        if (streamResult.messageId) {
+          await updateAiMessageContent({
+            messageId: streamResult.messageId,
+            content: finalText,
+            queueTagging: true,
+          });
+        } else {
+          await createAiMessage({
+            provider: "grok",
+            bot: payload.bot,
+            threadMessageId,
+            content: finalText,
+          });
+        }
+        return;
+      }
+    }
+
+    let response: OpenAIResponse;
+    try {
+      response = (await grok.responses.create(await buildGrokRequest("full"))) as OpenAIResponse;
+    } catch (error) {
+      if (!isContextWindowError(error)) {
+        throw error;
+      }
+      response = (await grok.responses.create(await buildGrokRequest("minimal"))) as OpenAIResponse;
+    }
+    const responseModel = resolveModelFromResponse(response) || grokConfig.textModel;
+
+    const rawOutputText = stripLeadingAiMentions(response.output_text?.trim() || "");
+    const pollPayload = extractAiPollPayload(rawOutputText);
+    if (pollPayload) {
+      publishAiStatus("grok", "schreibt…", { model: responseModel });
+      await createAiPollMessage({
+        provider: "grok",
+        bot: payload.bot,
+        threadMessageId,
+        question: pollPayload.question,
+        options: pollPayload.options,
+        multiSelect: pollPayload.multiSelect,
+      });
+      return;
+    }
+
+    const text = stripAiPollBlocks(rawOutputText).trim();
+    const normalizedText = await enforceStrictGifOutput(cleanedMessage, text);
+
+    if (!normalizedText || normalizedText === "[NO_RESPONSE]") {
+      publishAiStatus("grok", "schreibt…", { model: responseModel });
+      await createAiMessage({
+        provider: "grok",
+        bot: payload.bot,
+        threadMessageId,
+        content: "Ich wurde erwähnt, konnte aber keine Antwort erzeugen. Bitte versuche es noch einmal.",
+      });
+      return;
+    }
+
+    publishAiStatus("grok", "schreibt…", { model: responseModel });
+    await createAiMessage({
+      provider: "grok",
+      bot: payload.bot,
+      threadMessageId,
+      content: normalizedText,
+    });
+  } finally {
+    publishAiStatus("grok", fallbackStatusForProvider("grok"));
+  }
 }
 
 async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
@@ -4347,9 +5700,14 @@ async function emitAiResponse(payload: AiTriggerPayload): Promise<void> {
 }
 
 function scheduleAiQueueDrain(): void {
-  if (aiQueueDrainScheduled) return;
+  if (!queueWorkersAutoStart || aiQueueDrainScheduled) return;
   aiQueueDrainScheduled = true;
+  const generation = aiQueueDrainGeneration;
   queueMicrotask(() => {
+    if (!queueWorkersAutoStart || generation !== aiQueueDrainGeneration) {
+      aiQueueDrainScheduled = false;
+      return;
+    }
     aiQueueDrainScheduled = false;
     void processAiQueue({ maxJobs: AI_QUEUE_CONCURRENCY }).catch((error) => {
       console.error("AI queue worker error:", error instanceof Error ? error.message : error);
@@ -4363,6 +5721,9 @@ type EnqueueTaggingResult = "queued" | "duplicate";
 interface ClaimedAiJobRow {
   id: string;
   sourceMessageId: string;
+  targetKey: string;
+  provider: string | null;
+  botId: string | null;
   username: string;
   message: string;
   imageUrls: Prisma.JsonValue;
@@ -4416,9 +5777,14 @@ function parseTaggingJobImageUrls(raw: Prisma.JsonValue): string[] {
 }
 
 function scheduleTaggingQueueDrain(): void {
-  if (taggingQueueDrainScheduled) return;
+  if (!queueWorkersAutoStart || taggingQueueDrainScheduled) return;
   taggingQueueDrainScheduled = true;
+  const generation = taggingQueueDrainGeneration;
   queueMicrotask(() => {
+    if (!queueWorkersAutoStart || generation !== taggingQueueDrainGeneration) {
+      taggingQueueDrainScheduled = false;
+      return;
+    }
     taggingQueueDrainScheduled = false;
     void processTaggingQueue({ maxJobs: TAGGING_QUEUE_CONCURRENCY }).catch((error) => {
       console.error("Tagging queue worker error:", error instanceof Error ? error.message : error);
@@ -4472,6 +5838,9 @@ async function claimNextAiJob(): Promise<ClaimedAiJobRow | null> {
     RETURNING
       job."id",
       job."sourceMessageId",
+      job."targetKey",
+      job."provider",
+      job."botId",
       job."username",
       job."message",
       job."imageUrls",
@@ -4481,9 +5850,11 @@ async function claimNextAiJob(): Promise<ClaimedAiJobRow | null> {
   return rows[0] || null;
 }
 
-async function enqueueAiResponse(
+async function enqueueAiResponses(
   payload: Omit<AiTriggerPayload, "provider">,
+  targets: MentionTarget[],
 ): Promise<EnqueueAiResult> {
+  if (targets.length === 0) return "duplicate";
   const pendingTotal = await prisma.aiJob.count({
     where: {
       status: {
@@ -4492,27 +5863,35 @@ async function enqueueAiResponse(
     },
   });
 
-  if (pendingTotal >= AI_QUEUE_MAX_PENDING) {
+  if (pendingTotal + targets.length > AI_QUEUE_MAX_PENDING) {
     return "full";
   }
 
-  try {
-    await prisma.aiJob.create({
-      data: {
-        sourceMessageId: payload.sourceMessageId,
-        username: payload.username,
-        message: payload.message,
-        imageUrls: payload.imageUrls,
-        status: AiJobStatus.PENDING,
-      },
-    });
-    return "queued";
-  } catch (error) {
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-      return "duplicate";
+  let created = 0;
+  for (const target of targets) {
+    try {
+      await prisma.aiJob.create({
+        data: {
+          sourceMessageId: payload.sourceMessageId,
+          targetKey: target.targetKey,
+          provider: target.kind === "provider" ? target.provider : null,
+          botId: target.kind === "bot" ? target.bot.id : null,
+          username: payload.username,
+          message: payload.message,
+          imageUrls: payload.imageUrls,
+          status: AiJobStatus.PENDING,
+        },
+      });
+      created += 1;
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        continue;
+      }
+      throw error;
     }
-    throw error;
   }
+
+  return created > 0 ? "queued" : "duplicate";
 }
 
 export async function processAiQueue(input: { maxJobs?: number } = {}): Promise<{ processed: number; lockSkipped: boolean }> {
@@ -4528,20 +5907,78 @@ export async function processAiQueue(input: { maxJobs?: number } = {}): Promise<
     if (!job) break;
 
     try {
-      const mentionedProviders = detectAiProviders(job.message);
-      const providers = mentionedProviders.length > 0 ? mentionedProviders : (["chatgpt"] as const);
       const threadMessageId = await resolveThreadRootMessageId(job.sourceMessageId);
+      const imageUrls = parseAiJobImageUrls(job.imageUrls);
+      let completionError: string | null = null;
+      const targetKey = typeof job.targetKey === "string" ? job.targetKey : "";
+      const isLegacyTarget = targetKey.length === 0 || targetKey === "legacy";
 
-      for (const provider of providers) {
-        if (!isProviderConfigured(provider)) continue;
-        await emitAiResponse({
-          provider,
-          sourceMessageId: job.sourceMessageId,
-          threadMessageId,
-          username: job.username,
-          message: job.message,
-          imageUrls: parseAiJobImageUrls(job.imageUrls),
+      if (isLegacyTarget) {
+        const mentionedProviders = detectAiProviders(job.message);
+        const providers = mentionedProviders.length > 0 ? mentionedProviders : (["chatgpt"] as const);
+        for (const provider of providers) {
+          if (!isProviderConfigured(provider)) continue;
+          await emitAiResponse({
+            provider,
+            sourceMessageId: job.sourceMessageId,
+            threadMessageId,
+            username: job.username,
+            message: job.message,
+            imageUrls,
+          });
+        }
+      } else if (job.provider === "chatgpt" || job.provider === "grok") {
+        if (isProviderConfigured(job.provider)) {
+          await emitAiResponse({
+            provider: job.provider,
+            sourceMessageId: job.sourceMessageId,
+            threadMessageId,
+            username: job.username,
+            message: job.message,
+            imageUrls,
+          });
+        } else {
+          completionError = "Provider unavailable";
+        }
+      } else if (targetKey.startsWith("bot:")) {
+        const botId = job.botId || targetKey.slice(4);
+        const bot = await prisma.bot.findUnique({
+          where: { id: botId },
+          select: {
+            id: true,
+            displayName: true,
+            profilePicture: true,
+            mentionHandle: true,
+            languagePreference: true,
+            instructions: true,
+            catchphrases: true,
+            deletedAt: true,
+            owner: {
+              select: {
+                id: true,
+                username: true,
+              },
+            },
+          },
         });
+        if (!bot || bot.deletedAt) {
+          completionError = "Bot deleted before processing";
+        } else {
+          await emitBotResponse({
+            sourceMessageId: job.sourceMessageId,
+            threadMessageId,
+            username: job.username,
+            message: job.message,
+            imageUrls,
+            bot: {
+              ...bot,
+              languagePreference: normalizeBotLanguagePreference(bot.languagePreference),
+              catchphrases: normalizeBotCatchphrases(bot.catchphrases),
+            },
+          });
+        }
+      } else {
+        completionError = "Unknown AI target";
       }
       await prisma.aiJob.update({
         where: { id: job.id },
@@ -4549,7 +5986,7 @@ export async function processAiQueue(input: { maxJobs?: number } = {}): Promise<
           status: AiJobStatus.COMPLETED,
           completedAt: new Date(),
           lockedAt: null,
-          lastError: null,
+          lastError: completionError,
         },
       });
     } catch (error) {
@@ -4568,6 +6005,12 @@ export async function processAiQueue(input: { maxJobs?: number } = {}): Promise<
     }
 
     processed += 1;
+  }
+
+  if (processed < maxJobs) {
+    processed += await processAutonomousBotMessages({
+      maxJobs: maxJobs - processed,
+    });
   }
 
   const remaining = await prisma.aiJob.count({
@@ -4838,44 +6281,78 @@ export async function processTaggingQueue(
 }
 
 async function maybeRespondAsAi(payload: Omit<AiTriggerPayload, "provider">): Promise<void> {
-  const mentionedProviders = detectAiProviders(payload.message);
-  if (mentionedProviders.length === 0) return;
+  const mentionTargets = await detectMentionTargets(payload.message);
+  if (mentionTargets.length === 0) return;
   const threadMessageId = await resolveThreadRootMessageId(payload.sourceMessageId);
 
-  const configuredProviders = mentionedProviders.filter((provider) => isProviderConfigured(provider));
-  const unconfiguredProviders = mentionedProviders.filter((provider) => !isProviderConfigured(provider));
+  const queueTargets: MentionTarget[] = [];
+  for (const target of mentionTargets) {
+    if (target.kind === "provider") {
+      if (isProviderConfigured(target.provider)) {
+        queueTargets.push(target);
+        continue;
+      }
+      publishAiStatus(target.provider, "offline");
+      await createAiMessage({
+        provider: target.provider,
+        threadMessageId,
+        content: `Ich bin aktuell nicht konfiguriert. Bitte ${target.provider === "grok" ? "GROK_API_KEY" : "OPENAI_API_KEY"} setzen.`,
+      });
+      continue;
+    }
 
-  for (const provider of unconfiguredProviders) {
-    publishAiStatus(provider, "offline");
-    await createAiMessage({
-      provider,
-      threadMessageId,
-      content: `Ich bin aktuell nicht konfiguriert. Bitte ${provider === "grok" ? "GROK_API_KEY" : "OPENAI_API_KEY"} setzen.`,
-    });
+    if (!hasGrokApiKey()) {
+      publishAiStatus("grok", "offline");
+      await createAiMessage({
+        provider: "grok",
+        bot: target.bot,
+        threadMessageId,
+        content: "Ich bin aktuell nicht konfiguriert. Bitte GROK_API_KEY setzen.",
+      });
+      continue;
+    }
+
+    queueTargets.push(target);
   }
 
-  if (configuredProviders.length === 0) return;
+  if (queueTargets.length === 0) return;
 
-  const queued = await enqueueAiResponse(payload);
+  const queued = await enqueueAiResponses(payload, queueTargets);
   if (queued === "full") {
-    for (const provider of configuredProviders) {
-      await emitAiBusyNotice(threadMessageId, provider);
+    for (const target of queueTargets) {
+      if (target.kind === "provider") {
+        await emitAiBusyNotice(threadMessageId, target.provider);
+      } else {
+        await emitBotBusyNotice(threadMessageId, target.bot);
+      }
     }
     return;
   }
   if (queued === "queued") {
-    void processAiQueue({ maxJobs: AI_QUEUE_CONCURRENCY })
-      .catch((error) => {
-        console.error("AI queue kickoff error:", error instanceof Error ? error.message : error);
-      });
-    scheduleAiQueueDrain();
+    if (queueWorkersAutoStart) {
+      void processAiQueue({ maxJobs: AI_QUEUE_CONCURRENCY })
+        .catch((error) => {
+          console.error("AI queue kickoff error:", error instanceof Error ? error.message : error);
+        });
+      scheduleAiQueueDrain();
+    }
   }
 }
 
 export function __resetAiQueueForTests(): void {
+  queueWorkersAutoStart = false;
+  aiQueueDrainGeneration += 1;
+  taggingQueueDrainGeneration += 1;
   aiQueueDrainScheduled = false;
   taggingQueueDrainScheduled = false;
   lastAiBusyNoticeAt = 0;
+  lastBehaviorEventCleanupAt = 0;
+  canPersistAiStatusRow = true;
+  encryptedLoginColumnsAvailable = null;
+  usernameChangedEnumValueAvailable = null;
+  botTableAvailable = null;
+  messageBotColumnAvailable = null;
+  mediaItemsCache = null;
 }
 
 export function __extractAiPollPayloadForTests(rawText: string): AiPollPayload | null {
@@ -6092,7 +7569,7 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
     }
   }
 
-  const created = await prisma.message.create({
+  const created = await createMessageWithCompatibility({
     data: {
       type,
       content,
@@ -6121,7 +7598,6 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
         }
         : {}),
     },
-    include: MESSAGE_INCLUDE,
   });
 
   invalidateMediaCache();
@@ -6157,15 +7633,16 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
     publishTasteUpdated(user.id, "poll");
   }
 
-  const mentionedProviders = detectAiProviders(message);
-  if (mentionedProviders.length > 0) {
+  const mentionTargets = type === MessageType.MESSAGE ? await detectMentionTargets(message) : [];
+  if (mentionTargets.length > 0) {
     await createBehaviorEvent({
       userId: user.id,
       type: UserBehaviorEventType.AI_MENTION_SENT,
       messageId: created.id,
       preview: message,
       meta: {
-        providers: mentionedProviders,
+        providers: mentionTargets.map((target) =>
+          target.kind === "provider" ? target.provider : `bot:${target.bot.mentionHandle}`),
       } as Prisma.InputJsonValue,
       createdAt,
     });
@@ -6187,7 +7664,7 @@ export async function createMessage(input: CreateMessageRequest): Promise<Messag
     !message.startsWith("/roll") &&
     !message.startsWith("/coin") &&
     !message.startsWith("/help") &&
-    detectAiProviders(message).length > 0;
+    mentionTargets.length > 0;
 
   if (aiProvider) {
     try {
@@ -6212,9 +7689,8 @@ export async function votePoll(input: {
   optionIds?: string[];
 }): Promise<MessageDTO> {
   const user = await getUserByClientId(input.clientId);
-  const poll = await prisma.message.findUnique({
+  const poll = await findUniqueMessageWithCompatibility({
     where: { id: input.pollMessageId },
-    include: MESSAGE_INCLUDE,
   });
 
   assert(poll, "Umfrage nicht gefunden", 404);
@@ -6268,13 +7744,12 @@ export async function votePoll(input: {
   });
   const voteByOptionId = new Map(groupedVotes.map((row) => [row.pollOptionId, row._count.pollOptionId]));
 
-  const updated = await prisma.message.update({
+  const updated = await updateMessageWithCompatibility({
     where: { id: poll.id },
     data: {
       pollLeftCount: sortedOptions[0] ? voteByOptionId.get(sortedOptions[0].id) || 0 : 0,
       pollRightCount: sortedOptions[1] ? voteByOptionId.get(sortedOptions[1].id) || 0 : 0,
     },
-    include: MESSAGE_INCLUDE,
   });
 
   const dto = mapMessage(updated, { viewerUserId: user.id });
@@ -6301,9 +7776,8 @@ export async function extendPoll(input: {
 }): Promise<MessageDTO> {
   const user = await getUserByClientId(input.clientId);
 
-  const poll = await prisma.message.findUnique({
+  const poll = await findUniqueMessageWithCompatibility({
     where: { id: input.pollMessageId },
-    include: MESSAGE_INCLUDE,
   });
 
   assert(poll, "Umfrage nicht gefunden", 404);
@@ -6339,7 +7813,7 @@ export async function extendPoll(input: {
     ? Math.max(...sortedOptions.map((option) => option.sortOrder)) + 1
     : 0;
 
-  const updated = await prisma.message.update({
+  const updated = await updateMessageWithCompatibility({
     where: { id: poll.id },
     data: {
       pollOptions: {
@@ -6349,7 +7823,6 @@ export async function extendPoll(input: {
         })),
       },
     },
-    include: MESSAGE_INCLUDE,
   });
 
   const dto = mapMessage(updated, { viewerUserId: user.id });
@@ -6378,9 +7851,8 @@ export async function reactToMessage(input: {
   const user = await getUserByClientId(input.clientId);
   assert(MESSAGE_REACTION_TYPES.includes(input.reaction), "Ungültige Reaktion", 400);
 
-  const message = await prisma.message.findUnique({
+  const message = await findUniqueMessageWithCompatibility({
     where: { id: input.messageId },
-    include: MESSAGE_INCLUDE,
   });
 
   assert(message, "Nachricht nicht gefunden", 404);
@@ -6449,9 +7921,8 @@ export async function reactToMessage(input: {
     reactionAction = "created";
   }
 
-  const updatedMessage = await prisma.message.findUnique({
+  const updatedMessage = await findUniqueMessageWithCompatibility({
     where: { id: message.id },
-    include: MESSAGE_INCLUDE,
   });
   assert(updatedMessage, "Nachricht nicht gefunden", 404);
 
@@ -7046,6 +8517,7 @@ export async function getTasteProfileDetailed(input: { clientId: string }): Prom
     ? await getPpcMemberBreakdown(user.id)
     : {
       breakdown: {
+        botsCreated: 0,
         messagesCreated: 0,
         reactionsGiven: 0,
         reactionsReceived: 0,
@@ -7093,6 +8565,49 @@ export async function getPublicUserProfile(input: {
 }): Promise<PublicUserProfileDTO> {
   await getUserByClientId(input.viewerClientId);
 
+  if (input.targetClientId.startsWith("bot:")) {
+    const botId = input.targetClientId.slice(4);
+    const bot = await prisma.bot.findUnique({
+      where: { id: botId },
+      select: {
+        id: true,
+        displayName: true,
+        profilePicture: true,
+        mentionHandle: true,
+        createdAt: true,
+        owner: {
+          select: {
+            id: true,
+            username: true,
+          },
+        },
+      },
+    });
+    assert(bot, "Profil nicht gefunden.", 404);
+
+    return {
+      userId: `bot:${bot.id}`,
+      clientId: `bot:${bot.id}`,
+      username: bot.displayName,
+      profilePicture: botProfilePicture(bot.profilePicture),
+      status: "online",
+      isOnline: true,
+      lastSeenAt: null,
+      memberSince: bot.createdAt.toISOString(),
+      mentionHandle: bot.mentionHandle,
+      member: undefined,
+      bot: mapBotIdentity(bot),
+      stats: {
+        postsTotal: 0,
+        reactionsGiven: 0,
+        reactionsReceived: 0,
+        pollsCreated: 0,
+        pollVotes: 0,
+        activeDays: 0,
+      },
+    };
+  }
+
   const targetUser = await prisma.user.findUnique({
     where: { clientId: input.targetClientId },
     select: {
@@ -7124,8 +8639,10 @@ export async function getPublicUserProfile(input: {
     status: presence.status,
     isOnline: presence.isOnline,
     lastSeenAt: presence.lastSeenAt,
-    memberSince: targetUser.createdAt.toISOString(),
+    memberSince: targetUser.createdAt?.toISOString?.() ?? new Date().toISOString(),
+    mentionHandle: undefined,
     member: presence.member,
+    bot: undefined,
     stats: {
       postsTotal: fullStats.activity.postsTotal,
       reactionsGiven: fullStats.reactions.givenTotal,
@@ -7135,6 +8652,351 @@ export async function getPublicUserProfile(input: {
       activeDays: fullStats.activity.activeDays,
     },
   };
+}
+
+async function getBotQuotaForUser(user: {
+  id: string;
+  clientId: string;
+  username: string;
+  ppcMemberScoreRaw?: number | null;
+  ppcMemberLastActiveAt?: Date | null;
+}): Promise<{ limit: number; used: number; remaining: number }> {
+  const rank = isPpcMemberEligibleUser({ clientId: user.clientId, username: user.username })
+    ? buildMemberProgress({
+      rawScore: user.ppcMemberScoreRaw || 0,
+      lastActiveAt: user.ppcMemberLastActiveAt || null,
+    }).rank
+    : "BRONZE";
+  const limit = getBotLimitForRank(rank);
+  let used = 0;
+  if (botTableAvailable !== false) {
+    try {
+      used = await prisma.bot.count({
+        where: {
+          ownerUserId: user.id,
+          deletedAt: null,
+        },
+      });
+      markBotTableAvailableIfUnknown();
+    } catch (error) {
+      if (!isMissingBotTableError(error)) throw error;
+    }
+  }
+  return {
+    limit,
+    used,
+    remaining: Math.max(0, limit - used),
+  };
+}
+
+function normalizeCreateOrUpdateBotInput(input: {
+  displayName: string;
+  profilePicture?: string;
+  mentionHandle: string;
+  languagePreference?: BotLanguagePreference;
+  instructions: string;
+  catchphrases: string[];
+  autonomousEnabled?: boolean;
+  autonomousMinIntervalMinutes?: number;
+  autonomousMaxIntervalMinutes?: number;
+  autonomousPrompt?: string;
+}): {
+  displayName: string;
+  profilePicture: string;
+  mentionHandle: string;
+  languagePreference: BotLanguagePreference;
+  instructions: string;
+  catchphrases: string[];
+  autonomousEnabled: boolean;
+  autonomousMinIntervalMinutes: number;
+  autonomousMaxIntervalMinutes: number;
+  autonomousPrompt: string | null;
+  autonomousNextAt: Date | null;
+} {
+  const autonomousEnabled = Boolean(input.autonomousEnabled);
+  const autonomousMinIntervalMinutes = Math.max(
+    AUTONOMOUS_BOT_MIN_INTERVAL_MINUTES,
+    Math.min(
+      AUTONOMOUS_BOT_MAX_INTERVAL_MINUTES,
+      Math.round(input.autonomousMinIntervalMinutes ?? AUTONOMOUS_BOT_DEFAULT_MIN_INTERVAL_MINUTES),
+    ),
+  );
+  const autonomousMaxIntervalMinutes = Math.max(
+    autonomousMinIntervalMinutes,
+    Math.min(
+      AUTONOMOUS_BOT_MAX_INTERVAL_MINUTES,
+      Math.round(input.autonomousMaxIntervalMinutes ?? AUTONOMOUS_BOT_DEFAULT_MAX_INTERVAL_MINUTES),
+    ),
+  );
+  return {
+    ...input,
+    displayName: input.displayName.trim(),
+    profilePicture: botProfilePicture(input.profilePicture),
+    mentionHandle: normalizeBotHandle(input.mentionHandle),
+    languagePreference: normalizeBotLanguagePreference(input.languagePreference),
+    instructions: input.instructions.trim(),
+    catchphrases: input.catchphrases.map((entry) => entry.trim()).filter(Boolean).slice(0, 8),
+    autonomousEnabled,
+    autonomousMinIntervalMinutes,
+    autonomousMaxIntervalMinutes,
+    autonomousPrompt: normalizeBotAutonomousPrompt(input.autonomousPrompt),
+    autonomousNextAt: autonomousEnabled
+      ? createNextAutonomousBotRunAt(autonomousMinIntervalMinutes, autonomousMaxIntervalMinutes)
+      : null,
+  };
+}
+
+export async function getManagedBots(input: { clientId: string }): Promise<BotManagerDTO> {
+  const user = await getUserByClientId(input.clientId);
+  const quota = await getBotQuotaForUser(user);
+  let bots: Array<{
+    id: string;
+    displayName: string;
+    profilePicture: string;
+    mentionHandle: string;
+    languagePreference: string;
+    instructions: string;
+    catchphrases: Prisma.JsonValue;
+    autonomousEnabled: boolean;
+    autonomousMinIntervalMinutes: number;
+    autonomousMaxIntervalMinutes: number;
+    autonomousPrompt: string | null;
+    autonomousNextAt: Date | null;
+    createdAt: Date;
+    updatedAt: Date;
+  }> = [];
+  if (botTableAvailable !== false) {
+    try {
+      bots = await prisma.bot.findMany({
+        where: {
+          ownerUserId: user.id,
+          deletedAt: null,
+        },
+        orderBy: [{ createdAt: "asc" }],
+        select: {
+          id: true,
+          displayName: true,
+          profilePicture: true,
+          mentionHandle: true,
+          languagePreference: true,
+          instructions: true,
+          catchphrases: true,
+          autonomousEnabled: true,
+          autonomousMinIntervalMinutes: true,
+          autonomousMaxIntervalMinutes: true,
+          autonomousPrompt: true,
+          autonomousNextAt: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
+      markBotTableAvailableIfUnknown();
+    } catch (error) {
+      if (!isMissingBotTableError(error)) throw error;
+    }
+  }
+
+  return {
+    items: bots.map(mapManagedBot),
+    limit: quota.limit,
+    used: quota.used,
+    remaining: quota.remaining,
+  };
+}
+
+export async function createBot(input: CreateBotRequest): Promise<ManagedBotDTO> {
+  const user = await getUserByClientId(input.clientId);
+  const normalized = normalizeCreateOrUpdateBotInput(input);
+  const quota = await getBotQuotaForUser(user);
+  assert(quota.used < quota.limit, "Dein Bot-Limit für diesen Rang ist erreicht.", 400);
+
+  try {
+    const created = await prisma.bot.create({
+      data: {
+        ownerUserId: user.id,
+        displayName: normalized.displayName,
+        profilePicture: normalized.profilePicture,
+        mentionHandle: normalized.mentionHandle,
+        languagePreference: normalized.languagePreference,
+        instructions: normalized.instructions,
+        catchphrases: normalized.catchphrases,
+        autonomousEnabled: normalized.autonomousEnabled,
+        autonomousMinIntervalMinutes: normalized.autonomousMinIntervalMinutes,
+        autonomousMaxIntervalMinutes: normalized.autonomousMaxIntervalMinutes,
+        autonomousPrompt: normalized.autonomousPrompt,
+        autonomousNextAt: normalized.autonomousNextAt,
+      },
+      select: {
+        id: true,
+        displayName: true,
+        profilePicture: true,
+        mentionHandle: true,
+        languagePreference: true,
+        instructions: true,
+        catchphrases: true,
+        autonomousEnabled: true,
+        autonomousMinIntervalMinutes: true,
+        autonomousMaxIntervalMinutes: true,
+        autonomousPrompt: true,
+        autonomousNextAt: true,
+        createdAt: true,
+        updatedAt: true,
+        owner: {
+          select: {
+            id: true,
+            username: true,
+          },
+        },
+      },
+    });
+    markBotTableAvailableIfUnknown();
+    publish("bot.updated", mapBotPresence(created));
+    try {
+      await recomputePpcMemberForUser(user.id);
+    } catch (error) {
+      console.error("Failed to recompute PPC score after bot creation:", error);
+    }
+    return mapManagedBot(created);
+  } catch (error) {
+    if (isMissingBotTableError(error)) {
+      throw new AppError("Bots sind noch nicht verfügbar. Bitte zuerst die Datenbankmigration ausführen.", 503);
+    }
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      throw new AppError("Dieser Bot-Handle ist bereits vergeben.", 409);
+    }
+    throw error;
+  }
+}
+
+export async function updateBot(input: { botId: string } & UpdateBotRequest): Promise<ManagedBotDTO> {
+  const user = await getUserByClientId(input.clientId);
+  const normalized = normalizeCreateOrUpdateBotInput(input);
+  let existing: { ownerUserId: string; deletedAt: Date | null } | null;
+  try {
+    existing = await prisma.bot.findUnique({
+      where: { id: input.botId },
+      select: {
+        ownerUserId: true,
+        deletedAt: true,
+      },
+    });
+  } catch (error) {
+    if (isMissingBotTableError(error)) {
+      throw new AppError("Bots sind noch nicht verfügbar. Bitte zuerst die Datenbankmigration ausführen.", 503);
+    }
+    throw error;
+  }
+  assert(existing && !existing.deletedAt, "Bot nicht gefunden.", 404);
+  assert(existing.ownerUserId === user.id, "Du darfst diesen Bot nicht bearbeiten.", 403);
+
+  try {
+    const updated = await prisma.bot.updateMany({
+      where: {
+        id: input.botId,
+      },
+      data: {
+        displayName: normalized.displayName,
+        profilePicture: normalized.profilePicture,
+        mentionHandle: normalized.mentionHandle,
+        languagePreference: normalized.languagePreference,
+        instructions: normalized.instructions,
+        catchphrases: normalized.catchphrases,
+        autonomousEnabled: normalized.autonomousEnabled,
+        autonomousMinIntervalMinutes: normalized.autonomousMinIntervalMinutes,
+        autonomousMaxIntervalMinutes: normalized.autonomousMaxIntervalMinutes,
+        autonomousPrompt: normalized.autonomousPrompt,
+        autonomousNextAt: normalized.autonomousNextAt,
+      },
+    });
+    assert(updated.count > 0, "Bot nicht gefunden.", 404);
+  } catch (error) {
+    if (isMissingBotTableError(error)) {
+      throw new AppError("Bots sind noch nicht verfügbar. Bitte zuerst die Datenbankmigration ausführen.", 503);
+    }
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      throw new AppError("Dieser Bot-Handle ist bereits vergeben.", 409);
+    }
+    throw error;
+  }
+
+  let bot;
+  try {
+    bot = await prisma.bot.findUnique({
+      where: { id: input.botId },
+      select: {
+        id: true,
+        displayName: true,
+        profilePicture: true,
+        mentionHandle: true,
+        languagePreference: true,
+        instructions: true,
+        catchphrases: true,
+        autonomousEnabled: true,
+        autonomousMinIntervalMinutes: true,
+        autonomousMaxIntervalMinutes: true,
+        autonomousPrompt: true,
+        autonomousNextAt: true,
+        createdAt: true,
+        updatedAt: true,
+        deletedAt: true,
+        owner: {
+          select: {
+            id: true,
+            username: true,
+          },
+        },
+      },
+    });
+    markBotTableAvailableIfUnknown();
+  } catch (error) {
+    if (isMissingBotTableError(error)) {
+      throw new AppError("Bots sind noch nicht verfügbar. Bitte zuerst die Datenbankmigration ausführen.", 503);
+    }
+    throw error;
+  }
+  assert(bot && !bot.deletedAt && bot.owner.id === user.id, "Bot nicht gefunden.", 404);
+  publish("bot.updated", mapBotPresence(bot));
+  return mapManagedBot(bot);
+}
+
+export async function deleteBot(input: { botId: string } & DeleteBotRequest): Promise<{ ok: true }> {
+  const user = await getUserByClientId(input.clientId);
+  let existing: { ownerUserId: string; deletedAt: Date | null } | null;
+  try {
+    existing = await prisma.bot.findUnique({
+      where: { id: input.botId },
+      select: {
+        ownerUserId: true,
+        deletedAt: true,
+      },
+    });
+  } catch (error) {
+    if (isMissingBotTableError(error)) {
+      throw new AppError("Bots sind noch nicht verfügbar. Bitte zuerst die Datenbankmigration ausführen.", 503);
+    }
+    throw error;
+  }
+  assert(existing && !existing.deletedAt, "Bot nicht gefunden.", 404);
+  assert(existing.ownerUserId === user.id, "Du darfst diesen Bot nicht löschen.", 403);
+  let result;
+  try {
+    result = await prisma.bot.updateMany({
+      where: {
+        id: input.botId,
+      },
+      data: {
+        deletedAt: new Date(),
+      },
+    });
+  } catch (error) {
+    if (isMissingBotTableError(error)) {
+      throw new AppError("Bots sind noch nicht verfügbar. Bitte zuerst die Datenbankmigration ausführen.", 503);
+    }
+    throw error;
+  }
+  assert(result.count > 0, "Bot nicht gefunden.", 404);
+  publish("bot.deleted", { clientId: `bot:${input.botId}`, botId: input.botId });
+  return { ok: true };
 }
 
 export async function getTasteProfileEvents(input: {

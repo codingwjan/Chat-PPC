@@ -1,10 +1,11 @@
 "use client";
 
 import { memberRankLabel } from "@/lib/member-progress";
-import type { MemberProgressDTO } from "@/lib/types";
+import type { BotIdentityDTO, MemberProgressDTO } from "@/lib/types";
 
 interface MemberProgressInlineProps {
   member?: MemberProgressDTO;
+  bot?: BotIdentityDTO;
   variant?: "sidebar" | "list" | "chat";
   highlight?: boolean;
 }
@@ -33,9 +34,22 @@ function badgeTextClassForVariant(variant: NonNullable<MemberProgressInlineProps
 
 export function MemberProgressInline({
   member,
+  bot,
   variant = "list",
   highlight = false,
 }: MemberProgressInlineProps) {
+  if (bot) {
+    return (
+      <div className={`inline-flex items-center gap-1.5 ${highlight ? "ppc-score-pop" : ""}`}>
+        <span
+          className={`inline-flex items-center rounded-full border border-amber-400 bg-amber-100 font-semibold text-amber-800 ${badgeTextClassForVariant(variant)}`}
+        >
+          Bot
+        </span>
+      </div>
+    );
+  }
+
   if (!member) return null;
 
   return (

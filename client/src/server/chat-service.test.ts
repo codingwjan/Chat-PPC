@@ -14,6 +14,13 @@ const prismaMock = vi.hoisted(() => ({
     updateMany: vi.fn(),
     delete: vi.fn(),
   },
+  bot: {
+    count: vi.fn(),
+    findMany: vi.fn(),
+    findUnique: vi.fn(),
+    create: vi.fn(),
+    updateMany: vi.fn(),
+  },
   message: {
     findUnique: vi.fn(),
     findFirst: vi.fn(),
@@ -85,10 +92,14 @@ vi.mock("openai", () => ({
 import {
   __extractAiPollPayloadForTests,
   __resetAiQueueForTests,
+  createBot,
   createMessage,
+  deleteBot,
   extendPoll,
   getAppKillState,
+  getBotLimitForRank,
   getChatBackground,
+  getManagedBots,
   getPublicUserProfile,
   getTasteProfileDetailed,
   getTasteProfileEvents,
@@ -104,6 +115,7 @@ import {
   signInAccount,
   setChatBackground,
   setAppKillState,
+  updateBot,
   updateOwnAccount,
   votePoll,
 } from "@/server/chat-service";
@@ -165,6 +177,26 @@ function makePasswordHash(password: string): string {
   return `${salt}:${hash}`;
 }
 
+function baseBot(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "bot-1",
+    displayName: "Peter Griffin",
+    profilePicture: "https://example.com/bot.png",
+    mentionHandle: "peter-griffin",
+    languagePreference: "all",
+    instructions: "Sei ein chaotischer Familienvater.",
+    catchphrases: ["hehehehe", "Lois!"],
+    deletedAt: null,
+    createdAt: new Date("2026-02-10T10:00:00.000Z"),
+    updatedAt: new Date("2026-02-10T10:00:00.000Z"),
+    owner: {
+      id: "user-id",
+      username: "tester",
+    },
+    ...overrides,
+  };
+}
+
 describe("chat service", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -200,6 +232,11 @@ describe("chat service", () => {
       isOnline: false,
       lastSeenAt: null,
     });
+    prismaMock.bot.count.mockResolvedValue(0);
+    prismaMock.bot.findMany.mockResolvedValue([]);
+    prismaMock.bot.findUnique.mockResolvedValue(null);
+    prismaMock.bot.create.mockResolvedValue(baseBot());
+    prismaMock.bot.updateMany.mockResolvedValue({ count: 1 });
     prismaMock.message.create.mockResolvedValue(baseMessage());
     prismaMock.message.findUnique.mockResolvedValue(null);
     prismaMock.message.findFirst.mockResolvedValue(null);
@@ -924,6 +961,124 @@ Abstimmen und begründen.
     })).rejects.toThrow("Für diesen Nutzer ist kein Konto-Passwort hinterlegt.");
   });
 
+  it("returns the configured bot limits per rank", () => {
+    expect(getBotLimitForRank("BRONZE")).toBe(1);
+    expect(getBotLimitForRank("PLATIN")).toBe(2);
+    expect(getBotLimitForRank("TITAN")).toBe(5);
+  });
+
+  it("creates a bot within the user quota and publishes bot.updated", async () => {
+    prismaMock.bot.count.mockResolvedValueOnce(0);
+    prismaMock.bot.create.mockResolvedValueOnce(baseBot());
+
+    const result = await createBot({
+      clientId: "client-1",
+      displayName: "Peter Griffin",
+      mentionHandle: "@Peter-Griffin",
+      languagePreference: "en",
+      instructions: "Sei Peter Griffin als lustiger Charakter.",
+      catchphrases: ["hehehehe", "Lois!"],
+    });
+
+    expect(prismaMock.bot.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          ownerUserId: "user-id",
+          displayName: "Peter Griffin",
+          mentionHandle: "peter-griffin",
+          languagePreference: "en",
+          instructions: "Sei Peter Griffin als lustiger Charakter.",
+          catchphrases: ["hehehehe", "Lois!"],
+        }),
+      }),
+    );
+    expect(result.mentionHandle).toBe("peter-griffin");
+    expect(result.languagePreference).toBe("all");
+    expect(publishMock).toHaveBeenCalledWith(
+      "bot.updated",
+      expect.objectContaining({
+        clientId: "bot:bot-1",
+        username: "Peter Griffin",
+      }),
+    );
+  });
+
+  it("rejects bot creation when the rank quota is exhausted", async () => {
+    prismaMock.bot.count.mockResolvedValueOnce(1);
+
+    await expect(createBot({
+      clientId: "client-1",
+      displayName: "Peter Griffin",
+      mentionHandle: "peter-griffin",
+      instructions: "Sei Peter Griffin.",
+      catchphrases: [],
+    })).rejects.toThrow("Dein Bot-Limit für diesen Rang ist erreicht.");
+    expect(prismaMock.bot.create).not.toHaveBeenCalled();
+  });
+
+  it("returns managed bots with quota usage", async () => {
+    prismaMock.bot.count.mockResolvedValueOnce(1);
+    prismaMock.bot.findMany.mockResolvedValueOnce([baseBot()]);
+
+    const result = await getManagedBots({ clientId: "client-1" });
+
+    expect(result).toMatchObject({
+      limit: 1,
+      used: 1,
+      remaining: 0,
+    });
+    expect(result.items[0]).toMatchObject({
+      id: "bot-1",
+      displayName: "Peter Griffin",
+      mentionHandle: "peter-griffin",
+      languagePreference: "all",
+      catchphrases: ["hehehehe", "Lois!"],
+    });
+  });
+
+  it("rejects bot updates for non-owners", async () => {
+    prismaMock.bot.findUnique.mockResolvedValueOnce({
+      ownerUserId: "other-user",
+      deletedAt: null,
+    });
+
+    await expect(updateBot({
+      botId: "bot-1",
+      clientId: "client-1",
+      displayName: "Peter Griffin",
+      mentionHandle: "peter-griffin",
+      instructions: "Bleib chaotisch.",
+      catchphrases: [],
+    })).rejects.toThrow("Du darfst diesen Bot nicht bearbeiten.");
+    expect(prismaMock.bot.updateMany).not.toHaveBeenCalled();
+  });
+
+  it("soft-deletes owned bots and publishes bot.deleted", async () => {
+    prismaMock.bot.findUnique.mockResolvedValueOnce({
+      ownerUserId: "user-id",
+      deletedAt: null,
+    });
+    prismaMock.bot.updateMany.mockResolvedValueOnce({ count: 1 });
+
+    await expect(deleteBot({
+      botId: "bot-1",
+      clientId: "client-1",
+    })).resolves.toEqual({ ok: true });
+
+    expect(prismaMock.bot.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "bot-1" },
+        data: expect.objectContaining({
+          deletedAt: expect.any(Date),
+        }),
+      }),
+    );
+    expect(publishMock).toHaveBeenCalledWith("bot.deleted", {
+      clientId: "bot:bot-1",
+      botId: "bot-1",
+    });
+  });
+
   it("enables developer mode when unlock code is used as username", async () => {
     const previousUnlock = process.env.CHAT_DEV_UNLOCK_CODE;
     const previousSecret = process.env.CHAT_DEV_TOKEN_SECRET;
@@ -1335,7 +1490,7 @@ Abstimmen und begründen.
     }
   });
 
-  it("queues one AI job when both @chatgpt and @grok are mentioned", async () => {
+  it("queues one AI job per provider when both @chatgpt and @grok are mentioned", async () => {
     const previousOpenAiKey = process.env.OPENAI_API_KEY;
     const previousGrokKey = process.env.GROK_API_KEY;
     process.env.OPENAI_API_KEY = "test-key";
@@ -1356,11 +1511,25 @@ Abstimmen und begründen.
       ]);
 
       expect(result).toBe("resolved");
-      expect(prismaMock.aiJob.create).toHaveBeenCalledTimes(1);
-      expect(prismaMock.aiJob.create).toHaveBeenCalledWith(
+      expect(prismaMock.aiJob.create).toHaveBeenCalledTimes(2);
+      expect(prismaMock.aiJob.create).toHaveBeenNthCalledWith(
+        1,
         expect.objectContaining({
           data: expect.objectContaining({
             sourceMessageId: "msg-user",
+            targetKey: "provider:chatgpt",
+            provider: "chatgpt",
+            message: "@chatgpt vs @grok explain gravity",
+          }),
+        }),
+      );
+      expect(prismaMock.aiJob.create).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          data: expect.objectContaining({
+            sourceMessageId: "msg-user",
+            targetKey: "provider:grok",
+            provider: "grok",
             message: "@chatgpt vs @grok explain gravity",
           }),
         }),

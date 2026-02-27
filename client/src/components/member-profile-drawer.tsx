@@ -34,6 +34,8 @@ const PROFILE_CARD_TINT_BY_AI: Record<AiProviderClientId, string> = {
   grok: "rgba(192, 132, 252, 0.28)",
 };
 
+const PROFILE_CARD_TINT_BOT = "rgba(180, 83, 9, 0.26)";
+
 const AI_PROFILE_COPY: Record<
   AiProviderClientId,
   {
@@ -62,6 +64,9 @@ function getAiProvider(clientId: string | null | undefined): AiProviderClientId 
 }
 
 function profileCardGradient(profile: PublicUserProfileDTO | null): string | undefined {
+  if (profile?.bot) {
+    return `linear-gradient(to top right, ${PROFILE_CARD_TINT_BOT} 0%, rgba(255, 251, 235, 0.96) 58%, rgba(255, 247, 237, 0.96) 100%)`;
+  }
   const aiProvider = getAiProvider(profile?.clientId);
   if (aiProvider) {
     const tint = PROFILE_CARD_TINT_BY_AI[aiProvider];
@@ -106,7 +111,8 @@ export function MemberProfileDrawer({
   aiModels,
   onOpenProfileImage,
 }: MemberProfileDrawerProps) {
-  const aiProvider = getAiProvider(profile?.clientId);
+  const botIdentity = profile?.bot;
+  const aiProvider = botIdentity ? null : getAiProvider(profile?.clientId);
   const aiModel = aiProvider ? aiModels?.[aiProvider]?.trim() || "Modell wird geladen…" : "";
   const aiCopy = aiProvider ? AI_PROFILE_COPY[aiProvider] : null;
   const profileHeaderGradient = profileCardGradient(profile);
@@ -186,7 +192,7 @@ export function MemberProfileDrawer({
                             <p className="truncate text-2xl font-bold text-slate-900">{profile.username}</p>
                             <div className="mt-1 space-y-0.5">
                               <p className="text-sm text-slate-600">
-                                {aiProvider ? aiModel : formatMemberSince(profile.memberSince)}
+                                {botIdentity ? `Erstellt von ${botIdentity.createdByUsername}` : aiProvider ? aiModel : formatMemberSince(profile.memberSince)}
                               </p>
                               <div>
                                 {aiProvider ? (
@@ -194,7 +200,7 @@ export function MemberProfileDrawer({
                                     AI Assistant
                                   </span>
                                 ) : (
-                                  <MemberProgressInline member={profile.member} variant="list" />
+                                  <MemberProgressInline member={profile.member} bot={profile.bot} variant="list" />
                                 )}
                               </div>
                             </div>
@@ -202,7 +208,23 @@ export function MemberProfileDrawer({
                         </div>
                       </div>
 
-                      {aiProvider && aiCopy ? (
+                      {botIdentity ? (
+                        <div className="space-y-2 rounded-2xl border border-amber-200 bg-amber-50/70 p-4">
+                          <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">Bot-Profil</p>
+                          <p className="text-sm text-slate-700">
+                            <span className="font-semibold text-slate-900">Handle:</span> @{botIdentity.mentionHandle}
+                          </p>
+                          <p className="text-sm text-slate-700">
+                            <span className="font-semibold text-slate-900">Basis:</span> Grok
+                          </p>
+                          <p className="text-sm text-slate-700">
+                            <span className="font-semibold text-slate-900">Erstellt von:</span> {botIdentity.createdByUsername}
+                          </p>
+                          <p className="text-sm text-slate-700">
+                            <span className="font-semibold text-slate-900">Typ:</span> Virtueller Charakter
+                          </p>
+                        </div>
+                      ) : aiProvider && aiCopy ? (
                         <div className="space-y-2 rounded-2xl border border-violet-200 bg-violet-50/60 p-4">
                           <p className="text-[11px] font-semibold uppercase tracking-wide text-violet-700">KI-Profil</p>
                           <p className="text-sm text-slate-700">

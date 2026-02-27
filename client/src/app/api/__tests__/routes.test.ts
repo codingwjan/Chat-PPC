@@ -13,6 +13,7 @@ const serviceMock = vi.hoisted(() => ({
   getNotifications: vi.fn(),
   markNotificationsRead: vi.fn(),
   getPublicUserProfile: vi.fn(),
+  getManagedBots: vi.fn(),
   getTasteProfile: vi.fn(),
   getTasteProfileDetailed: vi.fn(),
   getTasteProfileEvents: vi.fn(),
@@ -29,6 +30,9 @@ const serviceMock = vi.hoisted(() => ({
   adminResetUserPassword: vi.fn(),
   runAdminAction: vi.fn(),
   getMediaItems: vi.fn(),
+  createBot: vi.fn(),
+  updateBot: vi.fn(),
+  deleteBot: vi.fn(),
   processAiQueue: vi.fn(),
   processTaggingQueue: vi.fn(),
 }));
@@ -214,6 +218,112 @@ describe("api routes", () => {
     const payload = await response.json();
     expect(payload.username).toBe("alice");
     expect(payload.stats.postsTotal).toBe(10);
+  });
+
+  it("liefert Bot-Managementdaten", async () => {
+    serviceMock.getManagedBots.mockResolvedValue({
+      items: [],
+      limit: 2,
+      used: 1,
+      remaining: 1,
+    });
+
+    const { GET } = await import("@/app/api/bots/route");
+    const response = await GET(new Request("http://localhost/api/bots?clientId=c1"));
+
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.limit).toBe(2);
+  });
+
+  it("erstellt Bots", async () => {
+    serviceMock.createBot.mockResolvedValue({
+      id: "bot-1",
+      displayName: "Peter Griffin",
+      profilePicture: "/default-avatar.svg",
+      mentionHandle: "peter-griffin",
+      languagePreference: "en",
+      instructions: "Sei lustig",
+      catchphrases: ["hehe"],
+      autonomousEnabled: false,
+      autonomousMinIntervalMinutes: 60,
+      autonomousMaxIntervalMinutes: 240,
+      autonomousPrompt: "",
+      autonomousNextAt: null,
+      createdAt: "2026-02-27T12:00:00.000Z",
+      updatedAt: "2026-02-27T12:00:00.000Z",
+    });
+
+    const { POST } = await import("@/app/api/bots/route");
+    const response = await POST(
+      new Request("http://localhost/api/bots", {
+        method: "POST",
+        body: JSON.stringify({
+          clientId: "c1",
+          displayName: "Peter Griffin",
+          mentionHandle: "@Peter-Griffin",
+          languagePreference: "en",
+          instructions: "Sei lustig",
+          catchphrases: ["hehe"],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(201);
+  });
+
+  it("aktualisiert Bots", async () => {
+    serviceMock.updateBot.mockResolvedValue({
+      id: "bot-1",
+      displayName: "Peter Griffin",
+      profilePicture: "/default-avatar.svg",
+      mentionHandle: "peter-griffin",
+      languagePreference: "de",
+      instructions: "Mehr Chaos",
+      catchphrases: [],
+      autonomousEnabled: false,
+      autonomousMinIntervalMinutes: 60,
+      autonomousMaxIntervalMinutes: 240,
+      autonomousPrompt: "",
+      autonomousNextAt: null,
+      createdAt: "2026-02-27T12:00:00.000Z",
+      updatedAt: "2026-02-27T12:05:00.000Z",
+    });
+
+    const { PATCH } = await import("@/app/api/bots/[botId]/route");
+    const response = await PATCH(
+      new Request("http://localhost/api/bots/bot-1", {
+        method: "PATCH",
+        body: JSON.stringify({
+          clientId: "c1",
+          displayName: "Peter Griffin",
+          mentionHandle: "peter-griffin",
+          languagePreference: "de",
+          instructions: "Mehr Chaos",
+          catchphrases: [],
+        }),
+      }),
+      { params: Promise.resolve({ botId: "bot-1" }) },
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it("löscht Bots", async () => {
+    serviceMock.deleteBot.mockResolvedValue({ ok: true });
+
+    const { DELETE } = await import("@/app/api/bots/[botId]/route");
+    const response = await DELETE(
+      new Request("http://localhost/api/bots/bot-1", {
+        method: "DELETE",
+        body: JSON.stringify({
+          clientId: "c1",
+        }),
+      }),
+      { params: Promise.resolve({ botId: "bot-1" }) },
+    );
+
+    expect(response.status).toBe(200);
   });
 
   it("rejects empty profile/username update payload", async () => {

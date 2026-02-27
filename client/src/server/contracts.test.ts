@@ -9,6 +9,7 @@ import {
   parseAdminUsersQueryRequest,
   parseAuthSignInRequest,
   parseAuthSignUpRequest,
+  parseCreateBotRequest,
   parseCreateMessageRequest,
   parseExtendPollRequest,
   parseLoginRequest,
@@ -50,6 +51,32 @@ describe("contracts", () => {
       password: "geheimespasswort",
     });
     expect(parsed.loginName).toBe("max.mustermann");
+  });
+
+  it("parses valid bot language preference", () => {
+    const parsed = parseCreateBotRequest({
+      clientId: "client-123",
+      displayName: "Peter Griffin",
+      mentionHandle: "@Peter-Griffin",
+      languagePreference: "en",
+      instructions: "Sei lustig",
+      catchphrases: [],
+    });
+
+    expect(parsed.languagePreference).toBe("en");
+  });
+
+  it("rejects invalid bot language preference", () => {
+    expect(() =>
+      parseCreateBotRequest({
+        clientId: "client-123",
+        displayName: "Peter Griffin",
+        mentionHandle: "@Peter-Griffin",
+        languagePreference: "fr",
+        instructions: "Sei lustig",
+        catchphrases: [],
+      }),
+    ).toThrow();
   });
 
   it("parses valid rename request", () => {

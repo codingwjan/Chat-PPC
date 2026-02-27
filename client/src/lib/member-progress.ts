@@ -2,6 +2,7 @@ import type { MemberProgressDTO, MemberRank } from "@/lib/types";
 
 export const PPC_MEMBER_BRAND: MemberProgressDTO["brand"] = "PPC Score";
 export const PPC_MEMBER_DECAY_HALF_LIFE_DAYS = 45;
+export const PPC_MEMBER_BOT_CREATED_POINTS = 100;
 export const PPC_MEMBER_SCORE_WEIGHTS = {
   messagesCreated: 5,
   reactionsGiven: 4,
@@ -15,19 +16,65 @@ export const PPC_MEMBER_SCORE_WEIGHTS = {
 } as const;
 
 export const PPC_MEMBER_POINT_RULES: Array<{
-  id: keyof typeof PPC_MEMBER_SCORE_WEIGHTS;
+  id: string;
   label: string;
+  description: string;
   points: number;
 }> = [
-  { id: "messagesCreated", label: "Nachricht erstellt", points: PPC_MEMBER_SCORE_WEIGHTS.messagesCreated },
-  { id: "reactionsGiven", label: "Reaktion gegeben", points: PPC_MEMBER_SCORE_WEIGHTS.reactionsGiven },
-  { id: "reactionsReceived", label: "Reaktion erhalten", points: PPC_MEMBER_SCORE_WEIGHTS.reactionsReceived },
-  { id: "aiMentions", label: "KI-Mention (@chatgpt/@grok)", points: PPC_MEMBER_SCORE_WEIGHTS.aiMentions },
-  { id: "pollsCreated", label: "Umfrage erstellt", points: PPC_MEMBER_SCORE_WEIGHTS.pollsCreated },
-  { id: "pollsExtended", label: "Umfrage erweitert", points: PPC_MEMBER_SCORE_WEIGHTS.pollsExtended },
-  { id: "pollVotes", label: "Bei Umfrage abgestimmt", points: PPC_MEMBER_SCORE_WEIGHTS.pollVotes },
-  { id: "taggingCompleted", label: "Tagging abgeschlossen", points: PPC_MEMBER_SCORE_WEIGHTS.taggingCompleted },
-  { id: "usernameChanges", label: "Anzeigename geändert", points: PPC_MEMBER_SCORE_WEIGHTS.usernameChanges },
+  {
+    id: "botsCreated",
+    label: "Bot erstellt",
+    description: "Für jeden neu angelegten Bot in deinem Bot-Menü.",
+    points: PPC_MEMBER_BOT_CREATED_POINTS,
+  },
+  {
+    id: "aiMentions",
+    label: "KI oder Bot erwähnt",
+    description: "Wenn du @chatgpt, @grok oder einen Charakter-Bot pingst.",
+    points: PPC_MEMBER_SCORE_WEIGHTS.aiMentions,
+  },
+  {
+    id: "pollsExtended",
+    label: "Umfrage erweitert",
+    description: "Wenn du einer bestehenden Umfrage neue Optionen hinzufügst.",
+    points: PPC_MEMBER_SCORE_WEIGHTS.pollsExtended,
+  },
+  {
+    id: "messagesCreated",
+    label: "Nachricht erstellt",
+    description: "Für normale Nachrichten, Fragen und Antworten im Chat.",
+    points: PPC_MEMBER_SCORE_WEIGHTS.messagesCreated,
+  },
+  {
+    id: "reactionsReceived",
+    label: "Reaktion erhalten",
+    description: "Wenn andere auf deine Nachricht reagieren.",
+    points: PPC_MEMBER_SCORE_WEIGHTS.reactionsReceived,
+  },
+  {
+    id: "pollsCreated",
+    label: "Umfrage erstellt",
+    description: "Für jede neue Abstimmung, die du startest.",
+    points: PPC_MEMBER_SCORE_WEIGHTS.pollsCreated,
+  },
+  {
+    id: "usernameChanges",
+    label: "Anzeigename geändert",
+    description: "Wenn du deinen sichtbaren Namen änderst.",
+    points: PPC_MEMBER_SCORE_WEIGHTS.usernameChanges,
+  },
+  {
+    id: "reactionsGiven",
+    label: "Reaktion gegeben",
+    description: "Wenn du auf Nachrichten anderer reagierst.",
+    points: PPC_MEMBER_SCORE_WEIGHTS.reactionsGiven,
+  },
+  {
+    id: "pollVotes",
+    label: "Bei Umfrage abgestimmt",
+    description: "Für jede abgegebene Stimme in einer Umfrage.",
+    points: PPC_MEMBER_SCORE_WEIGHTS.pollVotes,
+  },
 ];
 
 const MS_PER_DAY = 24 * 60 * 60 * 1_000;

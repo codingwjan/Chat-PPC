@@ -3,7 +3,13 @@
 
 import { Dialog, DialogBackdrop, DialogPanel, TransitionChild } from "@headlessui/react";
 import { XMarkIcon } from "@heroicons/react/24/outline";
-import { InformationCircleIcon, PhotoIcon, SwatchIcon, WrenchScrewdriverIcon } from "@heroicons/react/20/solid";
+import {
+  InformationCircleIcon,
+  PhotoIcon,
+  SwatchIcon,
+  UserCircleIcon,
+  WrenchScrewdriverIcon,
+} from "@heroicons/react/20/solid";
 import { memo, type ReactNode } from "react";
 import { MemberProgressInline } from "@/components/member-progress-inline";
 import type { MemberProgressDTO } from "@/lib/types";
@@ -17,6 +23,7 @@ interface ChatShellSidebarProps {
   memberHighlight?: boolean;
   onOpenProfileEditor: () => void;
   onOpenDevMenu?: () => void;
+  onOpenBots: () => void;
   onOpenSharedBackground: () => void;
   onOpenMedia: () => void;
   onOpenPointsInfo: () => void;
@@ -75,6 +82,7 @@ function SidebarBody({
   memberHighlight,
   onOpenProfileEditor,
   onOpenDevMenu,
+  onOpenBots,
   onOpenSharedBackground,
   onOpenMedia,
   onOpenPointsInfo,
@@ -102,6 +110,11 @@ function SidebarBody({
           />
         ) : null}
         <SidebarActionButton
+          label="Meine Bots"
+          onClick={onOpenBots}
+          icon={<UserCircleIcon className="size-4 text-slate-500" aria-hidden="true" />}
+        />
+        <SidebarActionButton
           label="Medien"
           onClick={onOpenMedia}
           icon={<PhotoIcon className="size-4 text-slate-500" aria-hidden="true" />}
@@ -121,6 +134,7 @@ function SidebarBody({
       <button
         type="button"
         onClick={onOpenProfileEditor}
+        data-testid="open-profile-editor"
         className={`glass-panel mt-2 flex items-center gap-3 rounded-xl p-3 text-left transition-[filter,background-color] hover:brightness-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-300 ${memberHighlight ? "ppc-score-sidebar-pop" : ""}`}
         aria-label="Eigenes Profil öffnen"
         style={profileButtonGradient ? { backgroundImage: profileButtonGradient } : undefined}
@@ -154,6 +168,7 @@ export const ChatShellSidebar = memo(function ChatShellSidebar({
   memberHighlight,
   onOpenProfileEditor,
   onOpenDevMenu,
+  onOpenBots,
   onOpenSharedBackground,
   onOpenMedia,
   onOpenPointsInfo,
@@ -194,6 +209,7 @@ export const ChatShellSidebar = memo(function ChatShellSidebar({
                 memberHighlight={memberHighlight}
                 onOpenProfileEditor={onOpenProfileEditor}
                 onOpenDevMenu={onOpenDevMenu}
+                onOpenBots={onOpenBots}
                 onOpenSharedBackground={onOpenSharedBackground}
                 onOpenMedia={onOpenMedia}
                 onOpenPointsInfo={onOpenPointsInfo}
@@ -212,6 +228,7 @@ export const ChatShellSidebar = memo(function ChatShellSidebar({
           memberHighlight={memberHighlight}
           onOpenProfileEditor={onOpenProfileEditor}
           onOpenDevMenu={onOpenDevMenu}
+          onOpenBots={onOpenBots}
           onOpenSharedBackground={onOpenSharedBackground}
           onOpenMedia={onOpenMedia}
           onOpenPointsInfo={onOpenPointsInfo}
