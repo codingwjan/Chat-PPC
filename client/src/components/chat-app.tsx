@@ -786,6 +786,7 @@ interface OnlineUsersListProps {
   currentUserId?: string | null;
   currentUsername?: string | null;
   botSlots?: { limit: number; used: number; remaining: number };
+  botSlotsLoaded?: boolean;
   onOpenBotCreator?: () => void;
   onOpenMemberProfile: (user: UserPresenceDTO) => void;
 }
@@ -796,6 +797,7 @@ const OnlineUsersList = memo(function OnlineUsersList({
   currentUserId,
   currentUsername,
   botSlots,
+  botSlotsLoaded,
   onOpenBotCreator,
   onOpenMemberProfile,
 }: OnlineUsersListProps) {
@@ -811,9 +813,12 @@ const OnlineUsersList = memo(function OnlineUsersList({
   const ownBotIds = new Set(ownBots.map((user) => user.clientId));
   const restUsers = users.filter((user) => !ownBotIds.has(user.clientId));
   const remainingBotSlots = Math.max(0, botSlots?.remaining ?? 0);
+  const botSlotsStatusReady = Boolean(botSlotsLoaded);
   const canCreateBot = remainingBotSlots > 0;
   const createBotSubtitle =
-    ownBots.length === 0
+    !botSlotsStatusReady
+      ? "Bot-Slots werden geladen…"
+      : ownBots.length === 0
       ? "Eigenen Charakter anlegen"
       : !canCreateBot
         ? "Bot-Limit erreicht"
@@ -1125,6 +1130,7 @@ export function ChatApp() {
     used: 0,
     remaining: 1,
   });
+  const [botSlotsLoaded, setBotSlotsLoaded] = useState(false);
   const [loadingBots, setLoadingBots] = useState(false);
   const [savingBot, setSavingBot] = useState(false);
   const [deletingBotId, setDeletingBotId] = useState<string | null>(null);
@@ -1558,6 +1564,41 @@ export function ChatApp() {
       cache: "no-store",
     });
   }, [session?.clientId]);
+
+  useEffect(() => {
+    if (!session?.clientId) {
+      setManagedBots([]);
+      setBotSlots({ limit: 1, used: 0, remaining: 1 });
+      setBotSlotsLoaded(false);
+      return;
+    }
+
+    let cancelled = false;
+    setBotSlotsLoaded(false);
+
+    void fetchManagedBots()
+      .then((result) => {
+        if (cancelled) return;
+        setManagedBots(result.items);
+        setBotSlots({
+          limit: result.limit,
+          used: result.used,
+          remaining: result.remaining,
+        });
+      })
+      .catch((botError) => {
+        if (cancelled) return;
+        setError(botError instanceof Error ? botError.message : "Bots konnten nicht geladen werden.");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setBotSlotsLoaded(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fetchManagedBots, session?.clientId]);
 
   const fetchTasteProfileDetailed = useCallback(async (): Promise<TasteProfileDetailedDTO | null> => {
     if (!session?.clientId) return null;
@@ -3772,6 +3813,7 @@ export function ChatApp() {
   async function refreshManagedBots(): Promise<void> {
     if (!session?.clientId) return;
     setLoadingBots(true);
+    setBotSlotsLoaded(false);
     try {
       const result = await fetchManagedBots();
       setManagedBots(result.items);
@@ -3783,6 +3825,7 @@ export function ChatApp() {
     } catch (botError) {
       setError(botError instanceof Error ? botError.message : "Bots konnten nicht geladen werden.");
     } finally {
+      setBotSlotsLoaded(true);
       setLoadingBots(false);
     }
   }
@@ -4566,11 +4609,12 @@ export function ChatApp() {
         currentUserId={session?.id ?? null}
         currentUsername={session?.username ?? null}
         botSlots={botSlots}
+        botSlotsLoaded={botSlotsLoaded}
         onOpenBotCreator={handleOpenBotCreator}
         onOpenMemberProfile={handleOpenSidebarMemberProfile}
       />
     ),
-    [botSlots, handleOpenBotCreator, handleOpenSidebarMemberProfile, session?.id, session?.username, sidebarOnlineUsers],
+    [botSlots, botSlotsLoaded, handleOpenBotCreator, handleOpenSidebarMemberProfile, session?.id, session?.username, sidebarOnlineUsers],
   );
   const botManagerSection = (
     <section
