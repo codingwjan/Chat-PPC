@@ -234,6 +234,17 @@ function ensureLeadingAiReplyTag(draft: string, provider: "chatgpt" | "grok"): s
   return nextDraft;
 }
 
+function generateHandleFromName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 24);
+}
+
 function ensureLeadingMentionTag(draft: string, mentionHandle: string): string {
   const normalizedHandle = mentionHandle.trim().replace(/^@+/, "");
   if (!normalizedHandle) return draft;
@@ -1140,6 +1151,7 @@ export function ChatApp() {
   const [botNameDraft, setBotNameDraft] = useState("");
   const [botProfilePictureDraft, setBotProfilePictureDraft] = useState(getDefaultProfilePicture());
   const [botHandleDraft, setBotHandleDraft] = useState("");
+  const [isBotHandleManuallyEdited, setIsBotHandleManuallyEdited] = useState(false);
   const [botLanguagePreferenceDraft, setBotLanguagePreferenceDraft] = useState<BotLanguagePreference>("all");
   const [botInstructionsDraft, setBotInstructionsDraft] = useState("");
   const [botCatchphrasesDraft, setBotCatchphrasesDraft] = useState("");
@@ -3835,6 +3847,7 @@ export function ChatApp() {
     setBotNameDraft("");
     setBotProfilePictureDraft(getDefaultProfilePicture());
     setBotHandleDraft("");
+    setIsBotHandleManuallyEdited(false);
     setBotLanguagePreferenceDraft("all");
     setBotInstructionsDraft("");
     setBotCatchphrasesDraft("");
@@ -3852,6 +3865,7 @@ export function ChatApp() {
     setBotNameDraft("");
     setBotProfilePictureDraft(getDefaultProfilePicture());
     setBotHandleDraft("");
+    setIsBotHandleManuallyEdited(false);
     setBotLanguagePreferenceDraft("all");
     setBotInstructionsDraft("");
     setBotCatchphrasesDraft("");
@@ -3938,6 +3952,7 @@ export function ChatApp() {
     setBotNameDraft(bot.displayName);
     setBotProfilePictureDraft(bot.profilePicture || getDefaultProfilePicture());
     setBotHandleDraft(bot.mentionHandle);
+    setIsBotHandleManuallyEdited(true);
     setBotLanguagePreferenceDraft(bot.languagePreference);
     setBotInstructionsDraft(bot.instructions);
     setBotCatchphrasesDraft(bot.catchphrases.join("\n"));
@@ -4365,6 +4380,7 @@ export function ChatApp() {
     setBotNameDraft("");
     setBotProfilePictureDraft(getDefaultProfilePicture());
     setBotHandleDraft("");
+    setIsBotHandleManuallyEdited(false);
     setBotInstructionsDraft("");
     setBotCatchphrasesDraft("");
     startUiTransition(() => {
@@ -4751,7 +4767,13 @@ export function ChatApp() {
               name="bot-display-name"
               data-testid="bot-name-input"
               value={botNameDraft}
-              onChange={(event) => setBotNameDraft(event.target.value)}
+              onChange={(event) => {
+                const newName = event.target.value;
+                setBotNameDraft(newName);
+                if (!isBotHandleManuallyEdited) {
+                  setBotHandleDraft(generateHandleFromName(newName));
+                }
+              }}
               placeholder="z. B. Peter Griffin"
               maxLength={40}
               autoComplete="off"
@@ -4770,7 +4792,10 @@ export function ChatApp() {
                 name="bot-handle"
                 data-testid="bot-handle-input"
                 value={botHandleDraft}
-                onChange={(event) => setBotHandleDraft(event.target.value.replace(/^@+/, "").replace(/\s+/g, "-"))}
+                onChange={(event) => {
+                  setBotHandleDraft(event.target.value.replace(/^@+/, "").replace(/\s+/g, "-"));
+                  setIsBotHandleManuallyEdited(true);
+                }}
                 placeholder="peter-griffin"
                 maxLength={24}
                 autoComplete="off"
